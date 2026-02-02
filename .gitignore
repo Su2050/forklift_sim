@@ -1,0 +1,72 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs and databases
+*.log
+*.sql
+*.sqlite
+logs/
+*.db
+
+# Isaac Sim / Isaac Lab specific
+*.usd
+*.usda
+*.usdc
+**/nucleus_cache/
+**/cache/
+**/.thumbs/
+
+# Exclude large framework directories (should be installed separately)
+IsaacLab/
+IsaacSim/
+
+# Training outputs
+logs/
+*.pt
+*.onnx
+*.pth
+
+# Backup and temp files
+*.bak
+*.backup
+*.tmp
+*.zip
+.zip
+
+# System files
+.Trash-*
+.directory
