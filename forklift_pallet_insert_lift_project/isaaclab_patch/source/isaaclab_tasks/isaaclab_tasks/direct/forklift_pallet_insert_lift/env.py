@@ -105,7 +105,7 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self._hold_counter = torch.zeros((self.num_envs,), dtype=torch.int32, device=self.device)
 
         # derived constants
-        self._pallet_front_x = self.cfg.pallet_cfg.init_state.pos[0] + self.cfg.pallet_depth_m * 0.5
+        self._pallet_front_x = self.cfg.pallet_cfg.init_state.pos[0] - self.cfg.pallet_depth_m * 0.5
         self._insert_thresh = self.cfg.insert_fraction * self.cfg.pallet_depth_m
         # how many control steps to hold success
         ctrl_dt = self.cfg.sim.dt * self.cfg.decimation

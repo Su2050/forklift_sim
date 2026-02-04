@@ -33,7 +33,7 @@ cd /home/uniubi/projects/forklift_sim/IsaacLab
 ./isaaclab.sh -p scripts/reinforcement_learning/rsl_rl/play.py \
   --task Isaac-Forklift-PalletInsertLift-Direct-v0 \
   --num_envs 1 \
-  --checkpoint "/home/uniubi/projects/forklift_sim/IsaacLab/logs/rsl_rl/forklift_pallet_insert_lift/2026-02-03_00-07-04_exp_reward_v2/model_1999.pt" \
+  --checkpoint "/home/uniubi/projects/forklift_sim/IsaacLab/logs/rsl_rl/forklift_pallet_insert_lift/2026-02-04_07-37-47_exp_insert_norm_fix_v2/model_1999.pt" \
   --headless \
   --video --video_length 600
 # 注意: video_length 的单位是步数(steps)，不是秒数

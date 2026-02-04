@@ -97,6 +97,77 @@ nohup ./isaaclab.sh scripts/reinforcement_learning/rsl_rl/train.py \
 
 ---
 
+### 4. 实现更鲁棒的 insert_norm 计算方案（托盘坐标系）
+
+**任务描述**：
+- 当前已修复 `insert_norm` 的几何定义方向错误（最小修复方案）
+- 实现更鲁棒的方案：在托盘坐标系中计算插入深度
+- 支持托盘位置和朝向的随机化
+
+**当前状态**：
+- ✅ 已完成最小修复：将 `_pallet_front_x` 计算从 `+ 0.5*depth` 改为 `- 0.5*depth`
+- ⏳ 待实现：托盘坐标系计算方案
+
+**问题背景**：
+- 当前实现假设托盘固定在 `(0, 0, 0)` 且朝向固定
+- 如果未来需要随机化托盘位置和 yaw，当前的世界坐标系计算会失效
+- 需要在托盘本地坐标系中计算插入深度
+
+**修复方案**（更鲁棒）：
+
+在 `_get_observations()` 和 `_get_rewards()` 中，将插入深度计算改为托盘坐标系：
+
+```python
+# 当前实现（世界坐标系，仅适用于固定托盘）
+tip = self._compute_fork_tip()
+insert_depth = torch.clamp(tip[:, 0] - self._pallet_front_x, min=0.0)
+insert_norm = (insert_depth / (self.cfg.pallet_depth_m + 1e-6)).unsqueeze(-1)
+
+# 改进实现（托盘坐标系，支持位置和朝向随机化）
+tip = self._compute_fork_tip()  # (N, 3) in world frame
+pallet_pos = self.pallet.data.root_pos_w  # (N, 3)
+pallet_yaw = _quat_to_yaw(self.pallet.data.root_quat_w)  # (N,)
+
+# 将叉尖位置转换到托盘坐标系
+tip_rel = tip[:, :2] - pallet_pos[:, :2]  # (N, 2) relative position in world XY
+cos_yaw = torch.cos(-pallet_yaw)  # 旋转到托盘坐标系
+sin_yaw = torch.sin(-pallet_yaw)
+tip_x_pallet = cos_yaw * tip_rel[:, 0] - sin_yaw * tip_rel[:, 1]  # (N,)
+
+# 托盘近端面在托盘坐标系中是 x = -depth/2
+pallet_near_face_x = -self.cfg.pallet_depth_m * 0.5
+insert_depth = torch.clamp(tip_x_pallet - pallet_near_face_x, min=0.0, max=self.cfg.pallet_depth_m)
+insert_norm = (insert_depth / (self.cfg.pallet_depth_m + 1e-6)).unsqueeze(-1)
+```
+
+**优势**：
+- ✅ 支持托盘位置随机化（`pallet_pos` 可以是任意值）
+- ✅ 支持托盘朝向随机化（`pallet_yaw` 可以是任意值）
+- ✅ 几何意义更清晰：在托盘本地坐标系中计算
+- ✅ 更符合物理直觉：插入深度是相对于托盘本身的
+
+**相关文件**：
+- `forklift_pallet_insert_lift_project/isaaclab_patch/source/isaaclab_tasks/isaaclab_tasks/direct/forklift_pallet_insert_lift/env.py`
+  - `_get_observations()` 方法（第234-237行）
+  - `_get_rewards()` 方法（第255-256行）
+  - 可以移除 `__init__` 中的 `self._pallet_front_x`（不再需要）
+
+**实施步骤**：
+1. 在 `_get_observations()` 中实现托盘坐标系计算
+2. 在 `_get_rewards()` 中同步更新计算逻辑
+3. 移除 `__init__` 中的 `self._pallet_front_x` 初始化（可选）
+4. 测试验证：确保与当前固定托盘场景结果一致
+5. 未来扩展：在 `_reset_idx()` 中添加托盘位置和朝向随机化
+
+**验证方法**：
+- 运行当前训练，确认修复后的效果
+- 对比最小修复方案和鲁棒方案的计算结果（固定托盘场景下应该一致）
+- 如果未来添加托盘随机化，验证鲁棒方案仍然有效
+
+**状态**：⏳ 待开始（可选改进，优先级较低）
+
+---
+
 ## 任务依赖关系
 
 ```
@@ -116,6 +187,7 @@ nohup ./isaaclab.sh scripts/reinforcement_learning/rsl_rl/train.py \
 ## 更新日志
 
 - 2026-02-03: 创建待办事项清单
+- 2026-02-03: 添加任务 4 - 实现更鲁棒的 insert_norm 计算方案（托盘坐标系）
 
 ---
 
