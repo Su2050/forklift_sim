@@ -133,12 +133,18 @@ class ForkliftKeyboard(Se2Keyboard):
         )
 
     def _on_keyboard_event(self, event, *args, **kwargs):
+        # 调试：打印所有按键事件
+        if event.type == carb.input.KeyboardEventType.KEY_PRESS:
+            print(f"[DEBUG] KEY_PRESS: {event.input.name}")
+        
         # 处理升降键 R/F（避免与Isaac Sim相机控制Q/E冲突）
         if event.type == carb.input.KeyboardEventType.KEY_PRESS:
             if event.input.name == "R":
                 self._lift_up_pressed = True
+                print(f"[DEBUG] R pressed, lift_up={self._lift_up_pressed}")
             elif event.input.name == "F":
                 self._lift_down_pressed = True
+                print(f"[DEBUG] F pressed, lift_down={self._lift_down_pressed}")
             elif event.input.name == "A":
                 self._steer_left_pressed = True
             elif event.input.name == "D":
@@ -1179,7 +1185,7 @@ class ForkliftVerification:
             return
 
         # 位置设置已在 initialize_environment() 中统一处理
-        print("[INFO] 按 R 键可移动到托盘附近")
+        print("[INFO] 按 T 键可传送到托盘附近")
 
         keyboard_cfg = Se2KeyboardCfg(
             v_x_sensitivity=0.5,
@@ -1191,13 +1197,13 @@ class ForkliftVerification:
         print("\n键位说明:")
         print("  W/S: 前进/后退")
         print("  A/D: 左转/右转")
-        print("  Q/E: 升降上升/下降")
+        print("  R/F: 货叉上升/下降 (R=Raise, F=Fall)")
         print("  SPACE: 停止所有动作")
-        print("  R: 重置到理想位置")
+        print("  T: 传送到理想位置 (Teleport)")
         print("  P: 打印当前状态")
         print("  ESC: 退出")
 
-        keyboard.add_callback("R", lambda: self.set_robot_ideal_position(distance_from_front=0.5))
+        keyboard.add_callback("T", lambda: self.set_robot_ideal_position(distance_from_front=0.5))
         keyboard.add_callback("P", self.print_current_status)
         keyboard.add_callback("ESCAPE", simulation_app.close)
 
@@ -1212,6 +1218,9 @@ class ForkliftVerification:
                 continue
 
             cmd = keyboard.advance()
+            # 调试：打印 lift 命令
+            if abs(cmd[2].item()) > 0.01:
+                print(f"[DEBUG] cmd: drive={cmd[0].item():.2f}, steer={cmd[1].item():.2f}, lift={cmd[2].item():.2f}")
             self.manual_control(drive=cmd[0].item(), steer=cmd[1].item(), lift=cmd[2].item(), steps=1)
 
             if frame_count % 30 == 0:

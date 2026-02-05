@@ -6,6 +6,86 @@
 
 ---
 
+## 🔴 当前阻塞问题：lift_joint PhysX Drive 不响应
+
+**更新时间**: 2026-02-05 21:12
+
+### 问题现象
+
+- 按 R 键发送举升命令，`set_joint_position_target` 被正确调用
+- 所有参数格式都正确（已验证）
+- **但关节位置完全不动**：`pos_before=0.00000, pos_after=0.00000`
+
+### 最新进展（logs24-logs26）
+
+- PhysX 层驱动已确认正常：`drive_type=1, dof_type=1, motion=1`
+- PhysX 收到目标：`dof_pos_target=0.01667`
+- 施加一次性力探针（2000N）也生效：`dof_force=2000.0`
+- **但 DOF 位置仍为 0**，速度接近 0 → 关节被锁死/绑定刚体异常的可能性更高
+
+### 已排除的原因
+
+| 检查项 | 状态 | 结果 |
+|--------|------|------|
+| `lift_id` 类型 | ✅ | `int`，值为 4 |
+| `target_tensor` 形状 | ✅ | `torch.Size([1, 1])`，值为 `0.0167` |
+| `joint_ids_list` 格式 | ✅ | `[4]`，元素类型为 `int` |
+| `robot.joint_names` | ✅ | 包含 `lift_joint`，索引正确 |
+
+### 配置不一致问题
+
+```
+USD DriveAPI:           stiffness=100000, damping=10000, maxForce=inf
+Isaac Lab Actuator:     stiffness=5000,   damping=1000
+```
+
+- Isaac Lab 可能用自己的配置覆盖了 USD，但可能没有正确传递给 PhysX
+
+### 诊断日志
+
+```
+[DEBUG] set_joint_position_target 调用详情:
+  target_tensor shape: torch.Size([1, 1])
+  target_tensor value: tensor([[0.0167]], device='cuda:0')
+  joint_ids_list: [4]
+  robot.num_joints: 7
+  robot.joint_names: ['left_front_wheel_joint', 'right_front_wheel_joint', 
+                      'left_rotator_joint', 'right_rotator_joint', 
+                      'lift_joint', 'left_back_wheel_joint', 'right_back_wheel_joint']
+
+[DEBUG] step=1471, action=0.500, target=0.01667, pos_before=0.00000, pos_after=0.00000
+```
+
+### 当前尝试方向
+
+1. **直接使用 PhysX ArticulationView API** - 绕过 Isaac Lab 封装
+   ```python
+   env_indices = torch.arange(full_targets.shape[0], device=full_targets.device, dtype=torch.int32)
+   self.robot.root_physx_view.set_dof_position_targets(full_targets, env_indices)
+   ```
+
+2. **打印完整链路 TRACE** - 输入→目标→缓存→PhysX 状态全量日志
+
+3. **新增 body0/body1 刚体诊断（待验证）**
+   - 检查 lift_joint 绑定的 body0/body1 是否缺少 RigidBodyAPI/被设为 kinematic
+
+### 相关文件
+
+- `IsaacLab/source/isaaclab_tasks/isaaclab_tasks/direct/forklift_pallet_insert_lift/env.py`
+- `IsaacLab/source/isaaclab_tasks/isaaclab_tasks/direct/forklift_pallet_insert_lift/env_cfg.py`
+- 诊断指南：`docs/learning_guiding/isaac_asset_diagnostics.md`
+
+### 相关日志
+
+- `docs/logs/logs17` - lift_joint DriveAPI 诊断
+- `docs/logs/logs18` - R 键响应测试
+- `docs/logs/logs19` - 详细参数调试
+- `docs/logs/logs24` - PhysX DOF 参数确认
+- `docs/logs/logs25` - TRACE 链路输出 + 力探针
+- `docs/logs/logs26` - 力探针有效但 DOF 仍不动
+
+---
+
 ## 任务列表
 
 ### 0. 修复举升穿透问题 ⚠️ 最高优先级
@@ -296,7 +376,9 @@ tensorboard --logdir=/home/uniubi/projects/forklift_sim/IsaacLab/logs/rsl_rl --p
 - 2026-02-05: 添加任务 0 - 修复举升穿透问题（最高优先级）
 - 2026-02-05: 添加任务 5 - 集成到强化学习训练环境
 - 2026-02-05: 创建诊断报告 `docs/diagnostic_reports/pallet_physics_optimization_2026-02-05.md`
+- 2026-02-05: 创建诊断指南 `docs/learning_guiding/isaac_asset_diagnostics.md`
+- 2026-02-05: **新增阻塞问题**：lift_joint PhysX Drive 不响应 `set_joint_position_target`
 
 ---
 
-**最后更新**: 2026-02-05
+**最后更新**: 2026-02-05 20:45
