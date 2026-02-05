@@ -43,8 +43,9 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     forklift_usd_path: str = f"{ISAAC_NUCLEUS_DIR}/Robots/IsaacSim/ForkliftC/forklift_c.usd"
     pallet_usd_path: str = f"{ISAAC_NUCLEUS_DIR}/Props/Pallet/pallet.usd"
 
-    # pallet geometry assumptions (Euro pallet default)
-    pallet_depth_m: float = 1.2
+    # pallet geometry assumptions (Euro pallet default, scaled 4x)
+    # 原始深度 1.2m * 4.0 = 4.8m
+    pallet_depth_m: float = 4.8
 
     # KPI
     insert_fraction: float = 2.0 / 3.0
@@ -93,7 +94,7 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
             activate_contact_sensors=False,
         ),
         init_state=ArticulationCfg.InitialStateCfg(
-            pos=(-2.0, 0.0, 0.03),
+            pos=(-6.0, 0.0, 0.03),  # 后移到 X=-6m，与放大后的托盘保持距离
             rot=(1.0, 0.0, 0.0, 0.0),
             joint_pos={
                 "left_front_wheel_joint": 0.0,
@@ -133,27 +134,34 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
             "lift": ImplicitActuatorCfg(
                 joint_names_expr=["lift_joint"],
                 velocity_limit=1.0,
-                effort_limit=500.0,
-                stiffness=2000.0,
-                damping=200.0,
+                effort_limit=5000.0,   # 5000 N，确保能举起托盘
+                stiffness=0.0,         # 速度控制模式，stiffness 必须为 0
+                damping=1000.0,        # 阻尼控制速度响应
             ),
         },
     )
 
-    # pallet cfg (kinematic fixed pallet for stable first learning)
+    # pallet cfg (dynamic rigid body for realistic physics interaction)
+    # 修改说明：
+    # 1. 从 kinematic 改为动态刚体，使托盘可以被叉车推动和举起
+    # 2. 添加 scale=4.0 使托盘放大到与叉车货叉兼容的尺寸
+    #    - 原始托盘插入孔宽度 ~228mm，货叉宽度 ~394mm
+    #    - 放大 4x 后插入孔宽度 ~912mm，足够容纳货叉
     pallet_cfg: RigidObjectCfg = RigidObjectCfg(
         prim_path="/World/envs/env_.*/Pallet",
         spawn=sim_utils.UsdFileCfg(
             usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/Pallet/pallet.usd",
+            scale=(4.0, 4.0, 4.0),  # 放大托盘使其与叉车货叉兼容
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 rigid_body_enabled=True,
-                kinematic_enabled=True,
-                disable_gravity=True,
+                kinematic_enabled=False,  # 改为动态刚体，可被推动/举起
+                disable_gravity=False,    # 恢复重力，托盘会落在地面上
                 max_depenetration_velocity=1.0,
             ),
+            mass_props=sim_utils.MassPropertiesCfg(mass=30.0),  # 空托盘约 20-30 kg
         ),
         init_state=RigidObjectCfg.InitialStateCfg(
-            pos=(0.0, 0.0, 0.0),
+            pos=(0.0, 0.0, 0.30),  # 抬高到与货叉高度对齐（放大后托盘更高）
             rot=(1.0, 0.0, 0.0, 0.0),
         ),
     )

@@ -35,6 +35,69 @@ def _yaw_to_mat2(yaw: torch.Tensor) -> torch.Tensor:
     )
 
 
+def _force_pallet_dynamic(stage, pallet_prim_path: str):
+    """确保托盘是动态刚体（不是 kinematic）
+    
+    遍历托盘 prim 及其所有子 prim，将所有 RigidBodyAPI 设置为非 kinematic。
+    """
+    from pxr import UsdPhysics
+    
+    root_prim = stage.GetPrimAtPath(pallet_prim_path)
+    if not root_prim.IsValid():
+        print(f"[警告] 找不到托盘 prim: {pallet_prim_path}")
+        return
+    
+    # 遍历托盘及其所有子 prim
+    prims_to_process = [root_prim]
+    for prim in root_prim.GetDescendants():
+        prims_to_process.append(prim)
+    
+    for prim in prims_to_process:
+        if prim.HasAPI(UsdPhysics.RigidBodyAPI):
+            rb_api = UsdPhysics.RigidBodyAPI(prim)
+            # 确保是动态刚体
+            rb_api.GetRigidBodyEnabledAttr().Set(True)
+            rb_api.GetKinematicEnabledAttr().Set(False)
+            print(f"[信息] 已设置 {prim.GetPath()} 为动态刚体")
+
+
+def _force_pallet_convex_decomposition(stage, pallet_prim_path: str):
+    """为托盘设置凸分解碰撞体，使 pocket 可以被插入
+    
+    遍历托盘 prim 及其所有子 prim，为所有带有碰撞体的 prim 设置凸分解。
+    """
+    from pxr import UsdPhysics, PhysxSchema, UsdGeom
+    
+    root_prim = stage.GetPrimAtPath(pallet_prim_path)
+    if not root_prim.IsValid():
+        print(f"[警告] 找不到托盘 prim: {pallet_prim_path}")
+        return
+    
+    # 遍历托盘及其所有子 prim
+    prims_to_process = [root_prim]
+    for prim in root_prim.GetDescendants():
+        prims_to_process.append(prim)
+    
+    applied_count = 0
+    for prim in prims_to_process:
+        # 检查是否有 Mesh 几何体或已有碰撞 API
+        has_mesh = prim.IsA(UsdGeom.Mesh)
+        has_collision = prim.HasAPI(UsdPhysics.CollisionAPI)
+        
+        if has_mesh or has_collision:
+            # 设置碰撞近似为凸分解
+            mesh_collision_api = UsdPhysics.MeshCollisionAPI.Apply(prim)
+            mesh_collision_api.GetApproximationAttr().Set("convexDecomposition")
+            
+            # 凸分解参数
+            convex_api = PhysxSchema.PhysxConvexDecompositionCollisionAPI.Apply(prim)
+            convex_api.GetMaxConvexHullsAttr().Set(32)   # 最大凸体数
+            convex_api.GetHullVertexLimitAttr().Set(64)  # 每个凸体最大顶点数
+            applied_count += 1
+    
+    print(f"[信息] 凸分解已应用到 {applied_count} 个 prim")
+
+
 class ForkliftPalletInsertLiftEnv(DirectRLEnv):
     cfg: ForkliftPalletInsertLiftEnvCfg
 
@@ -48,6 +111,9 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self._front_wheel_ids, _ = self.robot.find_joints(["left_front_wheel_joint", "right_front_wheel_joint"], preserve_order=True)
         self._back_wheel_ids, _ = self.robot.find_joints(["left_back_wheel_joint", "right_back_wheel_joint"], preserve_order=True)
         self._rotator_ids, _ = self.robot.find_joints(["left_rotator_joint", "right_rotator_joint"], preserve_order=True)
+        # separate left/right rotator IDs for order-independent steering
+        self._left_rotator_id, _ = self.robot.find_joints(["left_rotator_joint"], preserve_order=True)
+        self._right_rotator_id, _ = self.robot.find_joints(["right_rotator_joint"], preserve_order=True)
         self._lift_id, _ = self.robot.find_joints(["lift_joint"], preserve_order=True)
         self._lift_id = self._lift_id[0]
 
@@ -68,6 +134,131 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self._joint_pos = self.robot.data.joint_pos
         self._joint_vel = self.robot.data.joint_vel
 
+    def _setup_pallet_physics(self):
+        """在环境克隆前，强制设置托盘物理属性
+        
+        必须在 clone_environments() 之前调用，确保模板环境的设置能被克隆继承。
+        """
+        from pxr import UsdPhysics, PhysxSchema, UsdGeom
+        
+        stage = self.sim.stage
+
+        # 诊断：修改前的 USD 状态（只看 env_0）
+        diag_pallet_path = self.cfg.pallet_cfg.prim_path.replace("env_.*", "env_0")
+        self._log_pallet_usd(stage, diag_pallet_path, label="修改前")
+        self._log_pallet_physx(label="修改前")
+        
+        # 只修改模板环境（env_0），让克隆继承
+        pallet_path = self.cfg.pallet_cfg.prim_path.replace("env_.*", "env_0")
+        root_prim = stage.GetPrimAtPath(pallet_path)
+        if not root_prim.IsValid():
+            print(f"[警告] 找不到托盘 prim: {pallet_path}")
+            return
+
+        # 遍历托盘及其所有子 prim
+        prims_to_process = [root_prim]
+        for prim in root_prim.GetDescendants():
+            prims_to_process.append(prim)
+            
+        for prim in prims_to_process:
+            # 1. 强制设置为动态刚体
+            if prim.HasAPI(UsdPhysics.RigidBodyAPI):
+                rb_api = UsdPhysics.RigidBodyAPI(prim)
+                rb_api.GetRigidBodyEnabledAttr().Set(True)
+                rb_api.GetKinematicEnabledAttr().Set(False)
+                print(f"[信息] 已设置 {prim.GetPath()} 为动态刚体")
+            
+            # 2. 设置凸分解碰撞体
+            has_mesh = prim.IsA(UsdGeom.Mesh)
+            has_collision = prim.HasAPI(UsdPhysics.CollisionAPI)
+            
+            if has_mesh or has_collision:
+                mesh_collision_api = UsdPhysics.MeshCollisionAPI.Apply(prim)
+                mesh_collision_api.GetApproximationAttr().Set("convexDecomposition")
+                
+                convex_api = PhysxSchema.PhysxConvexDecompositionCollisionAPI.Apply(prim)
+                convex_api.GetMaxConvexHullsAttr().Set(32)
+                convex_api.GetHullVertexLimitAttr().Set(64)
+        
+        print("[信息] 托盘物理属性已设置完成（模板环境）")
+        # 诊断：修改后的 USD 状态（只看 env_0）
+        self._log_pallet_usd(stage, diag_pallet_path, label="修改后")
+        self._log_pallet_physx(label="修改后")
+
+    def _log_pallet_usd(self, stage, pallet_path: str, label: str):
+        """打印托盘 USD 物理属性诊断信息（仅用于排查问题）。"""
+        from pxr import UsdPhysics, UsdGeom
+
+        root_prim = stage.GetPrimAtPath(pallet_path)
+        if not root_prim.IsValid():
+            print(f"[诊断] {label} 找不到托盘 prim: {pallet_path}")
+            return
+
+        prims_to_process = [root_prim]
+        for prim in root_prim.GetDescendants():
+            prims_to_process.append(prim)
+
+        print("\n" + "=" * 60)
+        print(f"[诊断] {label} 托盘 USD 状态: {pallet_path}")
+        print(f"[诊断] prim 数量: {len(prims_to_process)}")
+
+        rigid_body_count = 0
+        collision_count = 0
+
+        for prim in prims_to_process:
+            prim_path = prim.GetPath()
+            prim_type = prim.GetTypeName()
+
+            if prim.HasAPI(UsdPhysics.RigidBodyAPI):
+                rb_api = UsdPhysics.RigidBodyAPI(prim)
+                rb_enabled = rb_api.GetRigidBodyEnabledAttr().Get()
+                kinematic = rb_api.GetKinematicEnabledAttr().Get()
+                print(
+                    f"[诊断] RigidBody: {prim_path} type={prim_type} "
+                    f"enabled={rb_enabled} kinematic={kinematic}"
+                )
+                rigid_body_count += 1
+
+            has_collision = prim.HasAPI(UsdPhysics.CollisionAPI)
+            has_mesh = prim.IsA(UsdGeom.Mesh)
+            if has_collision or has_mesh:
+                approx = None
+                if prim.HasAPI(UsdPhysics.MeshCollisionAPI):
+                    mesh_api = UsdPhysics.MeshCollisionAPI(prim)
+                    approx = mesh_api.GetApproximationAttr().Get()
+                print(
+                    f"[诊断] Collision: {prim_path} type={prim_type} "
+                    f"collision_api={has_collision} mesh={has_mesh} approx={approx}"
+                )
+                collision_count += 1
+
+        if rigid_body_count == 0:
+            print("[诊断] 未发现 RigidBodyAPI，托盘可能没有刚体属性")
+
+        print(f"[诊断] RigidBody 数量: {rigid_body_count}")
+        print(f"[诊断] Collision/Mesh 数量: {collision_count}")
+        print("=" * 60 + "\n")
+
+    def _log_pallet_physx(self, label: str):
+        """打印 PhysX 运行时视图的基本信息（可用性诊断）。"""
+        if not hasattr(self, "pallet"):
+            return
+        if not hasattr(self.pallet, "root_physx_view"):
+            print(f"[诊断] {label} PhysX view 不可用（root_physx_view 缺失）")
+            return
+
+        view = self.pallet.root_physx_view
+        count = getattr(view, "count", None)
+        print(f"[诊断] {label} PhysX view 已初始化, count={count}")
+        if hasattr(view, "get_kinematic_enabled"):
+            try:
+                kin = view.get_kinematic_enabled()
+                print(f"[诊断] {label} PhysX kinematic: {kin}")
+            except Exception as exc:
+                print(f"[诊断] {label} PhysX kinematic 读取失败: {exc}")
+        else:
+            print(f"[诊断] {label} PhysX 无直接 kinematic 读取接口")
+
     # ---------------------------
     # Scene setup
     # ---------------------------
@@ -75,6 +266,9 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         # assets
         self.robot = Articulation(self.cfg.robot_cfg)
         self.pallet = RigidObject(self.cfg.pallet_cfg)
+
+        # 在克隆之前修改模板环境（env_0）的托盘物理属性
+        self._setup_pallet_physics()
 
         # ground
         spawn_ground_plane(prim_path="/World/ground", cfg=self.cfg.ground_cfg)
@@ -90,6 +284,8 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         # add to scene
         self.scene.articulations["robot"] = self.robot
         self.scene.rigid_objects["pallet"] = self.pallet
+
+        # 注意：托盘物理属性在 _setup_scene() 中 clone 之前设置
 
         # lights
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
@@ -119,8 +315,12 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         # back wheels follow (optional)
         self.robot.set_joint_velocity_target(drive.unsqueeze(-1).repeat(1, len(self._back_wheel_ids)), joint_ids=self._back_wheel_ids)
 
-        # steering: position targets (symmetric)
-        self.robot.set_joint_position_target(steer.unsqueeze(-1).repeat(1, len(self._rotator_ids)), joint_ids=self._rotator_ids)
+        # steering: position targets by joint name (order-independent)
+        # left rotator needs opposite sign due to mirrored joint axis in USD
+        steer_left = -steer
+        steer_right = steer
+        self.robot.set_joint_position_target(steer_left.unsqueeze(-1), joint_ids=self._left_rotator_id)
+        self.robot.set_joint_position_target(steer_right.unsqueeze(-1), joint_ids=self._right_rotator_id)
 
         # lift: velocity target
         self.robot.set_joint_velocity_target(lift_v.unsqueeze(-1), joint_ids=[self._lift_id])
