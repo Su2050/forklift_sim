@@ -46,17 +46,15 @@ def _force_pallet_dynamic(stage, pallet_prim_path: str):
     
     遍历托盘 prim 及其所有子 prim，将所有 RigidBodyAPI 设置为非 kinematic。
     """
-    from pxr import UsdPhysics
+    from pxr import Usd, UsdPhysics
     
     root_prim = stage.GetPrimAtPath(pallet_prim_path)
     if not root_prim.IsValid():
         print(f"[警告] 找不到托盘 prim: {pallet_prim_path}")
         return
     
-    # 遍历托盘及其所有子 prim
-    prims_to_process = [root_prim]
-    for prim in root_prim.GetDescendants():
-        prims_to_process.append(prim)
+    # 遍历托盘及其所有子 prim（使用 Usd.PrimRange 兼容所有 USD 版本）
+    prims_to_process = list(Usd.PrimRange(root_prim))
     
     for prim in prims_to_process:
         if prim.HasAPI(UsdPhysics.RigidBodyAPI):
@@ -72,17 +70,15 @@ def _force_pallet_convex_decomposition(stage, pallet_prim_path: str):
     
     遍历托盘 prim 及其所有子 prim，为所有带有碰撞体的 prim 设置凸分解。
     """
-    from pxr import UsdPhysics, PhysxSchema, UsdGeom
+    from pxr import Usd, UsdPhysics, PhysxSchema, UsdGeom
     
     root_prim = stage.GetPrimAtPath(pallet_prim_path)
     if not root_prim.IsValid():
         print(f"[警告] 找不到托盘 prim: {pallet_prim_path}")
         return
     
-    # 遍历托盘及其所有子 prim
-    prims_to_process = [root_prim]
-    for prim in root_prim.GetDescendants():
-        prims_to_process.append(prim)
+    # 遍历托盘及其所有子 prim（使用 Usd.PrimRange 兼容所有 USD 版本）
+    prims_to_process = list(Usd.PrimRange(root_prim))
     
     applied_count = 0
     for prim in prims_to_process:
@@ -123,35 +119,234 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self._lift_id, _ = self.robot.find_joints(["lift_joint"], preserve_order=True)
         self._lift_id = self._lift_id[0]
 
-        # buffers
+        # ---- 基础缓存 ----
         self.actions = torch.zeros((self.num_envs, self.cfg.action_space), device=self.device)
         self._last_insert_depth = torch.zeros((self.num_envs,), device=self.device)
         self._fork_tip_z0 = torch.zeros((self.num_envs,), device=self.device)
         self._hold_counter = torch.zeros((self.num_envs,), dtype=torch.int32, device=self.device)
-        
-        # S1.0g: 增量奖励缓存变量
+        self._lift_pos_target = torch.zeros((self.num_envs,), device=self.device)
+
+        # ---- S1.0h: 增量奖励缓存 ----
         self._is_first_step = torch.ones((self.num_envs,), dtype=torch.bool, device=self.device)
         self._last_E_align = torch.zeros((self.num_envs,), device=self.device)
         self._last_dist_front = torch.zeros((self.num_envs,), device=self.device)
         self._last_lift_pos = torch.zeros((self.num_envs,), device=self.device)
 
-        # derived constants
-        self._pallet_front_x = self.cfg.pallet_cfg.init_state.pos[0] + self.cfg.pallet_depth_m * 0.5
+        # ---- S1.0h: 势函数 shaping 缓存（防止奖励泵漏洞） ----
+        # Phi_insert = k_insert * w_ready * insert_norm
+        # Phi_lift   = k_lift   * w_lift  * lift_height
+        # r = gamma * Phi_t - Phi_{t-1}  →  后退/下降会扣分，循环刷分无效
+        self._last_Phi_insert = torch.zeros((self.num_envs,), device=self.device)
+        self._last_Phi_lift = torch.zeros((self.num_envs,), device=self.device)
+
+        # ---- 派生常量 ----
+        # S1.0h 修复：符号 + → -
+        # _pallet_front_x 指向托盘 pocket 开口（近端面，-X 侧），不是远端面
+        # 叉车从 -X 方向接近，insert_depth = tip_x - _pallet_front_x > 0 表示已插入
+        self._pallet_front_x = self.cfg.pallet_cfg.init_state.pos[0] - self.cfg.pallet_depth_m * 0.5
         self._insert_thresh = self.cfg.insert_fraction * self.cfg.pallet_depth_m
-        # how many control steps to hold success
+        # 成功判定需要的 hold 步数
         ctrl_dt = self.cfg.sim.dt * self.cfg.decimation
         self._hold_steps = max(1, int(self.cfg.hold_time_s / ctrl_dt))
 
-        # convenience references to data tensors
-        self._joint_pos = self.robot.data.joint_pos
-        self._joint_vel = self.robot.data.joint_vel
+        # 便捷引用（从 PhysX view 手动刷新，因为 robot.data.joint_pos 在
+        # Fabric clone 失败时不会被 scene.update() 刷新——所有值恒为 0）
+        num_joints = len(self.robot.joint_names)
+        self._joint_pos = torch.zeros((self.num_envs, num_joints), device=self.device)
+        self._joint_vel = torch.zeros((self.num_envs, num_joints), device=self.device)
+
+        # ---- fork tip 运动学偏移量（从 USD mesh 测量或回退到默认值） ----
+        # body_pos_w 在 Fabric clone 失败或 body frame origin 重合时无法区分各 link，
+        # 因此使用 root_pos + yaw-旋转的固定偏移 + lift_joint_pos 来估算 fork tip。
+        self._fork_forward_offset, self._fork_z_base = self._measure_fork_offset_from_usd()
+
+        # 注：_fix_lift_joint_drive() 已移到 _setup_scene() 中 clone_environments() 之前调用，
+        # 确保 PhysX 在 sim.reset() 时 bake 到正确的 DriveAPI 参数（stiffness=200000, 位置控制）。
+
+    def _fix_lift_joint_drive(self):
+        """覆盖 lift_joint 的 USD DriveAPI 参数为位置控制模式。
+
+        forklift_c.usd 原始 DriveAPI 设置了 stiffness=100000, damping=10000。
+        Isaac Lab 的 ImplicitActuatorCfg 会在 sim.reset() 时覆盖 PhysX drive 参数，
+        但为确保 clone 前 USD stage 上的值也一致（双保险），这里直接修改。
+
+        logs32 验证可行的参数组合：stiffness=200000, damping=10000, maxForce=50000。
+        修改必须在 clone_environments() 之前（模板环境），clone 后自动继承。
+        """
+        from pxr import Usd, UsdPhysics
+
+        try:
+            stage = self.sim.stage
+            robot_prim_path = self.cfg.robot_cfg.prim_path.replace("env_.*", "env_0")
+            robot_prim = stage.GetPrimAtPath(robot_prim_path)
+            if not robot_prim.IsValid():
+                print("[lift_drive] 无法找到 robot prim，跳过")
+                return
+
+            for prim in Usd.PrimRange(robot_prim):
+                if "lift" not in prim.GetName().lower():
+                    continue
+
+                # 检查 linear DriveAPI（prismatic joint）
+                drive_api = UsdPhysics.DriveAPI.Get(prim, "linear")
+                if not drive_api:
+                    continue
+
+                # 原始值
+                old_stiff = drive_api.GetStiffnessAttr().Get() if drive_api.GetStiffnessAttr() else "N/A"
+                old_damp = drive_api.GetDampingAttr().Get() if drive_api.GetDampingAttr() else "N/A"
+                old_force = drive_api.GetMaxForceAttr().Get() if drive_api.GetMaxForceAttr() else "N/A"
+
+                # 覆盖为位置控制模式（logs32 验证值）
+                drive_api.GetStiffnessAttr().Set(200000.0)    # 位置控制刚度
+                drive_api.GetDampingAttr().Set(10000.0)       # 阻尼
+                drive_api.GetMaxForceAttr().Set(50000.0)      # 最大力 50kN
+
+                # 新值
+                new_stiff = drive_api.GetStiffnessAttr().Get()
+                new_damp = drive_api.GetDampingAttr().Get()
+                new_force = drive_api.GetMaxForceAttr().Get()
+
+                print(f"[lift_drive] 已覆盖 {prim.GetPath()} DriveAPI(linear):")
+                print(f"  stiffness: {old_stiff} → {new_stiff}")
+                print(f"  damping:   {old_damp} → {new_damp}")
+                print(f"  maxForce:  {old_force} → {new_force}")
+                return
+
+            print("[lift_drive] 未找到 lift joint DriveAPI")
+        except Exception as e:
+            print(f"[lift_drive] 修复 lift drive 失败: {e}")
+
+    def _measure_fork_offset_from_usd(self) -> tuple[float, float]:
+        """从 USD mesh 数据测量 fork tip 相对于 articulation root 的前向偏移和基准 z 高度。
+
+        遍历 robot prim 下所有名称含 'lift'/'fork' 的 body 的 mesh 子节点，
+        计算所有顶点的 bounding box，取最大 X 作为前向偏移（假设 USD 中 +X = 前进方向）。
+        如果无法测量，则回退到保守默认值。
+
+        Returns:
+            (fork_forward_offset, fork_z_base):
+                fork_forward_offset — 从 root origin 到 fork tip 的前向距离（m）
+                fork_z_base — fork tip 在 root frame 中的基准 z 高度（m），不含 lift_joint 位移
+        """
+        from pxr import Usd, UsdGeom
+        import numpy as np
+
+        DEFAULT_FORWARD = 1.5   # 保守默认值（m），略小于典型叉车货叉长度
+        DEFAULT_Z_BASE = 0.10   # 保守默认值（m）
+
+        try:
+            stage = self.sim.stage
+            robot_prim_path = self.cfg.robot_cfg.prim_path.replace("env_.*", "env_0")
+            robot_prim = stage.GetPrimAtPath(robot_prim_path)
+            if not robot_prim.IsValid():
+                print(f"[fork_offset] 无法找到 robot prim: {robot_prim_path}，使用默认偏移")
+                return DEFAULT_FORWARD, DEFAULT_Z_BASE
+
+            # ---- 获取 USD 单位缩放（很多 USD 用 cm 而非 m） ----
+            meters_per_unit = 1.0
+            if stage.HasAuthoredMetadata("metersPerUnit"):
+                meters_per_unit = stage.GetMetadata("metersPerUnit")
+            elif UsdGeom.GetStageMetersPerUnit(stage) != 0.0:
+                meters_per_unit = UsdGeom.GetStageMetersPerUnit(stage)
+            print(f"[fork_offset] USD metersPerUnit = {meters_per_unit}")
+
+            # robot root 的 world transform（用于将顶点转到 robot local frame）
+            robot_xformable = UsdGeom.Xformable(robot_prim)
+            robot_xform = robot_xformable.ComputeLocalToWorldTransform(0.0)
+            robot_inv = robot_xform.GetInverse()
+
+            # 收集所有 mesh 顶点（在 robot local frame 中，单位为 m）
+            all_points = []
+            fork_points = []  # 仅 lift/fork 相关 mesh 的顶点
+
+            for prim in Usd.PrimRange(robot_prim):
+                if not prim.IsA(UsdGeom.Mesh):
+                    continue
+                mesh = UsdGeom.Mesh(prim)
+                pts_attr = mesh.GetPointsAttr()
+                if pts_attr is None:
+                    continue
+                pts = pts_attr.Get()
+                if pts is None or len(pts) == 0:
+                    continue
+
+                # local-to-world transform 已包含层级中的所有 scale
+                xformable = UsdGeom.Xformable(prim)
+                xform = xformable.ComputeLocalToWorldTransform(0.0)
+
+                # 转到 robot local frame 后再乘以 metersPerUnit 转为 m
+                is_fork = any(
+                    kw in str(prim.GetPath()).lower()
+                    for kw in ("lift", "fork", "tine")
+                )
+                for pt in pts:
+                    world_pt = xform.Transform(pt)
+                    local_pt = robot_inv.Transform(world_pt)
+                    pt_m = [local_pt[0] * meters_per_unit,
+                            local_pt[1] * meters_per_unit,
+                            local_pt[2] * meters_per_unit]
+                    all_points.append(pt_m)
+                    if is_fork:
+                        fork_points.append(pt_m)
+
+            if not all_points:
+                print("[fork_offset] 未找到任何 mesh 顶点，使用默认偏移")
+                return DEFAULT_FORWARD, DEFAULT_Z_BASE
+
+            all_arr = np.array(all_points)
+            all_min = all_arr.min(axis=0)
+            all_max = all_arr.max(axis=0)
+            extent = all_max - all_min
+
+            # ---- 自动检测单位：如果最大维度 > 10m，假设 cm 单位 ----
+            unit_scale = 1.0
+            if max(extent) > 10.0:
+                unit_scale = 0.01  # cm → m
+                all_arr *= unit_scale
+                all_min = all_arr.min(axis=0)
+                all_max = all_arr.max(axis=0)
+                extent = all_max - all_min
+                print(f"[fork_offset] 检测到 cm 单位（extent>{10.0}），自动转换 ×{unit_scale}")
+                if fork_points:
+                    fork_points = [[p[0]*unit_scale, p[1]*unit_scale, p[2]*unit_scale]
+                                   for p in fork_points]
+
+            print(f"[fork_offset] 模型范围(m): X[{all_min[0]:.4f}, {all_max[0]:.4f}], "
+                  f"Y[{all_min[1]:.4f}, {all_max[1]:.4f}], Z[{all_min[2]:.4f}, {all_max[2]:.4f}]")
+
+            if fork_points:
+                fork_arr = np.array(fork_points)
+                fork_forward = float(fork_arr[:, 0].max())
+                fork_z = float(fork_arr[:, 2].min())
+                print(f"[fork_offset] lift/fork mesh: forward={fork_forward:.4f}m, z_base={fork_z:.4f}m")
+                if 0.3 < fork_forward < 5.0:
+                    return fork_forward, max(fork_z, 0.0)
+                else:
+                    print(f"[fork_offset] 测量值不合理 ({fork_forward:.4f}m)，尝试整体前向")
+            else:
+                print("[fork_offset] 未找到 lift/fork mesh，尝试整体前向")
+
+            # 回退：使用整体最大前向 X
+            overall_forward = float(all_max[0])
+            overall_z_min = float(all_min[2])
+            print(f"[fork_offset] 整体 forward_max={overall_forward:.4f}m, z_min={overall_z_min:.4f}m")
+            if 0.3 < overall_forward < 5.0:
+                return overall_forward, max(overall_z_min, 0.0)
+
+            print(f"[fork_offset] 整体值也不合理，使用默认值")
+            return DEFAULT_FORWARD, DEFAULT_Z_BASE
+
+        except Exception as e:
+            print(f"[fork_offset] USD mesh 测量失败: {e}，使用默认偏移")
+            return DEFAULT_FORWARD, DEFAULT_Z_BASE
 
     def _setup_pallet_physics(self):
         """在环境克隆前，强制设置托盘物理属性
         
         必须在 clone_environments() 之前调用，确保模板环境的设置能被克隆继承。
         """
-        from pxr import UsdPhysics, PhysxSchema, UsdGeom
+        from pxr import Usd, UsdPhysics, PhysxSchema, UsdGeom
         
         stage = self.sim.stage
 
@@ -167,27 +362,42 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
             print(f"[警告] 找不到托盘 prim: {pallet_path}")
             return
 
-        # 遍历托盘及其所有子 prim
-        prims_to_process = [root_prim]
-        for prim in root_prim.GetDescendants():
-            prims_to_process.append(prim)
-            
+        # ---- Step 1: 确保根 prim 有 RigidBodyAPI ----
+        # Nucleus 的 pallet.usd 默认不带 RigidBodyAPI，
+        # Isaac Lab 的 rigid_props 只能 modify 已有属性，如果 USD 里不存在会跳过。
+        # 因此我们显式 Apply，确保 PhysX 能识别为刚体。
+        if not root_prim.HasAPI(UsdPhysics.RigidBodyAPI):
+            UsdPhysics.RigidBodyAPI.Apply(root_prim)
+            print(f"[信息] 已为 {root_prim.GetPath()} 新建 RigidBodyAPI")
+        rb_api = UsdPhysics.RigidBodyAPI(root_prim)
+        rb_api.GetRigidBodyEnabledAttr().Set(True)
+        rb_api.GetKinematicEnabledAttr().Set(False)
+        print(f"[信息] {root_prim.GetPath()} → 动态刚体 (kinematic=False)")
+
+        # 确保根 prim 也有 CollisionAPI（PhysX 需要至少一个碰撞形状）
+        if not root_prim.HasAPI(UsdPhysics.CollisionAPI):
+            UsdPhysics.CollisionAPI.Apply(root_prim)
+
+        # ---- Step 2: 遍历所有子 prim 设置凸分解碰撞体 ----
+        prims_to_process = list(Usd.PrimRange(root_prim))
         for prim in prims_to_process:
-            # 1. 强制设置为动态刚体
-            if prim.HasAPI(UsdPhysics.RigidBodyAPI):
-                rb_api = UsdPhysics.RigidBodyAPI(prim)
-                rb_api.GetRigidBodyEnabledAttr().Set(True)
-                rb_api.GetKinematicEnabledAttr().Set(False)
-                print(f"[信息] 已设置 {prim.GetPath()} 为动态刚体")
-            
-            # 2. 设置凸分解碰撞体
+            # 已有 RigidBodyAPI 的子 prim 也强制设为动态
+            if prim.HasAPI(UsdPhysics.RigidBodyAPI) and prim != root_prim:
+                rb = UsdPhysics.RigidBodyAPI(prim)
+                rb.GetRigidBodyEnabledAttr().Set(True)
+                rb.GetKinematicEnabledAttr().Set(False)
+
+            # 为 Mesh / 已有碰撞的 prim 设置凸分解
             has_mesh = prim.IsA(UsdGeom.Mesh)
             has_collision = prim.HasAPI(UsdPhysics.CollisionAPI)
-            
+
             if has_mesh or has_collision:
+                # 确保有 CollisionAPI
+                if not prim.HasAPI(UsdPhysics.CollisionAPI):
+                    UsdPhysics.CollisionAPI.Apply(prim)
                 mesh_collision_api = UsdPhysics.MeshCollisionAPI.Apply(prim)
                 mesh_collision_api.GetApproximationAttr().Set("convexDecomposition")
-                
+
                 convex_api = PhysxSchema.PhysxConvexDecompositionCollisionAPI.Apply(prim)
                 convex_api.GetMaxConvexHullsAttr().Set(32)
                 convex_api.GetHullVertexLimitAttr().Set(64)
@@ -199,16 +409,14 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
 
     def _log_pallet_usd(self, stage, pallet_path: str, label: str):
         """打印托盘 USD 物理属性诊断信息（仅用于排查问题）。"""
-        from pxr import UsdPhysics, UsdGeom
+        from pxr import Usd, UsdPhysics, UsdGeom
 
         root_prim = stage.GetPrimAtPath(pallet_path)
         if not root_prim.IsValid():
             print(f"[诊断] {label} 找不到托盘 prim: {pallet_path}")
             return
 
-        prims_to_process = [root_prim]
-        for prim in root_prim.GetDescendants():
-            prims_to_process.append(prim)
+        prims_to_process = list(Usd.PrimRange(root_prim))
 
         print("\n" + "=" * 60)
         print(f"[诊断] {label} 托盘 USD 状态: {pallet_path}")
@@ -282,6 +490,11 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         # 在克隆之前修改模板环境（env_0）的托盘物理属性
         self._setup_pallet_physics()
 
+        # 在克隆之前修复 lift_joint DriveAPI（USD 原始 stiffness=100000 会锁死关节）
+        # 必须在 clone_environments() 之前，这样修改会继承到所有克隆环境；
+        # 也必须在 sim.reset() 之前，这样 PhysX bake 时读到的就是 stiffness=0。
+        self._fix_lift_joint_drive()
+
         # ground
         spawn_ground_plane(prim_path="/World/ground", cfg=self.cfg.ground_cfg)
 
@@ -334,8 +547,14 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self.robot.set_joint_position_target(steer_left.unsqueeze(-1), joint_ids=self._left_rotator_id)
         self.robot.set_joint_position_target(steer_right.unsqueeze(-1), joint_ids=self._right_rotator_id)
 
-        # lift: velocity target
-        self.robot.set_joint_velocity_target(lift_v.unsqueeze(-1), joint_ids=[self._lift_id])
+        # lift: position target (accumulated per substep)
+        # logs32 验证：stiffness=200000 + set_joint_position_target 是唯一可行的 drive 控制方式
+        # 注意：_apply_action() 每 env step 被调用 decimation 次，必须用 sim.dt 而非 step_dt
+        self._lift_pos_target += lift_v * self.cfg.sim.dt
+        self._lift_pos_target = torch.clamp(self._lift_pos_target, 0.0, 2.0)
+        self.robot.set_joint_position_target(
+            self._lift_pos_target.unsqueeze(-1), joint_ids=[self._lift_id]
+        )
 
         # write to sim
         self.robot.write_data_to_sim()
@@ -344,21 +563,64 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
     # Observations / Rewards / Dones
     # ---------------------------
     def _compute_fork_tip(self) -> torch.Tensor:
-        """Estimate fork tip position as the body with max projection along robot forward axis."""
-        root_pos = self.robot.data.root_pos_w  # (N,3)
-        root_quat = self.robot.data.root_quat_w  # (N,4)
-        yaw = _quat_to_yaw(root_quat)
-        # forward unit vector in world (x-forward in robot frame)
-        fwd = torch.stack([torch.cos(yaw), torch.sin(yaw), torch.zeros_like(yaw)], dim=-1)  # (N,3)
+        """运动学方法估算 fork tip 世界位置。
 
-        body_pos = self.robot.data.body_pos_w  # (N,B,3)
-        rel = body_pos - root_pos.unsqueeze(1)  # (N,B,3)
-        proj = (rel * fwd.unsqueeze(1)).sum(-1)  # (N,B)
-        idx = torch.argmax(proj, dim=1)  # (N,)
-        tip = body_pos[torch.arange(self.num_envs, device=self.device), idx]  # (N,3)
-        return tip
+        使用 root_pos + yaw 旋转的固定前向偏移 + lift_joint 位移来计算。
+        这比 body_pos_w 方法更可靠，因为 body_pos_w 在 Fabric clone 失败或
+        body frame origin 重合时（如 forklift_c.usd）无法区分各 link。
+
+        前向偏移量 (_fork_forward_offset) 在 __init__ 中从 USD mesh 数据测量，
+        或回退到保守默认值。
+
+        Returns:
+            tip: (N, 3) tensor — fork tip 的世界坐标
+        """
+        root_pos = self.robot.data.root_pos_w   # (N, 3)
+        yaw = _quat_to_yaw(self.robot.data.root_quat_w)  # (N,)
+        lift_pos = self._joint_pos[:, self._lift_id]      # (N,) lift joint 位移
+
+        cos_yaw = torch.cos(yaw)
+        sin_yaw = torch.sin(yaw)
+
+        tip_x = root_pos[:, 0] + self._fork_forward_offset * cos_yaw
+        tip_y = root_pos[:, 1] + self._fork_forward_offset * sin_yaw
+        tip_z = root_pos[:, 2] + self._fork_z_base + lift_pos
+
+        return torch.stack([tip_x, tip_y, tip_z], dim=-1)
 
     def _get_observations(self) -> dict[str, torch.Tensor]:
+        # ---- 从 PhysX view 刷新关节数据 ----
+        # robot.data.joint_pos 在 Fabric clone 失败时不更新（始终为 0），
+        # 但 root_physx_view.get_dof_positions() 能正确返回值。
+        self._joint_pos[:] = self.robot.root_physx_view.get_dof_positions()
+        self._joint_vel[:] = self.robot.root_physx_view.get_dof_velocities()
+
+        # ---- PhysX 直读诊断 ----
+        # 条件1: 前 5 步（初始化阶段）
+        # 条件2: lift_target > 0 的前 10 次（举升阶段）
+        _diag_init = self.common_step_counter < 5
+        _diag_lift = (self._lift_pos_target[0] > 0.001
+                      and not hasattr(self, '_diag_lift_count'))
+        _diag_lift_ongoing = (self._lift_pos_target[0] > 0.001
+                              and hasattr(self, '_diag_lift_count')
+                              and self._diag_lift_count < 10
+                              and self.common_step_counter % 20 == 0)
+        if _diag_init or _diag_lift or _diag_lift_ongoing:
+            if _diag_lift and not hasattr(self, '_diag_lift_count'):
+                self._diag_lift_count = 0
+            try:
+                dof_pos = self.robot.root_physx_view.get_dof_positions()
+                dof_vel = self.robot.root_physx_view.get_dof_velocities()
+                print(f"[DIAG step={self.common_step_counter}] "
+                      f"physx.dof_pos(lift)={dof_pos[0, self._lift_id]:.5f}, "
+                      f"physx.dof_vel(lift)={dof_vel[0, self._lift_id]:.5f}, "
+                      f"lab.joint_pos={self._joint_pos[0, self._lift_id]:.5f}, "
+                      f"lift_target={self._lift_pos_target[0]:.5f}")
+                if hasattr(self, '_diag_lift_count'):
+                    self._diag_lift_count += 1
+            except Exception as e:
+                print(f"[DIAG step={self.common_step_counter}] PhysX 直读失败: {e}")
+
         # states
         root_pos = self.robot.data.root_pos_w
         root_quat = self.robot.data.root_quat_w
@@ -410,78 +672,131 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         return {"policy": obs}
 
     def _get_rewards(self) -> torch.Tensor:
-        """S1.0g 距离自适应奖励函数
+        """S1.0h 距离自适应奖励函数（修复对齐学习闭环 + 奖励泵漏洞）
 
-        用 smoothstep(dist_front) 生成 w_close/w_far，
-        让奖励系数随距离自动从"远处探索(≈S0.4)"过渡到"近处收敛(≈S0.7)"。
+        核心改进（相对 S1.0g）：
+        ──────────────────────────────────────────────────────────
+        A. r_approach 软门控（0.2 + 0.8*w_ready）
+           → 未对齐时仍有 20% 接近奖励，打破 "不靠近→对齐信号弱→w_ready≈0→不给接近奖励" 的死锁
+        B. 对齐阈值随距离插值（远处松、近处紧）
+           → 远处 lat_ready_m≈0.6m / yaw_ready_deg≈30°，w_ready 不再被饿死
+        C. yaw 目标分两段
+           → 远处：对准 "指向托盘方向"（允许为消除横向误差先打角）
+           → 近处：对准 "托盘朝向"（要求精确平行对接）
+        D. r_forward 乘以 w_yaw
+           → 避免 "先冲再说" 行为，鼓励 "边走边摆正"
+        E. r_insert 势函数 shaping（gamma=0.99）
+           → 后退会扣分，循环刷分无效
+        F. r_lift 势函数 shaping（gamma=0.99）
+           → 下降会扣分，循环刷分无效
+        ──────────────────────────────────────────────────────────
 
-        阶段1（w_ready 门控）：接近（对齐好了才给）+ 对齐改善(delta) + 绝对对齐惩罚 + 远距离前进速度奖励
-        阶段2（w_ready 门控）：插入进度（严格正比于对齐质量）
-        阶段3（w_lift 门控）：举升奖励（w_lift = w_lift_base * w_ready，已包含对齐门控）+ 距离自适应空举惩罚（只看插入深度）
-        
-        S1.0g 核心修复：修复 S1.0f 的举升奖励机制（移除 r_lift 中多余的 w_ready，让 pen_premature 只看插入深度），
-        解决"永远学不会举升"的问题（避免 w_ready^2 抑制奖励和惩罚过重）
+        奖励结构（每 step 叠加）:
+          rew = r_approach + r_align + r_forward          # 阶段1: 接近 + 对齐
+               + pen_align_abs                             # 近处绝对对齐惩罚
+               + r_insert                                  # 阶段2: 插入（势函数）
+               + r_lift + pen_premature                    # 阶段3: 举升（势函数）+ 空举惩罚
+               + pen_action + pen_time + pen_dist_far      # 常驻惩罚
+               + success_reward                            # 终局成功奖励
         """
-        # ========== Step 0: 基础量计算 ==========
-        tip = self._compute_fork_tip()
-        insert_depth = torch.clamp(tip[:, 0] - self._pallet_front_x, min=0.0)
-        insert_norm = insert_depth / (self.cfg.pallet_depth_m + 1e-6)
+        # ---- 从 PhysX view 刷新关节数据 ----
+        # _get_rewards() 在 _get_observations() 之前调用，需要先刷新
+        self._joint_pos[:] = self.robot.root_physx_view.get_dof_positions()
+        self._joint_vel[:] = self.robot.root_physx_view.get_dof_velocities()
 
-        # 距离：货叉到托盘前面（正值=在托盘前面）
+        # ==================================================================
+        # Step 0: 基础量计算
+        # ==================================================================
+        tip = self._compute_fork_tip()                                       # (N, 3)
+        insert_depth = torch.clamp(tip[:, 0] - self._pallet_front_x, min=0.0)  # 已插入距离 (m)
+        insert_norm = insert_depth / (self.cfg.pallet_depth_m + 1e-6)        # 归一化 [0, 1]
+
+        # dist_front: 货叉尖端到 pocket 开口的剩余距离（正=尚未到达，0=已过开口）
         dist_front = self._pallet_front_x - tip[:, 0]
         dist_front_clamped = torch.clamp(dist_front, min=0.0)
 
-        # 对齐误差
+        # 机器人/托盘位姿
         root_pos = self.robot.data.root_pos_w
         pallet_pos = self.pallet.data.root_pos_w
-        y_err = torch.abs(pallet_pos[:, 1] - root_pos[:, 1])
+        y_err = torch.abs(pallet_pos[:, 1] - root_pos[:, 1])                # 横向误差 (m)
 
-        yaw = _quat_to_yaw(self.robot.data.root_quat_w)
-        pallet_yaw = _quat_to_yaw(self.pallet.data.root_quat_w)
-        dyaw = (pallet_yaw - yaw + math.pi) % (2 * math.pi) - math.pi
-        yaw_err_deg = torch.abs(dyaw) * (180.0 / math.pi)
-        yaw_err_rad = torch.abs(dyaw)
+        yaw = _quat_to_yaw(self.robot.data.root_quat_w)                     # 机器人 yaw (rad)
+        pallet_yaw = _quat_to_yaw(self.pallet.data.root_quat_w)             # 托盘 yaw (rad)
 
-        # ========== Step 1: 软门控权重 ==========
-        E_align = y_err / self.cfg.lat_ready_m + yaw_err_deg / self.cfg.yaw_ready_deg
-
-        # S1.0f: 恢复乘法门控 w_ready（回归 S0），必须同时满足横向和偏航要求
-        w_lat = torch.clamp(1.0 - y_err / self.cfg.lat_ready_m, min=0.0, max=1.0)
-        w_yaw = torch.clamp(1.0 - yaw_err_deg / self.cfg.yaw_ready_deg, min=0.0, max=1.0)
-        w_ready = w_lat * w_yaw  # 乘法门控，任一维度达到阈值，w_ready = 0
-
-        # S1.0e: w_lift 也添加 w_ready 门控，彻底切断斜怼+举升收益路径
-        w_lift_base = torch.clamp(
-            (insert_norm - self.cfg.insert_gate_norm) / self.cfg.insert_ramp_norm,
-            min=0.0, max=1.0,
-        )
-        w_lift = w_lift_base * w_ready  # 添加对齐质量门控
-
-        # ========== S1.0: 距离自适应权重 ==========
+        # ==================================================================
+        # Step 1: 距离自适应权重 w_close / w_far
+        # ==================================================================
+        # smoothstep 在 [d_close, d_far] 区间从 1→0 过渡
         w_close = smoothstep(
             (self.cfg.d_far - dist_front_clamped) / (self.cfg.d_far - self.cfg.d_close)
         )
         w_far = 1.0 - w_close
 
-        # 动态系数插值（远≈S0.4, 近≈S0.7）
+        # ==================================================================
+        # Step 2: 修改 C — yaw 目标分两段
+        # ==================================================================
+        # 远处：对准 "机器人→托盘中心" 方向（允许先打角消除横向误差）
+        yaw_to_target = torch.atan2(
+            pallet_pos[:, 1] - root_pos[:, 1],
+            pallet_pos[:, 0] - root_pos[:, 0],
+        )
+        dyaw_to_target = (yaw_to_target - yaw + math.pi) % (2 * math.pi) - math.pi
+
+        # 近处：对准托盘朝向（要求平行对接，精确插入）
+        dyaw_to_pallet = (pallet_yaw - yaw + math.pi) % (2 * math.pi) - math.pi
+
+        # 距离插值混合
+        dyaw = dyaw_to_target * w_far + dyaw_to_pallet * w_close
+        yaw_err_deg = torch.abs(dyaw) * (180.0 / math.pi)
+        yaw_err_rad = torch.abs(dyaw)
+
+        # ==================================================================
+        # Step 3: 修改 B — 对齐阈值随距离插值（远处松、近处紧）
+        # ==================================================================
+        # 远处宽松：允许策略在未完全对齐时也能接近，获得近处高质量对齐信号
+        # 近处严格：确保插入前精确对齐
+        lat_ready_m = self.cfg.lat_ready_far * w_far + self.cfg.lat_ready_close * w_close
+        yaw_ready_deg = self.cfg.yaw_ready_far_deg * w_far + self.cfg.yaw_ready_close_deg * w_close
+
+        # 归一化对齐误差（E_align > 1 表示未满足当前距离下的对齐要求）
+        E_align = y_err / lat_ready_m + yaw_err_deg / yaw_ready_deg
+
+        # 乘法门控 w_ready：任一维度达到阈值 → w_ready = 0
+        w_lat = torch.clamp(1.0 - y_err / lat_ready_m, min=0.0, max=1.0)
+        w_yaw = torch.clamp(1.0 - yaw_err_deg / yaw_ready_deg, min=0.0, max=1.0)
+        w_ready = w_lat * w_yaw
+
+        # 举升门控：插入深度超过阈值 + 对齐质量
+        w_lift_base = torch.clamp(
+            (insert_norm - self.cfg.insert_gate_norm) / self.cfg.insert_ramp_norm,
+            min=0.0, max=1.0,
+        )
+        w_lift = w_lift_base * w_ready  # 必须对齐才能举升
+
+        # ==================================================================
+        # Step 4: 距离自适应奖励系数
+        # ==================================================================
         k_approach = self.cfg.k_app_far * w_far + self.cfg.k_app_close * w_close
         k_align = self.cfg.k_align_far * w_far + self.cfg.k_align_close * w_close
         k_insert = self.cfg.k_ins_far * w_far + self.cfg.k_ins_close * w_close
         k_premature = self.cfg.k_pre_far * w_far + self.cfg.k_pre_close * w_close
 
-        # ========== Step 2: 增量计算 ==========
-        delta_E_align = self._last_E_align - E_align
+        # ==================================================================
+        # Step 5: 增量计算（用于 r_approach, r_align, pen_premature）
+        # ==================================================================
+        delta_E_align = self._last_E_align - E_align        # 对齐改善 > 0 = 奖励
         self._last_E_align = E_align.detach()
 
-        delta_dist = self._last_dist_front - dist_front_clamped
+        delta_dist = self._last_dist_front - dist_front_clamped  # 接近 > 0 = 奖励
         self._last_dist_front = dist_front_clamped.detach()
 
-        progress = insert_depth - self._last_insert_depth
+        # 仍需 insert_depth 增量用于 _apply_action 中的安全制动判断
         self._last_insert_depth = insert_depth.detach()
 
-        lift_delta = tip[:, 2] - self._fork_tip_z0
-        delta_lift = lift_delta - self._last_lift_pos
-        self._last_lift_pos = lift_delta.detach()
+        # 举升增量（用于 pen_premature 空举惩罚）
+        lift_height = tip[:, 2] - self._fork_tip_z0       # 当前举升高度
+        delta_lift = lift_height - self._last_lift_pos     # 举升增量
+        self._last_lift_pos = lift_height.detach()
 
         # 机器人坐标系前进速度（用于 r_forward）
         root_lin_vel = self.robot.data.root_lin_vel_w
@@ -490,55 +805,79 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         v_xy_r = torch.einsum("nij,nj->ni", R, v_xy_w)
         v_xy_r_x = v_xy_r[:, 0]
 
-        # ========== 阶段1: 接近 + 对齐 + 远距前进速度 ==========
+        # ==================================================================
+        # 阶段 1: 接近 + 对齐 + 远距前进速度
+        # ==================================================================
         rew = torch.zeros((self.num_envs,), device=self.device)
 
-        # S1.0f: 恢复 r_approach 的 w_ready 门控（回归 S0），对齐好了才给接近奖励
-        r_approach = k_approach * w_ready * delta_dist
+        # 修改 A: r_approach 软门控
+        # w_approach ∈ [0.2, 1.0]，即使 w_ready≈0 也有 20% 基础接近奖励
+        w_approach = 0.2 + 0.8 * w_ready
+        r_approach = k_approach * w_approach * delta_dist
         r_approach = torch.where(self._is_first_step, torch.zeros_like(r_approach), r_approach)
         rew += r_approach
 
+        # 对齐改善奖励（增量式）
         r_align = k_align * delta_E_align
         r_align = torch.where(self._is_first_step, torch.zeros_like(r_align), r_align)
         rew += r_align
 
-        # 远距离前进速度奖励（只在远处生效，近处自动消失）
-        r_forward = self.cfg.k_forward * w_far * torch.clamp(v_xy_r_x, min=0.0)
+        # 修改 D: 远距离前进速度奖励 × w_yaw，鼓励 "边走边摆正"
+        r_forward = self.cfg.k_forward * w_far * w_yaw * torch.clamp(v_xy_r_x, min=0.0)
         rew += r_forward
 
-        # ========== S1.0c 绝对对齐惩罚（近处持续惩罚未对齐状态） ==========
+        # 绝对对齐惩罚（近处持续惩罚未对齐状态，E_align clamp [0,2]）
         pen_align_abs = -self.cfg.k_align_abs * w_close * torch.clamp(E_align, 0.0, 2.0)
         rew += pen_align_abs
 
-        # ========== 阶段2: 插入（S1.0c: w_ready 直接门控，对齐越好→插入奖励越大） ==========
-        r_insert = k_insert * w_ready * torch.clamp(progress, min=0.0)
+        # ==================================================================
+        # 阶段 2: 插入（修改 E — 势函数 shaping，防止奖励泵漏洞）
+        # ==================================================================
+        # Phi_insert = k_insert * w_ready * insert_norm
+        # r_insert = gamma * Phi_t - Phi_{t-1}
+        # 优点：后退（insert_norm↓）自动扣分，循环刷分无效
+        gamma = 0.99  # PPO 折扣因子
+        Phi_insert = k_insert * w_ready * insert_norm
+        r_insert = gamma * Phi_insert - self._last_Phi_insert
+        self._last_Phi_insert = Phi_insert.detach()
         rew += r_insert
 
-        # ========== 阶段3: 举升（S1.0g: 修复双重门控 - w_lift 已包含 w_ready，不再重复） ==========
-        r_lift = self.cfg.k_lift * w_lift * torch.clamp(delta_lift, min=0.0)
-        r_lift = torch.where(self._is_first_step, torch.zeros_like(r_lift), r_lift)
+        # ==================================================================
+        # 阶段 3: 举升（修改 F — 势函数 shaping，防止奖励泵漏洞）
+        # ==================================================================
+        # Phi_lift = k_lift * w_lift * lift_height
+        # r_lift = gamma * Phi_t - Phi_{t-1}
+        # 优点：下降（lift_height↓）自动扣分，循环刷分无效
+        Phi_lift = self.cfg.k_lift * w_lift * lift_height
+        r_lift = gamma * Phi_lift - self._last_Phi_lift
+        self._last_Phi_lift = Phi_lift.detach()
         rew += r_lift
 
-        # 空举惩罚（S1.0g: 只看插入深度，不掺对齐，避免"插入够深但对齐略差"时被重罚）
+        # 空举惩罚：插入深度不足时尝试举升的惩罚
         pen_premature = -k_premature * (1.0 - w_lift_base) * torch.clamp(delta_lift, min=0.0)
         pen_premature = torch.where(self._is_first_step, torch.zeros_like(pen_premature), pen_premature)
         rew += pen_premature
 
-        # ========== 常驻惩罚 ==========
-        rew += self.cfg.rew_action_l2 * (self.actions ** 2).sum(dim=1)
-        rew += self.cfg.rew_time_penalty
+        # ==================================================================
+        # 常驻惩罚
+        # ==================================================================
+        rew += self.cfg.rew_action_l2 * (self.actions ** 2).sum(dim=1)       # 动作 L2
+        rew += self.cfg.rew_time_penalty                                      # 时间惩罚
 
+        # 距离过远额外惩罚（鼓励接近）
         dist_far_threshold = 2.0
         dist_excess = torch.clamp(dist_front_clamped - dist_far_threshold, min=0.0)
         pen_dist_far = -self.cfg.k_dist_far * dist_excess
         rew += pen_dist_far
 
-        # ========== 成功判定与奖励 ==========
+        # ==================================================================
+        # 成功判定与奖励
+        # ==================================================================
         inserted_enough = insert_depth >= self._insert_thresh
         aligned_enough = (y_err <= self.cfg.max_lateral_err_m) & (
             yaw_err_rad <= math.radians(self.cfg.max_yaw_err_deg)
         )
-        lifted_enough = lift_delta >= self.cfg.lift_delta_m
+        lifted_enough = lift_height >= self.cfg.lift_delta_m
         success_now = inserted_enough & aligned_enough & lifted_enough
 
         self._hold_counter = torch.where(
@@ -558,16 +897,22 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         # 清除首步标记
         self._is_first_step[:] = False
 
-        # ========== S1.0c 日志输出 ==========
+        # ==================================================================
+        # 日志输出
+        # ==================================================================
         if "log" not in self.extras:
             self.extras["log"] = {}
 
-        # 核心诊断
+        # 核心诊断指标
         self.extras["log"]["s0/E_align"] = E_align.mean()
         self.extras["log"]["s0/w_ready"] = w_ready.mean()
         self.extras["log"]["s0/w_lift"] = w_lift.mean()
         self.extras["log"]["s0/w_close"] = w_close.mean()
         self.extras["log"]["s0/w_far"] = w_far.mean()
+        # S1.0h 新增：监控动态阈值和软门控效果
+        self.extras["log"]["s0/lat_ready_m"] = lat_ready_m.mean()
+        self.extras["log"]["s0/yaw_ready_deg"] = yaw_ready_deg.mean()
+        self.extras["log"]["s0/w_approach"] = w_approach.mean()
 
         # 奖励分量
         self.extras["log"]["s0/r_align"] = r_align.mean()
@@ -587,13 +932,18 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         # 有效系数（观察距离自适应是否生效）
         self.extras["log"]["s0/k_approach_eff"] = k_approach.mean()
         self.extras["log"]["s0/k_align_eff"] = k_align.mean()
+        self.extras["log"]["s0/k_insert_eff"] = k_insert.mean()
         self.extras["log"]["s0/k_premature_eff"] = k_premature.mean()
+
+        # 势函数监控（检验势函数 shaping 是否工作正常）
+        self.extras["log"]["phi/Phi_insert"] = Phi_insert.mean()
+        self.extras["log"]["phi/Phi_lift"] = Phi_lift.mean()
 
         # 误差分布
         self.extras["log"]["err/lateral_mean"] = y_err.mean()
         self.extras["log"]["err/yaw_deg_mean"] = yaw_err_deg.mean()
         self.extras["log"]["err/insert_norm_mean"] = insert_norm.mean()
-        self.extras["log"]["err/lift_delta_mean"] = lift_delta.mean()
+        self.extras["log"]["err/lift_height_mean"] = lift_height.mean()
         self.extras["log"]["err/dist_front_mean"] = dist_front_clamped.mean()
 
         # 阶段命中率
@@ -650,58 +1000,73 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         if env_ids is None:
             env_ids = torch.arange(self.num_envs, device=self.device)
 
-        # reset counters
+        # ---- 计数器清零 ----
         self._last_insert_depth[env_ids] = 0.0
         self._hold_counter[env_ids] = 0
         self._is_first_step[env_ids] = True
+        self._lift_pos_target[env_ids] = 0.0
 
-        # reset pallet (fixed pose; optional: you can randomize here)
+        # ---- 托盘固定位姿（可选：后续可加随机化） ----
         pallet_pos = torch.tensor(self.cfg.pallet_cfg.init_state.pos, device=self.device).repeat(len(env_ids), 1)
         pallet_quat = torch.tensor(self.cfg.pallet_cfg.init_state.rot, device=self.device).repeat(len(env_ids), 1)
         self._write_root_pose(self.pallet, pallet_pos, pallet_quat, env_ids)
 
-        # randomize robot pose around pallet, facing +x
-        x = sample_uniform(-2.5, -1.0, (len(env_ids), 1), device=self.device)
+        # ---- 随机化叉车初始位姿 ----
+        # S1.0h: 调整范围适配 1.8x 缩放 + 修正后的 _pallet_front_x
+        # _pallet_front_x ≈ -1.08m，叉车 fork 前端约超出车体中心 1.5m
+        # x ∈ [-4.0, -2.5] 使 dist_front ∈ [~0.4, ~1.9]m，覆盖 d_close(1.1) ~ d_far(2.6) 的核心区间
+        x = sample_uniform(-4.0, -2.5, (len(env_ids), 1), device=self.device)
         y = sample_uniform(-0.6, 0.6, (len(env_ids), 1), device=self.device)
         z = torch.full((len(env_ids), 1), 0.03, device=self.device)
         yaw = sample_uniform(-0.25, 0.25, (len(env_ids), 1), device=self.device)
 
         pos = torch.cat([x, y, z], dim=1)
-        # yaw quaternion (w,x,y,z)
         half = yaw * 0.5
         quat = torch.cat([torch.cos(half), torch.zeros_like(half), torch.zeros_like(half), torch.sin(half)], dim=1)
 
         self._write_root_pose(self.robot, pos, quat, env_ids)
 
-        # reset velocities to zero
+        # 速度清零
         zeros3 = torch.zeros((len(env_ids), 3), device=self.device)
         self._write_root_vel(self.robot, zeros3, zeros3, env_ids)
 
-        # reset joints (lift down, wheels zero, steering zero)
+        # 关节归零（lift down, wheels zero, steering zero）
         joint_pos = self.robot.data.default_joint_pos[env_ids].clone()
         joint_vel = torch.zeros_like(joint_pos)
         self._write_joint_state(self.robot, joint_pos, joint_vel, env_ids)
 
-        # one sim update to populate buffers
+        # 写入仿真并更新一步，填充缓存
         self.scene.write_data_to_sim()
         self.sim.reset()
         self.scene.update(self.cfg.sim.dt)
 
-        # baseline fork tip height
+        # ---- 基线 fork tip 高度 ----
         tip = self._compute_fork_tip()
         self._fork_tip_z0[env_ids] = tip[:, 2][env_ids]
 
-        # S1.0g: 初始化增量奖励缓存为当前状态（防止首步异常奖励）
+        # ---- S1.0h: 初始化增量奖励缓存（防止首步异常奖励） ----
+        # 注：此处用 robot center x 近似 fork tip x 位置，
+        # 误差在 _is_first_step 保护下可忽略（首步增量奖励被清零）
         dist_front_reset = torch.clamp(self._pallet_front_x - x.squeeze(-1), min=0.0)
         self._last_dist_front[env_ids] = dist_front_reset
 
+        # E_align 初始化：reset 时机器人远离托盘，使用远处阈值（lat_ready_far, yaw_ready_far_deg）
         y_err_reset = torch.abs(y.squeeze(-1))
         yaw_err_deg_reset = torch.abs(yaw.squeeze(-1)) * (180.0 / math.pi)
-        E_align_reset = y_err_reset / self.cfg.lat_ready_m + yaw_err_deg_reset / self.cfg.yaw_ready_deg
+        E_align_reset = (y_err_reset / self.cfg.lat_ready_far
+                         + yaw_err_deg_reset / self.cfg.yaw_ready_far_deg)
         self._last_E_align[env_ids] = E_align_reset
 
-        lift_delta_reset = tip[:, 2][env_ids] - self._fork_tip_z0[env_ids]
-        self._last_lift_pos[env_ids] = lift_delta_reset
+        # 举升增量缓存
+        lift_height_reset = tip[:, 2][env_ids] - self._fork_tip_z0[env_ids]
+        self._last_lift_pos[env_ids] = lift_height_reset
+
+        # ---- S1.0h 修改 G: 初始化势函数缓存 ----
+        # reset 时 insert_depth ≈ 0、lift_height ≈ 0 → Phi ≈ 0
+        # 如果极端情况下 fork 已过 pocket 开口，精确计算可避免首步异常大的 r_insert
+        # 这里直接置 0 是安全的：_is_first_step + 首步物理状态基本一致
+        self._last_Phi_insert[env_ids] = 0.0
+        self._last_Phi_lift[env_ids] = 0.0
 
         # reset robot actuators
         self.robot.reset(env_ids)
@@ -710,31 +1075,45 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
     # Compatibility helpers (API name differences across versions)
     # ---------------------------
     def _write_root_pose(self, asset, pos, quat, env_ids):
+        """设置 asset 的根位姿。
+
+        Isaac Lab >=1.x API: write_root_pose_to_sim(root_pose: (N,7), env_ids)
+        root_pose = [pos(3), quat(4)]  (quat 格式 w,x,y,z)
+        """
+        root_pose = torch.cat([pos, quat], dim=-1)  # (N, 7)
         if hasattr(asset, "write_root_pose_to_sim"):
-            asset.write_root_pose_to_sim(pos, quat, env_ids)
+            asset.write_root_pose_to_sim(root_pose, env_ids)
         elif hasattr(asset, "write_root_state_to_sim"):
-            # some versions use a single tensor for root_state
             root_state = torch.zeros((len(env_ids), 13), device=self.device)
-            root_state[:, 0:3] = pos
-            root_state[:, 3:7] = quat
+            root_state[:, 0:7] = root_pose
             asset.write_root_state_to_sim(root_state, env_ids)
         else:
             raise AttributeError("Asset has no known root pose writer.")
 
     def _write_root_vel(self, asset, lin_vel, ang_vel, env_ids):
+        """设置 asset 的根速度。
+
+        Isaac Lab >=1.x API: write_root_velocity_to_sim(root_velocity: (N,6), env_ids)
+        root_velocity = [lin_vel(3), ang_vel(3)]
+        """
+        root_vel = torch.cat([lin_vel, ang_vel], dim=-1)  # (N, 6)
         if hasattr(asset, "write_root_velocity_to_sim"):
-            asset.write_root_velocity_to_sim(lin_vel, ang_vel, env_ids)
+            asset.write_root_velocity_to_sim(root_vel, env_ids)
         elif hasattr(asset, "write_root_state_to_sim"):
-            # if only root_state is supported, caller should set full state; keep as no-op
             pass
         else:
             raise AttributeError("Asset has no known root velocity writer.")
 
     def _write_joint_state(self, articulation, joint_pos, joint_vel, env_ids):
+        """设置关节状态（位置 + 速度）。
+
+        注意 write_joint_state_to_sim 的第三个位置参数是 joint_ids，
+        必须用关键字参数传 env_ids，否则会被误当作 joint_ids。
+        """
         if hasattr(articulation, "write_joint_state_to_sim"):
-            articulation.write_joint_state_to_sim(joint_pos, joint_vel, env_ids)
+            articulation.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=env_ids)
         elif hasattr(articulation, "write_joint_pos_to_sim") and hasattr(articulation, "write_joint_vel_to_sim"):
-            articulation.write_joint_pos_to_sim(joint_pos, env_ids)
-            articulation.write_joint_vel_to_sim(joint_vel, env_ids)
+            articulation.write_joint_pos_to_sim(joint_pos, env_ids=env_ids)
+            articulation.write_joint_vel_to_sim(joint_vel, env_ids=env_ids)
         else:
             raise AttributeError("Articulation has no known joint state writer.")

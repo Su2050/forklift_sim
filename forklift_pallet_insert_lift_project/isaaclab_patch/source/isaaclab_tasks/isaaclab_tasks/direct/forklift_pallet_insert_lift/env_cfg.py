@@ -15,11 +15,20 @@ from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     """Configuration for the Forklift Pallet Insert+Lift environment (direct workflow).
 
-    S1.0g: 修复 S1.0f 的举升奖励机制，解决"永远学不会举升"的问题。
-    S1.0g 改动：
-      - 修复 r_lift：移除多余的 w_ready，改为 r_lift = k_lift * w_lift * delta_lift（避免 w_ready^2 抑制奖励）
-      - 修复 pen_premature：改用 w_lift_base，改为 pen_premature = -k_premature * (1.0 - w_lift_base) * delta_lift（只看插入深度，不掺对齐）
-      - 保留 S1.0f 的改进：严格对齐阈值、乘法门控 w_ready、r_approach 门控、绝对对齐惩罚、距离自适应系数
+    S1.0h: 修复仿真环境 + 对齐学习闭环 + 奖励泵漏洞修复。
+    S1.0h 环境修正：
+      - 托盘缩放 4.0x → 1.8x（匹配 isaac_sim_asset_import.md 文档）
+      - pallet_depth_m 4.8 → 2.16（1.2m × 1.8）
+      - 托盘质量 30kg → 45kg，初始高度 0.30 → 0.15
+      - 添加碰撞接触参数 collision_props（contactOffset/restOffset）
+      - 修复 _pallet_front_x 符号 bug（+ → -，指向 pocket 开口而非远端面）
+    S1.0h 奖励修正：
+      - r_approach 软门控（0.2 + 0.8*w_ready），打破对齐-接近死锁
+      - 对齐阈值随距离插值（远处松、近处紧）
+      - yaw 目标分两段（远处对准指向方向，近处对准托盘朝向）
+      - r_forward 绑定到朝向因子 w_yaw
+      - r_insert / r_lift 势函数 shaping（带 gamma=0.99），修复奖励泵漏洞
+      - reset 时正确初始化势能缓存
     """
 
     # env
@@ -39,20 +48,22 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     sim: SimulationCfg = SimulationCfg(dt=1 / 120, render_interval=decimation)
 
     # scene replication
+    # clone_in_fabric=False: 修复 body_pos_w 全部等于 root_pos_w 的问题
+    # 原因：Fabric clone 失败导致 body link 位置不追踪（见诊断报告）
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
         num_envs=128,
         env_spacing=6.0,
         replicate_physics=True,
-        clone_in_fabric=True,
+        clone_in_fabric=False,
     )
 
     # assets
     forklift_usd_path: str = f"{ISAAC_NUCLEUS_DIR}/Robots/IsaacSim/ForkliftC/forklift_c.usd"
     pallet_usd_path: str = f"{ISAAC_NUCLEUS_DIR}/Props/Pallet/pallet.usd"
 
-    # pallet geometry assumptions (Euro pallet default, scaled 4x)
-    # 原始深度 1.2m * 4.0 = 4.8m
-    pallet_depth_m: float = 4.8
+    # pallet geometry assumptions (Euro pallet default, scaled 1.8x)
+    # 原始深度 1.2m × 1.8 = 2.16m（参考 docs/learning_guiding/isaac_sim_asset_import.md）
+    pallet_depth_m: float = 2.16
 
     # KPI
     insert_fraction: float = 2.0 / 3.0
@@ -66,10 +77,14 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     steer_angle_rad: float = 0.6
     lift_speed_m_s: float = 0.25
 
-    # ---------- S1.0 奖励参数（距离自适应） ----------
-    # 阶段门控阈值（S1.0f: 恢复严格阈值，回归 S0）
-    lat_ready_m: float = 0.10  # S1.0f: 0.5→0.10，回归 S0 严格阈值
-    yaw_ready_deg: float = 10.0  # S1.0f: 30.0→10.0，回归 S0 严格阈值
+    # ---------- S1.0h 奖励参数（距离自适应） ----------
+    # S1.0h: 对齐阈值随距离插值（远处松、近处紧），打破对齐-接近死锁
+    # 远处宽松阈值：允许策略在未完全对齐时也能接近，获得近处高质量对齐信号
+    # 近处严格阈值：确保插入前精确对齐
+    lat_ready_far: float = 0.6    # 远处横向对齐阈值（宽松，m）
+    lat_ready_close: float = 0.10  # 近处横向对齐阈值（严格，m）
+    yaw_ready_far_deg: float = 30.0   # 远处偏航对齐阈值（宽松，deg）
+    yaw_ready_close_deg: float = 10.0  # 近处偏航对齐阈值（严格，deg）
     d_safe_m: float = 0.7
     
     # 插入深度门控阈值
@@ -133,7 +148,7 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
             activate_contact_sensors=False,
         ),
         init_state=ArticulationCfg.InitialStateCfg(
-            pos=(-6.0, 0.0, 0.03),  # 后移到 X=-6m，与放大后的托盘保持距离
+            pos=(-3.5, 0.0, 0.03),  # S1.0h: 缩放 1.8x 后调整初始距离
             rot=(1.0, 0.0, 0.0, 0.0),
             joint_pos={
                 "left_front_wheel_joint": 0.0,
@@ -169,38 +184,49 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
                 stiffness=4000.0,
                 damping=400.0,
             ),
-            # lift joint (velocity targets)
+            # lift joint (position control — logs32 验证的唯一可行 drive 方式)
+            # Isaac Lab 的 ImplicitActuator 会将 stiffness/damping 写入 PhysX 关节驱动，
+            # 覆盖 USD DriveAPI 原始值。
+            # logs32 证明：stiffness=200000 + set_joint_position_target 可产生
+            # force ≈ 200000*pos_error ≈ 3200N（足以克服重力），lift 稳定升至 0.23m。
+            # 纯速度控制（stiffness=0）经 31 次实验全部失败。
             "lift": ImplicitActuatorCfg(
                 joint_names_expr=["lift_joint"],
                 velocity_limit=1.0,
-                effort_limit=5000.0,   # 5000 N，确保能举起托盘
-                stiffness=0.0,         # 速度控制模式，stiffness 必须为 0
-                damping=1000.0,        # 阻尼控制速度响应
+                effort_limit=50000.0,  # 50kN，与 USD DriveAPI maxForce 一致
+                stiffness=200000.0,    # 位置控制（logs32 验证值）
+                damping=10000.0,       # 阻尼（logs32 验证值）
             ),
         },
     )
 
     # pallet cfg (dynamic rigid body for realistic physics interaction)
-    # 修改说明：
+    # S1.0h 修改说明（参考 docs/learning_guiding/isaac_sim_asset_import.md）：
     # 1. 从 kinematic 改为动态刚体，使托盘可以被叉车推动和举起
-    # 2. 添加 scale=4.0 使托盘放大到与叉车货叉兼容的尺寸
+    # 2. scale=1.8 使托盘放大到与叉车货叉兼容的尺寸
     #    - 原始托盘插入孔宽度 ~228mm，货叉宽度 ~394mm
-    #    - 放大 4x 后插入孔宽度 ~912mm，足够容纳货叉
+    #    - 放大 1.8x 后插入孔宽度 ~410mm，足够容纳货叉
+    # 3. 添加 collision_props 设置接触参数（参考 collision_mesh_guide 第 6.1 节）
     pallet_cfg: RigidObjectCfg = RigidObjectCfg(
         prim_path="/World/envs/env_.*/Pallet",
         spawn=sim_utils.UsdFileCfg(
             usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/Pallet/pallet.usd",
-            scale=(4.0, 4.0, 4.0),  # 放大托盘使其与叉车货叉兼容
+            scale=(1.8, 1.8, 1.8),  # S1.0h: 1.8x 缩放（原 4.0x 错误）
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 rigid_body_enabled=True,
-                kinematic_enabled=False,  # 改为动态刚体，可被推动/举起
-                disable_gravity=False,    # 恢复重力，托盘会落在地面上
+                kinematic_enabled=False,  # 动态刚体，可被推动/举起
+                disable_gravity=False,    # 受重力影响，落在地面上
                 max_depenetration_velocity=1.0,
             ),
-            mass_props=sim_utils.MassPropertiesCfg(mass=30.0),  # 空托盘约 20-30 kg
+            mass_props=sim_utils.MassPropertiesCfg(mass=45.0),  # S1.0h: 空托盘约 45 kg
+            collision_props=sim_utils.CollisionPropertiesCfg(
+                collision_enabled=True,
+                contact_offset=0.02,   # 碰撞检测提前量（防止微小穿透）
+                rest_offset=0.005,     # 静止时最小间隙
+            ),
         ),
         init_state=RigidObjectCfg.InitialStateCfg(
-            pos=(0.0, 0.0, 0.30),  # 抬高到与货叉高度对齐（放大后托盘更高）
+            pos=(0.0, 0.0, 0.15),  # S1.0h: 1.8x 缩放后调整高度（原 0.30 为 4x 时的值）
             rot=(1.0, 0.0, 0.0, 0.0),
         ),
     )
