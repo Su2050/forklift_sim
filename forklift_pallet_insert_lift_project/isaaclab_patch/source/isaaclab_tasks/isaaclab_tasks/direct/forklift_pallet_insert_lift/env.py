@@ -115,7 +115,7 @@ def _force_pallet_convex_decomposition(stage, pallet_prim_path: str):
             
             # 凸分解参数
             convex_api = PhysxSchema.PhysxConvexDecompositionCollisionAPI.Apply(prim)
-            convex_api.GetMaxConvexHullsAttr().Set(32)   # 最大凸体数
+            convex_api.GetMaxConvexHullsAttr().Set(8)   # 最大凸体数（从32降到8，平衡精度与性能）
             convex_api.GetHullVertexLimitAttr().Set(64)  # 每个凸体最大顶点数
             applied_count += 1
     
@@ -370,46 +370,97 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
 
     def _setup_pallet_physics(self):
         """在环境克隆前，强制设置托盘物理属性
-        
+
         必须在 clone_environments() 之前调用，确保模板环境的设置能被克隆继承。
+
+        S1.0h 修复：
+        - 使用 Isaac Lab 官方 schemas.define_rigid_body_properties() 创建 RigidBodyAPI
+          （之前手动 UsdPhysics.RigidBodyAPI.Apply() 在 Nucleus 引用层上不生效）
+        - 若根 prim 失败，回退到子 prim 逐个尝试
+        - 所有关键 print 加 flush=True，避免 nohup 缓冲导致日志丢失
         """
         from pxr import Usd, UsdPhysics, PhysxSchema, UsdGeom
-        
+        from isaaclab.sim import schemas as rl_schemas
+
         stage = self.sim.stage
 
         # 诊断：修改前的 USD 状态（只看 env_0）
         diag_pallet_path = self.cfg.pallet_cfg.prim_path.replace("env_.*", "env_0")
         self._log_pallet_usd(stage, diag_pallet_path, label="修改前")
         self._log_pallet_physx(label="修改前")
-        
+
         # 只修改模板环境（env_0），让克隆继承
         pallet_path = self.cfg.pallet_cfg.prim_path.replace("env_.*", "env_0")
         root_prim = stage.GetPrimAtPath(pallet_path)
         if not root_prim.IsValid():
-            print(f"[警告] 找不到托盘 prim: {pallet_path}")
+            print(f"[警告] 找不到托盘 prim: {pallet_path}", flush=True)
             return
 
-        # ---- Step 1: 确保根 prim 有 RigidBodyAPI ----
-        # Nucleus 的 pallet.usd 默认不带 RigidBodyAPI，
-        # Isaac Lab 的 rigid_props 只能 modify 已有属性，如果 USD 里不存在会跳过。
-        # 因此我们显式 Apply，确保 PhysX 能识别为刚体。
-        if not root_prim.HasAPI(UsdPhysics.RigidBodyAPI):
+        # ---- Step 1: 创建 RigidBodyAPI（多级回退策略） ----
+        # Nucleus 的 pallet.usd 不含 RigidBodyAPI。Isaac Lab spawn 时调用的
+        # modify_rigid_body_properties 只修改已有 API，不会创建新 API（返回 False）。
+        # 使用 define_rigid_body_properties（先创建再修改）来解决。
+        rigid_cfg = sim_utils.RigidBodyPropertiesCfg(
+            rigid_body_enabled=True,
+            kinematic_enabled=False,
+            disable_gravity=False,
+            max_depenetration_velocity=1.0,
+        )
+
+        # 方案 A：在根 prim 上调用 Isaac Lab 官方 define API
+        try:
+            rl_schemas.define_rigid_body_properties(pallet_path, rigid_cfg, stage)
+            print(f"[信息] define_rigid_body_properties 已调用: {pallet_path}", flush=True)
+        except Exception as e:
+            print(f"[警告] define_rigid_body_properties 在根 prim 失败: {e}", flush=True)
+
+        rb_ok = root_prim.HasAPI(UsdPhysics.RigidBodyAPI)
+        print(f"[诊断] 根 prim HasAPI(RigidBodyAPI) = {rb_ok}", flush=True)
+
+        # 方案 B：根 prim 失败，逐个尝试子 prim（Xform / Mesh）
+        if not rb_ok:
+            print("[信息] 根 prim 未成功，尝试子 prim...", flush=True)
+            for child in Usd.PrimRange(root_prim):
+                if child == root_prim:
+                    continue
+                child_path = str(child.GetPath())
+                child_type = child.GetTypeName()
+                try:
+                    rl_schemas.define_rigid_body_properties(child_path, rigid_cfg, stage)
+                    if child.HasAPI(UsdPhysics.RigidBodyAPI):
+                        print(f"[信息] RigidBodyAPI 成功应用到子 prim: "
+                              f"{child_path} (type={child_type})", flush=True)
+                        rb_ok = True
+                        break
+                except Exception as e:
+                    print(f"[诊断] 子 prim {child_path} 失败: {e}", flush=True)
+
+        # 方案 C：全部失败，用低级 USD API 硬写并打印明确错误
+        if not rb_ok:
+            print("[警告] define API 均失败，尝试低级 USD API...", flush=True)
             UsdPhysics.RigidBodyAPI.Apply(root_prim)
-            print(f"[信息] 已为 {root_prim.GetPath()} 新建 RigidBodyAPI")
-        rb_api = UsdPhysics.RigidBodyAPI(root_prim)
-        rb_api.GetRigidBodyEnabledAttr().Set(True)
-        rb_api.GetKinematicEnabledAttr().Set(False)
-        print(f"[信息] {root_prim.GetPath()} → 动态刚体 (kinematic=False)")
+            rb_api = UsdPhysics.RigidBodyAPI(root_prim)
+            rb_api.GetRigidBodyEnabledAttr().Set(True)
+            rb_api.GetKinematicEnabledAttr().Set(False)
+            rb_ok = root_prim.HasAPI(UsdPhysics.RigidBodyAPI)
+            if rb_ok:
+                print(f"[信息] 低级 API 成功: {pallet_path}", flush=True)
+            else:
+                print(f"[错误] 所有方案均无法创建 RigidBodyAPI，训练将失败！", flush=True)
 
-        # 确保根 prim 也有 CollisionAPI（PhysX 需要至少一个碰撞形状）
-        if not root_prim.HasAPI(UsdPhysics.CollisionAPI):
-            UsdPhysics.CollisionAPI.Apply(root_prim)
+        # 注意：不在根 Xform prim 上添加 CollisionAPI。
+        # 碰撞形状只需在子 Mesh prim 上，根 Xform 加碰撞会导致双重碰撞检测，
+        # 严重拖慢仿真速度（947 vs 17000 steps/s）。
 
-        # ---- Step 2: 遍历所有子 prim 设置凸分解碰撞体 ----
+        # ---- Step 2: 遍历子 prim 设置凸分解碰撞体（跳过根 prim） ----
         prims_to_process = list(Usd.PrimRange(root_prim))
         for prim in prims_to_process:
+            # 跳过根 prim，只处理子 prim
+            if prim == root_prim:
+                continue
+
             # 已有 RigidBodyAPI 的子 prim 也强制设为动态
-            if prim.HasAPI(UsdPhysics.RigidBodyAPI) and prim != root_prim:
+            if prim.HasAPI(UsdPhysics.RigidBodyAPI):
                 rb = UsdPhysics.RigidBodyAPI(prim)
                 rb.GetRigidBodyEnabledAttr().Set(True)
                 rb.GetKinematicEnabledAttr().Set(False)
@@ -426,10 +477,10 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
                 mesh_collision_api.GetApproximationAttr().Set("convexDecomposition")
 
                 convex_api = PhysxSchema.PhysxConvexDecompositionCollisionAPI.Apply(prim)
-                convex_api.GetMaxConvexHullsAttr().Set(32)
+                convex_api.GetMaxConvexHullsAttr().Set(8)  # 从32降到8，平衡精度与性能
                 convex_api.GetHullVertexLimitAttr().Set(64)
-        
-        print("[信息] 托盘物理属性已设置完成（模板环境）")
+
+        print("[信息] 托盘物理属性已设置完成（模板环境）", flush=True)
         # 诊断：修改后的 USD 状态（只看 env_0）
         self._log_pallet_usd(stage, diag_pallet_path, label="修改后")
         self._log_pallet_physx(label="修改后")
@@ -704,8 +755,10 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         lift_vel = self._joint_vel[:, self._lift_id:self._lift_id + 1]
 
         # insertion depth (normalized)
+        # 注意：tip 是世界坐标，必须用 pallet 的世界坐标计算 front_x，不能用局部坐标标量
         tip = self._compute_fork_tip()
-        insert_depth = torch.clamp(tip[:, 0] - self._pallet_front_x, min=0.0)
+        pallet_front_x = pallet_pos[:, 0] - self.cfg.pallet_depth_m * 0.5  # (N,) 世界坐标
+        insert_depth = torch.clamp(tip[:, 0] - pallet_front_x, min=0.0)
         insert_norm = (insert_depth / (self.cfg.pallet_depth_m + 1e-6)).unsqueeze(-1)
 
         obs = torch.cat(
@@ -760,17 +813,19 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         # ==================================================================
         # Step 0: 基础量计算
         # ==================================================================
+        # 机器人/托盘位姿（提前获取，后续 insert_depth 和 y_err 都需要）
+        root_pos = self.robot.data.root_pos_w
+        pallet_pos = self.pallet.data.root_pos_w
+
         tip = self._compute_fork_tip()                                       # (N, 3)
-        insert_depth = torch.clamp(tip[:, 0] - self._pallet_front_x, min=0.0)  # 已插入距离 (m)
+        # 注意：tip 是世界坐标，必须用 pallet 的世界坐标计算 front_x，不能用局部坐标标量
+        pallet_front_x = pallet_pos[:, 0] - self.cfg.pallet_depth_m * 0.5   # (N,) 世界坐标
+        insert_depth = torch.clamp(tip[:, 0] - pallet_front_x, min=0.0)     # 已插入距离 (m)
         insert_norm = insert_depth / (self.cfg.pallet_depth_m + 1e-6)        # 归一化 [0, 1]
 
         # dist_front: 货叉尖端到 pocket 开口的剩余距离（正=尚未到达，0=已过开口）
-        dist_front = self._pallet_front_x - tip[:, 0]
+        dist_front = pallet_front_x - tip[:, 0]
         dist_front_clamped = torch.clamp(dist_front, min=0.0)
-
-        # 机器人/托盘位姿
-        root_pos = self.robot.data.root_pos_w
-        pallet_pos = self.pallet.data.root_pos_w
         y_err = torch.abs(pallet_pos[:, 1] - root_pos[:, 1])                # 横向误差 (m)
 
         yaw = _quat_to_yaw(self.robot.data.root_quat_w)                     # 机器人 yaw (rad)
@@ -1060,6 +1115,12 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         """
         if env_ids is None:
             env_ids = torch.arange(self.num_envs, device=self.device)
+
+        # ---- 重置基类 episode 计数器（必须！否则 episode_length_buf 永不归零） ----
+        # 基类 DirectRLEnv._reset_idx() 中会做 self.episode_length_buf[env_ids] = 0
+        # 如果不调用 super()，RSL-RL 的 init_at_random_ep_len 随机初始值将永远不会被清除，
+        # 导致环境在训练前几轮就全部进入永久超时（episode length = 1）。
+        super()._reset_idx(env_ids)
 
         # ---- 计数器清零 ----
         self._last_insert_depth[env_ids] = 0.0

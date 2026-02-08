@@ -222,7 +222,7 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
         prim_path="/World/envs/env_.*/Pallet",
         spawn=sim_utils.UsdFileCfg(
             usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/Pallet/pallet.usd",
-            scale=(1.6, 1.6, 1.6),  # 托盘统一缩放（修改后需同步更新相关几何参数）
+            scale=(1.8, 1.8, 1.8),  # 托盘统一缩放（修改后需同步更新相关几何参数）
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 rigid_body_enabled=True,
                 kinematic_enabled=False,  # 动态刚体，可被推动/举起

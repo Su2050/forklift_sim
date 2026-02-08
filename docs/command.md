@@ -1,18 +1,24 @@
-#开启训练
+# 开启训练（S1.0h）
+# 注意：必须先退出 conda（Isaac Sim 使用自带 Python 3.11）
+conda deactivate
 cd /home/uniubi/projects/forklift_sim/IsaacLab
 
-nohup ./isaaclab.sh -p scripts/reinforcement_learning/rsl_rl/train.py \
+LOG_FILE="/home/uniubi/projects/forklift_sim/logs/$(date +%Y%m%d_%H%M%S)_train_s1.0h.log"
+
+nohup env TERM=xterm PYTHONUNBUFFERED=1 ./isaaclab.sh -p \
+  scripts/reinforcement_learning/rsl_rl/train.py \
   --task Isaac-Forklift-PalletInsertLift-Direct-v0 \
   --num_envs 1024 \
   --headless \
   --max_iterations 2000 \
-  agent.run_name=exp_reward_v3 \
-  > ../train_reward_v3.log 2>&1 &
+  agent.run_name=exp_s1.0h \
+  > "$LOG_FILE" 2>&1 &
 
 echo "训练已在后台启动，PID: $!"
+echo "日志文件: $LOG_FILE"
 
 # 实时查看日志
-tail -f /home/uniubi/projects/forklift_sim/train_reward_v3.log
+tail -f "$LOG_FILE"
 
 # 查看最新的 mean reward
 grep "mean reward" /home/uniubi/projects/forklift_sim/train_reward_v3.log | tail -20
@@ -77,13 +83,7 @@ cd /home/uniubi/projects/forklift_sim/IsaacLab
 
 # --- 叉车插入举升功能验证 (verify_forklift_insert_lift.py) ---
 
-# 1) 自动化测试（无渲染，适合 CI / SSH）— 运行 8 项测试并生成报告
-cd /home/uniubi/projects/forklift_sim/IsaacLab
-./isaaclab.sh -p ../scripts/verify_forklift_insert_lift.py --headless
 
-# 2) 自动化测试（带可视化）— 可在 Isaac Sim 窗口中观看全过程
-cd /home/uniubi/projects/forklift_sim/IsaacLab
-./isaaclab.sh -p ../scripts/verify_forklift_insert_lift.py
 
 # 3) 手动键盘控制 — 自由操控叉车
 cd /home/uniubi/projects/forklift_sim/IsaacLab
