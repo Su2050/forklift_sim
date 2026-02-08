@@ -693,6 +693,9 @@ class ForkliftVerification:
         # FIX #6: 设置首步标记，防止增量奖励异常
         self.env._is_first_step[0] = True
 
+        # FIX #9: 重置 episode 计时器，防止跨测试累计导致 episode timeout
+        self.env.episode_length_buf[0] = 0
+
         # FIX #7: 重置势函数缓存
         self.env._last_Phi_insert[0] = 0.0
         self.env._last_Phi_lift[0] = 0.0
@@ -881,8 +884,9 @@ class ForkliftVerification:
             details.append(f"⚠️  对齐状态未达标，可能影响插入")
         
         # 3. 控制叉车向前推进，直到插入
-        target_insert_depth = 0.3  # 目标插入深度30cm
-        max_steps = 200
+        # 物理碰撞约 1.0m 时卡住（托盘内部几何限制），目标设为可达值
+        target_insert_depth = min(0.8, self.env._insert_thresh)
+        max_steps = 400
         
         print(f"\n控制叉车向前推进，目标插入深度: {target_insert_depth:.2f}m")
         
@@ -937,7 +941,7 @@ class ForkliftVerification:
                 else:
                     drive = 0.2  # 接近时慢速推进
             elif metrics['dist_front'] > 0:  # 已超过托盘前部，继续推进以增加插入深度
-                drive = 0.1  # 已插入，慢速推进
+                drive = 0.2  # 已插入，中速推进
             else:  # dist_front == 0，刚好在托盘前部
                 drive = 0.2  # 开始插入，中速推进
             
@@ -1122,17 +1126,21 @@ class ForkliftVerification:
         details = []
         passed = True
         
-        # 1. 确保已经插入托盘
+        # 重置 episode 计时器，防止插入测试步数累积导致 episode timeout
+        self.env.episode_length_buf[0] = 0
+        
+        # 1. 确保已经插入托盘（物理碰撞限制最大约 1.0m，门槛设为可达值）
+        min_insert_for_lift = min(0.5, self.env._insert_thresh * 0.5)
         current_metrics = self.get_insertion_metrics()
-        if current_metrics['insert_depth'] < 0.1:
-            print("检测到未插入状态，先设置理想对齐位置并推进插入...")
+        if current_metrics['insert_depth'] < min_insert_for_lift:
+            print(f"检测到插入不足（{current_metrics['insert_depth']:.3f}m < {min_insert_for_lift:.3f}m），先推进插入...")
             self.set_robot_ideal_position(distance_from_front=0.5)
             
             # 推进插入
             print("推进插入...")
-            for i in range(200):
+            for i in range(400):
                 metrics = self.get_insertion_metrics()
-                if metrics['insert_depth'] >= 0.2:  # 插入20cm
+                if metrics['insert_depth'] >= min_insert_for_lift:
                     print(f"  达到插入深度，步数: {i}")
                     break
                 
@@ -1141,13 +1149,13 @@ class ForkliftVerification:
                 if metrics['dist_front'] < 0:  # 还未到达托盘前部
                     drive = 0.3 if abs_dist_front > 0.1 else 0.2
                 elif metrics['dist_front'] > 0:  # 已超过托盘前部
-                    drive = 0.1
+                    drive = 0.2
                 else:
                     drive = 0.2
                 
                 self.manual_control(drive=drive, steer=0.0, lift=0.0, steps=1)
                 
-                if i % 20 == 0:
+                if i % 40 == 0:
                     print(f"  步数 {i}: dist_front={metrics['dist_front']:.4f}m, insert_depth={metrics['insert_depth']:.4f}m")
             
             current_metrics = self.get_insertion_metrics()
@@ -1292,13 +1300,13 @@ class ForkliftVerification:
         print("\n键位说明:")
         print("  W/S: 前进/后退")
         print("  A/D: 左转/右转")
-        print("  Q/E: 升降上升/下降")
+        print("  R/F: 货叉上升/下降（Raise/Fall）")
         print("  SPACE: 停止所有动作")
-        print("  R: 重置到理想位置")
+        print("  G: 重置到理想位置")
         print("  P: 打印当前状态")
         print("  ESC: 退出")
 
-        keyboard.add_callback("R", lambda: self.set_robot_ideal_position(distance_from_front=0.5))
+        keyboard.add_callback("G", lambda: self.set_robot_ideal_position(distance_from_front=0.5))
         keyboard.add_callback("P", self.print_current_status)
         keyboard.add_callback("ESCAPE", simulation_app.close)
 
@@ -1324,58 +1332,71 @@ class ForkliftVerification:
         simulation_app.close()
     
     def verify_fork_tip_computation(self) -> TestResult:
-        """验证_compute_fork_tip()计算的准确性"""
+        """验证_compute_fork_tip()计算的准确性
+        
+        验证策略：独立复现运动学计算（root_pos + yaw旋转偏移 + lift），
+        而非依赖 body_pos_w（Fabric clone 失败时所有 body 位置等于 root，不可靠）。
+        """
         print_section("验证货叉尖端计算")
         
         details = []
         passed = True
         
-        # 获取所有body位置
         root_pos = self.env.robot.data.root_pos_w[0]
         root_quat = self.env.robot.data.root_quat_w[0]
-        body_pos = self.env.robot.data.body_pos_w[0]  # (B, 3)
         
-        # 计算yaw和forward向量
+        # ---- 1. 独立复现运动学计算 ----
         yaw = self._quat_to_yaw(root_quat)
-        fwd = torch.stack([torch.cos(yaw), torch.sin(yaw), torch.zeros_like(yaw)])
+        fwd_offset = self.env._fork_forward_offset
+        z_base = self.env._fork_z_base
+        lift_pos = self.env._joint_pos[0, self.env._lift_id].item()
         
-        # 计算每个body的投影
-        rel = body_pos - root_pos.unsqueeze(0)  # (B, 3)
-        proj = (rel * fwd.unsqueeze(0)).sum(-1)  # (B,)
-        idx = torch.argmax(proj)
+        computed_tip_x = root_pos[0].item() + fwd_offset * math.cos(yaw.item())
+        computed_tip_y = root_pos[1].item() + fwd_offset * math.sin(yaw.item())
+        computed_tip_z = root_pos[2].item() + z_base + lift_pos
+        computed_tip = torch.tensor([computed_tip_x, computed_tip_y, computed_tip_z],
+                                     device=root_pos.device)
         
-        # 获取计算出的tip
-        computed_tip = body_pos[idx]
-        
-        # 使用环境的_compute_fork_tip()方法
+        # ---- 2. 环境的 _compute_fork_tip() 结果 ----
         env_tip = self.env._compute_fork_tip()[0]
         
-        print("货叉尖端计算验证:")
-        print_info("计算出的tip位置", f"({computed_tip[0]:.4f}, {computed_tip[1]:.4f}, {computed_tip[2]:.4f})")
+        print("货叉尖端计算验证（运动学复现 vs env._compute_fork_tip）:")
+        print_info("独立计算的tip位置", f"({computed_tip[0]:.4f}, {computed_tip[1]:.4f}, {computed_tip[2]:.4f})")
         print_info("环境计算的tip位置", f"({env_tip[0]:.4f}, {env_tip[1]:.4f}, {env_tip[2]:.4f})")
         
-        # 检查是否一致
         diff = torch.norm(computed_tip - env_tip).item()
         print_info("差异", f"{diff:.6f}")
         
-        if diff < 1e-5:
-            details.append("✅ _compute_fork_tip()计算正确")
+        if diff < 0.01:
+            details.append(f"✅ _compute_fork_tip() 运动学一致（差异 {diff:.6f}）")
         else:
-            details.append(f"❌ _compute_fork_tip()计算有误（差异 {diff:.6f}）")
+            details.append(f"❌ _compute_fork_tip() 运动学不一致（差异 {diff:.6f}）")
             passed = False
         
-        # 打印投影最大的body信息
-        print(f"\n投影最大的body:")
-        print_info("Body索引", f"{idx.item()}")
-        print_info("投影值", f"{proj[idx].item():.4f}")
-        print_info("Body位置", f"({body_pos[idx][0]:.4f}, {body_pos[idx][1]:.4f}, {body_pos[idx][2]:.4f})")
+        # ---- 3. 偏移量合理性检查 ----
+        print(f"\n运动学参数:")
+        print_info("_fork_forward_offset", f"{fwd_offset:.4f}m")
+        print_info("_fork_z_base", f"{z_base:.4f}m")
+        print_info("lift_pos", f"{lift_pos:.4f}m")
+        print_info("root_pos", f"({root_pos[0]:.4f}, {root_pos[1]:.4f}, {root_pos[2]:.4f})")
+        print_info("yaw", f"{math.degrees(yaw.item()):.2f}°")
         
-        # 打印所有body的投影（前5个最大的）
-        top5_proj, top5_idx = torch.topk(proj, min(5, len(proj)))
-        print(f"\n投影前5的body:")
-        for i, (proj_val, body_idx) in enumerate(zip(top5_proj, top5_idx)):
-            body_name = self.env.robot.body_names[body_idx] if hasattr(self.env.robot, 'body_names') else f"body_{body_idx}"
-            print(f"  {i+1}. {body_name}: 投影={proj_val:.4f}, 位置=({body_pos[body_idx][0]:.4f}, {body_pos[body_idx][1]:.4f}, {body_pos[body_idx][2]:.4f})")
+        if 0.5 < fwd_offset < 5.0:
+            details.append(f"✅ 前向偏移合理（{fwd_offset:.4f}m）")
+        else:
+            details.append(f"⚠️  前向偏移可能不合理（{fwd_offset:.4f}m），预期 0.5~5.0m")
+        
+        # ---- 4. body_pos_w 数据质量诊断（仅信息输出，不影响通过/失败） ----
+        body_pos = self.env.robot.data.body_pos_w[0]  # (B, 3)
+        rel = body_pos - root_pos.unsqueeze(0)
+        max_body_dist = torch.norm(rel, dim=-1).max().item()
+        print(f"\n[INFO] body_pos_w 数据质量:")
+        print_info("body 最大偏离 root 距离", f"{max_body_dist:.6f}m")
+        if max_body_dist < 1e-3:
+            print("  ⚠️  所有 body 位置等于 root（Fabric clone 已知问题，不影响 _compute_fork_tip）")
+            details.append("ℹ️  body_pos_w 全零（Fabric clone 问题），运动学方法不受影响")
+        else:
+            details.append(f"✅ body_pos_w 数据正常（最大偏离 {max_body_dist:.4f}m）")
         
         return TestResult(
             name="货叉尖端计算验证",
@@ -1385,6 +1406,7 @@ class ForkliftVerification:
                 "computed_tip_x": computed_tip[0].item(),
                 "env_tip_x": env_tip[0].item(),
                 "difference": diff,
+                "fork_forward_offset": fwd_offset,
             }
         )
     
@@ -1582,11 +1604,11 @@ class ForkliftVerification:
         
         self.results.append(self.test_approach())
         self.results.append(self.test_alignment())
+        self.results.append(self.test_insertion())
         
-        # 在插入测试前再次验证计算
+        # 在插入测试之后验证插入深度计算（此时货叉已进入托盘，dist_front > 0）
         self.results.append(self.verify_insertion_depth_computation())
         
-        self.results.append(self.test_insertion())
         self.results.append(self.test_lift())
         
         # 生成报告

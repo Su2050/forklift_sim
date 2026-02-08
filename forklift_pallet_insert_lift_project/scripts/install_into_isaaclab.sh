@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
-set -euo pipefail
+# 将 forklift_pallet_insert_lift 任务安装到 IsaacLab 目录中。
+# 说明：
+# - 这是“补丁式”安装：把任务目录复制到 IsaacLab 固定路径
+# - 会覆盖 IsaacLab 里已有同名任务目录（全量替换）
+# - 并确保 direct/__init__.py 中有导入行以触发 gym.register()
+set -euo pipefail  # 遇到错误立即退出；未定义变量报错；管道中任一失败则整体失败
 
 ISAACLAB_DIR="${1:-}"
 if [[ -z "${ISAACLAB_DIR}" ]]; then
@@ -11,12 +16,12 @@ if [[ ! -d "${ISAACLAB_DIR}/source/isaaclab_tasks/isaaclab_tasks" ]]; then
   exit 1
 fi
 
-SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"  # 当前项目根目录
 PATCH_SRC="${SRC_DIR}/isaaclab_patch/source/isaaclab_tasks/isaaclab_tasks/direct/forklift_pallet_insert_lift"
 DST_DIR="${ISAACLAB_DIR}/source/isaaclab_tasks/isaaclab_tasks/direct/forklift_pallet_insert_lift"
 
 echo "[INFO] Copying task into IsaacLab..."
-rm -rf "${DST_DIR}"
+rm -rf "${DST_DIR}"  # 全量替换，避免旧文件残留
 mkdir -p "$(dirname "${DST_DIR}")"
 cp -R "${PATCH_SRC}" "${DST_DIR}"
 

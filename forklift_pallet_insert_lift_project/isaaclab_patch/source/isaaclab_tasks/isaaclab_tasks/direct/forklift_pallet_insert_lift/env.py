@@ -1,3 +1,25 @@
+"""Forklift Pallet Insert+Lift 环境实现（DirectRLEnv）。
+
+本文件是任务的核心逻辑，包含：
+- 任务环境类 `ForkliftPalletInsertLiftEnv`
+- 观测、奖励、终止与重置逻辑
+- 叉车/托盘物理修复与诊断工具
+
+调用流程（Isaac Lab 直接环境）：
+1) `_setup_scene()`：创建资产、设置物理、克隆环境
+2) `_reset_idx()`：按 env_ids 重置初始状态
+3) 每步循环：
+   - `_pre_physics_step(actions)`  缓存动作
+   - `_apply_action()`             将动作写入仿真
+   - `_get_observations()`         计算观测
+   - `_get_rewards()`              计算奖励
+   - `_get_dones()`                判断终止/超时
+
+坐标约定：
+- 机器人朝向以 yaw（Z 轴旋转）描述
+- 叉车从 -X 方向接近托盘，插入深度沿 +X 增加
+"""
+
 from __future__ import annotations
 
 import math
@@ -109,7 +131,7 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self.robot: Articulation = self.scene.articulations["robot"]
         self.pallet: RigidObject = self.scene.rigid_objects["pallet"]
 
-        # joint indices
+        # joint indices：将关节名字映射为索引，便于后续批量设置目标
         self._front_wheel_ids, _ = self.robot.find_joints(["left_front_wheel_joint", "right_front_wheel_joint"], preserve_order=True)
         self._back_wheel_ids, _ = self.robot.find_joints(["left_back_wheel_joint", "right_back_wheel_joint"], preserve_order=True)
         self._rotator_ids, _ = self.robot.find_joints(["left_rotator_joint", "right_rotator_joint"], preserve_order=True)
@@ -120,6 +142,11 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self._lift_id = self._lift_id[0]
 
         # ---- 基础缓存 ----
+        # actions: 当前步动作缓存（归一化动作）
+        # _last_insert_depth: 上一步插入深度（用于安全制动与奖励增量）
+        # _fork_tip_z0: reset 时 fork tip 的基准高度
+        # _hold_counter: 成功条件保持计数器
+        # _lift_pos_target: lift 关节位置目标（位置控制）
         self.actions = torch.zeros((self.num_envs, self.cfg.action_space), device=self.device)
         self._last_insert_depth = torch.zeros((self.num_envs,), device=self.device)
         self._fork_tip_z0 = torch.zeros((self.num_envs,), device=self.device)
@@ -483,6 +510,14 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
     # Scene setup
     # ---------------------------
     def _setup_scene(self):
+        """构建场景与资产。
+
+        注意顺序：
+        1) 创建资产（robot/pallet）
+        2) 修改模板环境（env_0）的物理属性
+        3) 在克隆前修复 lift joint DriveAPI
+        4) 克隆环境并加入场景
+        """
         # assets
         self.robot = Articulation(self.cfg.robot_cfg)
         self.pallet = RigidObject(self.cfg.pallet_cfg)
@@ -524,6 +559,13 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self.actions = torch.clamp(actions, -1.0, 1.0)
 
     def _apply_action(self) -> None:
+        """将动作写入仿真。
+
+        动作含义：
+        - actions[:,0] 驱动（车轮角速度）
+        - actions[:,1] 转向（前轮转角）
+        - actions[:,2] 举升（lift 位置增量）
+        """
         # decode actions
         drive = self.actions[:, 0] * self.cfg.wheel_speed_rad_s
         steer = self.actions[:, 1] * self.cfg.steer_angle_rad
@@ -589,6 +631,17 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         return torch.stack([tip_x, tip_y, tip_z], dim=-1)
 
     def _get_observations(self) -> dict[str, torch.Tensor]:
+        """构造观测向量（长度=14）。
+
+        顺序如下：
+        1) 机器人到托盘的相对位置（机器人坐标系）d_xy_r (2)
+        2) 偏航差 dyaw 的 cos/sin (2)
+        3) 机器人线速度（机器人坐标系）v_xy_r (2)
+        4) 机器人偏航角速度 yaw_rate (1)
+        5) lift 关节位置与速度 (2)
+        6) 插入深度归一化 insert_norm (1)
+        7) 当前动作 actions (3)
+        """
         # ---- 从 PhysX view 刷新关节数据 ----
         # robot.data.joint_pos 在 Fabric clone 失败时不更新（始终为 0），
         # 但 root_physx_view.get_dof_positions() 能正确返回值。
@@ -997,6 +1050,14 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
     # Reset
     # ---------------------------
     def _reset_idx(self, env_ids: torch.Tensor | None):
+        """按 env_ids 重置环境。
+
+        包括：
+        - 清零奖励/插入缓存
+        - 托盘固定在初始位姿
+        - 叉车随机化初始位姿（x/y/yaw）
+        - 关节与速度归零，并刷新物理状态
+        """
         if env_ids is None:
             env_ids = torch.arange(self.num_envs, device=self.device)
 

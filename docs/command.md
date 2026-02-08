@@ -68,49 +68,37 @@ cd /home/uniubi/projects/forklift_sim/IsaacLab
   --video --video_length 600
 
 
-#开启验证脚本（手动控制叉车验证插入举升功能）
+# ============================================================
+# 验证与诊断
+# ============================================================
+# 注意：以下脚本必须通过 isaaclab.sh 运行（需要 IsaacLab Python 环境），
+#       不能直接 python scripts/xxx.py
+# 详细说明：docs/verify_forklift_insert_lift_usage.md
+
+# --- 叉车插入举升功能验证 (verify_forklift_insert_lift.py) ---
+
+# 1) 自动化测试（无渲染，适合 CI / SSH）— 运行 8 项测试并生成报告
 cd /home/uniubi/projects/forklift_sim/IsaacLab
 ./isaaclab.sh -p ../scripts/verify_forklift_insert_lift.py --headless
 
-# 注意：必须通过 isaaclab.sh 运行，不能直接运行脚本
-# 详细说明请参考：docs/verify_forklift_insert_lift_usage.md
-
-
-#验证IsaacSim环境
+# 2) 自动化测试（带可视化）— 可在 Isaac Sim 窗口中观看全过程
 cd /home/uniubi/projects/forklift_sim/IsaacLab
-./isaaclab.sh -p ../scripts/verify_forklift_insert_lift.py --headless
+./isaaclab.sh -p ../scripts/verify_forklift_insert_lift.py
 
-#验证叉车托盘几何兼容性（检查货叉与插入孔尺寸是否匹配）
+# 3) 手动键盘控制 — 自由操控叉车
+cd /home/uniubi/projects/forklift_sim/IsaacLab
+./isaaclab.sh -p ../scripts/verify_forklift_insert_lift.py --manual
+#   键位：W/S 前进后退, A/D 左右转, R/F 货叉升降, G 重置到理想位置, P 打印状态, SPACE 停止
+
+# 4) 手动控制 + 自动对齐 — 先自动将叉车摆到理想插入位置，再交由键盘接管
+cd /home/uniubi/projects/forklift_sim/IsaacLab
+./isaaclab.sh -p ../scripts/verify_forklift_insert_lift.py --manual --auto-align
+
+# --- 叉车托盘几何兼容性检查 (verify_geometry_compatibility.py) ---
+# 分析货叉/托盘插入孔尺寸、碰撞形状、兼容性，生成诊断报告
 cd /home/uniubi/projects/forklift_sim/IsaacLab
 ./isaaclab.sh -p ../scripts/verify_geometry_compatibility.py --headless
 
-# 注意：必须通过 isaaclab.sh 运行，不能直接运行脚本
-# 该脚本会：
-# 1. 分析货叉几何尺寸（宽度、高度、间距、长度）
-# 2. 分析托盘插入孔几何尺寸（宽度、高度、间距、深度）
-# 3. 检查碰撞形状类型
-# 4. 进行几何兼容性分析
-# 5. 执行实际碰撞测试
-# 6. 生成诊断报告和建议
-
-
-使用方式：
-自动模式（原有逻辑）
-./isaaclab.sh -p ../scripts/verify_forklift_insert_lift.py --headless
-手动模式（可视化）
-./isaaclab.sh -p ../scripts/verify_forklift_insert_lift.py --manual
-手动 + 自动对齐
-./isaaclab.sh -p ../scripts/verify_forklift_insert_lift.py --manual --auto-align
-
+# --- Nucleus 托盘资产扫描 (scan_nucleus_pallets.py) ---
 cd /home/uniubi/projects/forklift_sim/IsaacLab
 ./isaaclab.sh -p ../scripts/scan_nucleus_pallets.py --headless
-
-cd /home/uniubi/projects/forklift_sim/IsaacLab
-./isaaclab.sh -p ../scripts/verify_forklift_insert_lift.py --manual --auto-align
-
-cd /home/uniubi/projects/forklift_sim/IsaacLab
-./isaaclab.sh -p ../scripts/verify_forklift_insert_lift.py --manual
-
-
-cd /home/uniubi/projects/forklift_sim
-python scripts/verify_forklift_insert_lift.py
