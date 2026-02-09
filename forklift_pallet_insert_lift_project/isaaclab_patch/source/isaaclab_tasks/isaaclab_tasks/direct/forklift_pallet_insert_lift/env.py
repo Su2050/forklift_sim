@@ -682,7 +682,7 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         return torch.stack([tip_x, tip_y, tip_z], dim=-1)
 
     def _get_observations(self) -> dict[str, torch.Tensor]:
-        """构造观测向量（长度=14）。
+        """构造观测向量（长度=13）。
 
         顺序如下：
         1) 机器人到托盘的相对位置（机器人坐标系）d_xy_r (2)
@@ -930,12 +930,12 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         r_align = torch.where(self._is_first_step, torch.zeros_like(r_align), r_align)
         rew += r_align
 
-        # 修改 D: 远距离前进速度奖励 × w_yaw，鼓励 "边走边摆正"
-        r_forward = self.cfg.k_forward * w_far * w_yaw * torch.clamp(v_xy_r_x, min=0.0)
+        # 修改 D: 全距离前进速度奖励（堵住后退对齐漏洞）
+        r_forward = self.cfg.k_forward * torch.clamp(v_xy_r_x, min=0.0)
         rew += r_forward
 
-        # 绝对对齐惩罚（近处持续惩罚未对齐状态，E_align clamp [0,2]）
-        pen_align_abs = -self.cfg.k_align_abs * w_close * torch.clamp(E_align, 0.0, 2.0)
+        # 绝对对齐惩罚（距离无关，E_align 本身已含距离自适应阈值）
+        pen_align_abs = -self.cfg.k_align_abs * torch.clamp(E_align, 0.0, 2.0)
         rew += pen_align_abs
 
         # ==================================================================
@@ -1157,14 +1157,12 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         joint_vel = torch.zeros_like(joint_pos)
         self._write_joint_state(self.robot, joint_pos, joint_vel, env_ids)
 
-        # 写入仿真并更新一步，填充缓存
-        self.scene.write_data_to_sim()
-        self.sim.reset()
-        self.scene.update(self.cfg.sim.dt)
-
         # ---- 基线 fork tip 高度 ----
-        tip = self._compute_fork_tip()
-        self._fork_tip_z0[env_ids] = tip[:, 2][env_ids]
+        # S1.0h 修复：不再调用 scene.write_data_to_sim() / sim.reset() / scene.update()
+        # sim.reset() 是全局 PhysX 引擎重置，会将所有 1024 个环境的位姿覆盖回 config 默认值，
+        # 完全摧毁上面刚写入的随机化位姿（详见 S0.7 postmortem）。
+        # _fork_z_base = 0.0（训练日志实测），因此 fork_tip_z0 = root_z = z.squeeze(-1)，误差为零。
+        self._fork_tip_z0[env_ids] = z.squeeze(-1)
 
         # ---- S1.0h: 初始化增量奖励缓存（防止首步异常奖励） ----
         # 注：此处用 robot center x 近似 fork tip x 位置，
@@ -1179,9 +1177,8 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
                          + yaw_err_deg_reset / self.cfg.yaw_ready_far_deg)
         self._last_E_align[env_ids] = E_align_reset
 
-        # 举升增量缓存
-        lift_height_reset = tip[:, 2][env_ids] - self._fork_tip_z0[env_ids]
-        self._last_lift_pos[env_ids] = lift_height_reset
+        # 举升增量缓存（reset 时 lift=0，lift_height 恒等于 0）
+        self._last_lift_pos[env_ids] = 0.0
 
         # ---- S1.0h 修改 G: 初始化势函数缓存 ----
         # reset 时 insert_depth ≈ 0、lift_height ≈ 0 → Phi ≈ 0
@@ -1190,8 +1187,8 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self._last_Phi_insert[env_ids] = 0.0
         self._last_Phi_lift[env_ids] = 0.0
 
-        # reset robot actuators
-        self.robot.reset(env_ids)
+        # 注：不再额外调用 self.robot.reset(env_ids)，
+        # super()._reset_idx() 已通过 scene.reset(env_ids) 调用过一次。
 
     # ---------------------------
     # Compatibility helpers (API name differences across versions)

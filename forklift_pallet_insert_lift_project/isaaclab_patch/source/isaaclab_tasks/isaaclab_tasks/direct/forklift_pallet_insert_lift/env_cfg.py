@@ -46,7 +46,7 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     action_space = 3
 
     # observations: 向量观测，具体构成见 env._get_observations()
-    observation_space = 14
+    observation_space = 13
 
     # no separate privileged state in this minimal patch（不使用特权观测）
     state_space = 0
@@ -116,9 +116,9 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     k_pre_close: float = 5.0
 
     # 固定系数
-    k_align_abs: float = 0.10  # S1.0d: 0.05→0.10，绝对对齐惩罚系数
+    k_align_abs: float = 0.05  # S1.0i: 0.10→0.05，去掉 w_close 后降低强度
     k_lift: float = 20.0  # 举升奖励系数
-    k_forward: float = 0.02  # 远距离前进速度奖励系数
+    k_forward: float = 0.5  # S1.0i: 0.02→0.5，全距离前进奖励
 
     # 常驻惩罚
     rew_action_l2: float = -0.01
