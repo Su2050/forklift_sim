@@ -108,6 +108,7 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     k_ins_far: float = 8.0
     k_pre_far: float = 12.0
     k_dist_far: float = 0.3
+    k_dist_cont: float = 0.03  # S1.0j: 全距离连续距离惩罚系数
 
     # 距离自适应系数（近处值）
     k_app_close: float = 8.0
@@ -118,7 +119,6 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     # 固定系数
     k_align_abs: float = 0.05  # S1.0i: 0.10→0.05，去掉 w_close 后降低强度
     k_lift: float = 20.0  # 举升奖励系数
-    k_forward: float = 0.5  # S1.0i: 0.02→0.5，全距离前进奖励
 
     # 常驻惩罚
     rew_action_l2: float = -0.01
@@ -127,6 +127,9 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     # 成功奖励
     rew_success: float = 100.0
     rew_success_time: float = 30.0
+
+    # S1.0j: 超时终局惩罚（未成功就超时时触发）
+    rew_timeout: float = -10.0
 
     # termination thresholds
     max_roll_pitch_rad: float = 0.45  # ~25 deg
