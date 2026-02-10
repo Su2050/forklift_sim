@@ -84,51 +84,49 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     steer_angle_rad: float = 0.6
     lift_speed_m_s: float = 0.25
 
-    # ---------- S1.0h 奖励参数（距离自适应） ----------
-    # S1.0h: 对齐阈值随距离插值（远处松、近处紧），打破对齐-接近死锁
-    # 远处宽松阈值：允许策略在未完全对齐时也能接近，获得近处高质量对齐信号
-    # 近处严格阈值：确保插入前精确对齐
-    lat_ready_far: float = 0.6    # 远处横向对齐阈值（宽松，m）
-    lat_ready_close: float = 0.10  # 近处横向对齐阈值（严格，m）
-    yaw_ready_far_deg: float = 30.0   # 远处偏航对齐阈值（宽松，deg）
-    yaw_ready_close_deg: float = 10.0  # 近处偏航对齐阈值（严格，deg）
-    d_safe_m: float = 0.7
-    
-    # 插入深度门控阈值（插入足够深后才允许举升）
-    insert_gate_norm: float = 0.60  # 插入深度达到60%后开始允许举升
-    insert_ramp_norm: float = 0.10  # 线性区间宽度（60%→70%）
+    # ---------- S1.0k 奖励参数（三阶段势函数 + 严格几何） ----------
+    # PPO 折扣因子（势函数 shaping 用）
+    gamma: float = 0.99
 
-    # 距离阈值（用于距离自适应权重）
-    d_far: float = 2.6   # 远端阈值
-    d_close: float = 1.1  # 近端阈值
+    # Stage 1: 距离带 + 粗对齐
+    d1_min: float = 2.0      # 距离带下界 (m)
+    d1_max: float = 3.0      # 距离带上界 (m)
+    e_band_scale: float = 0.5  # 距离带误差归一化尺度
+    y_scale1: float = 0.25   # Stage1 横向误差尺度 (m)
+    yaw_scale1: float = 15.0  # Stage1 偏航误差尺度 (deg)
+    k_phi1: float = 6.0      # Stage1 势函数强度
 
-    # 距离自适应系数（远处值）
-    k_app_far: float = 10.0
-    k_align_far: float = 2.0
-    k_ins_far: float = 8.0
-    k_pre_far: float = 12.0
-    k_dist_far: float = 0.3
-    k_dist_cont: float = 0.03  # S1.0j: 全距离连续距离惩罚系数
+    # Stage 2: 微调接近（从距离带推到口前）
+    d2_scale: float = 1.0    # Stage2 前向距离尺度 (m)
+    y_scale2: float = 0.12   # Stage2 横向误差尺度 (m)
+    yaw_scale2: float = 8.0  # Stage2 偏航误差尺度 (deg)
+    k_phi2: float = 10.0     # Stage2 势函数强度
+    y_gate2: float = 0.25    # Stage2 粗对齐门控 (m)
+    yaw_gate2: float = 15.0  # Stage2 粗对齐门控 (deg)
 
-    # 距离自适应系数（近处值）
-    k_app_close: float = 8.0
-    k_align_close: float = 10.0
-    k_ins_close: float = 15.0
-    k_pre_close: float = 5.0
+    # Stage 3: 插入深化
+    ins_start: float = 0.02  # 插入接管起始阈值 (归一化)
+    ins_ramp: float = 0.05   # 插入接管缓坡宽度
+    y_gate3: float = 0.10    # Stage3 严对齐门控 (m)
+    yaw_gate3: float = 8.0   # Stage3 严对齐门控 (deg)
+    k_ins: float = 18.0      # 插入势函数强度
 
-    # 固定系数
-    k_align_abs: float = 0.05  # S1.0i: 0.10→0.05，去掉 w_close 后降低强度
-    k_lift: float = 20.0  # 举升奖励系数
+    # 举升
+    insert_gate_norm: float = 0.60  # 允许举升的插入深度门槛
+    insert_ramp_norm: float = 0.10  # 举升门控缓坡
+    k_lift: float = 20.0     # 举升势函数强度
+    k_pre: float = 10.0      # 空举惩罚系数
 
     # 常驻惩罚
     rew_action_l2: float = -0.01
     rew_time_penalty: float = -0.003
+    k_dist_cont: float = 0.02  # S1.0k: 0.03→0.02，避免压死探索
 
     # 成功奖励
     rew_success: float = 100.0
     rew_success_time: float = 30.0
 
-    # S1.0j: 超时终局惩罚（未成功就超时时触发）
+    # 超时终局惩罚
     rew_timeout: float = -10.0
 
     # termination thresholds

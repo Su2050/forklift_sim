@@ -154,18 +154,10 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self._hold_counter = torch.zeros((self.num_envs,), dtype=torch.int32, device=self.device)
         self._lift_pos_target = torch.zeros((self.num_envs,), device=self.device)
 
-        # ---- S1.0h: 增量奖励缓存 ----
+        # ---- S1.0k: 势函数 shaping 缓存 ----
         self._is_first_step = torch.ones((self.num_envs,), dtype=torch.bool, device=self.device)
-        self._last_E_align = torch.zeros((self.num_envs,), device=self.device)
-        self._last_d_xy = torch.zeros((self.num_envs,), device=self.device)  # S1.0j: 2D 接近距离
+        self._last_phi_total = torch.zeros((self.num_envs,), device=self.device)
         self._last_lift_pos = torch.zeros((self.num_envs,), device=self.device)
-
-        # ---- S1.0h: 势函数 shaping 缓存（防止奖励泵漏洞） ----
-        # Phi_insert = k_insert * w_ready * insert_norm
-        # Phi_lift   = k_lift   * w_lift  * lift_height
-        # r = gamma * Phi_t - Phi_{t-1}  →  后退/下降会扣分，循环刷分无效
-        self._last_Phi_insert = torch.zeros((self.num_envs,), device=self.device)
-        self._last_Phi_lift = torch.zeros((self.num_envs,), device=self.device)
 
         # ---- 派生常量 ----
         # S1.0h 修复：符号 + → -
@@ -779,32 +771,26 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         return {"policy": obs}
 
     def _get_rewards(self) -> torch.Tensor:
-        """S1.0h 距离自适应奖励函数（修复对齐学习闭环 + 奖励泵漏洞）
+        """S1.0k 三阶段势函数奖励（严格中心线几何 + 全局势函数 shaping）
 
-        核心改进（相对 S1.0g）：
+        核心改进（相对 S1.0j）：
         ──────────────────────────────────────────────────────────
-        A. r_approach 软门控（0.2 + 0.8*w_ready）
-           → 未对齐时仍有 20% 接近奖励，打破 "不靠近→对齐信号弱→w_ready≈0→不给接近奖励" 的死锁
-        B. 对齐阈值随距离插值（远处松、近处紧）
-           → 远处 lat_ready_m≈0.6m / yaw_ready_deg≈30°，w_ready 不再被饿死
-        C. yaw 目标分两段
-           → 远处：对准 "指向托盘方向"（允许为消除横向误差先打角）
-           → 近处：对准 "托盘朝向"（要求精确平行对接）
-        D. r_forward 乘以 w_yaw
-           → 避免 "先冲再说" 行为，鼓励 "边走边摆正"
-        E. r_insert 势函数 shaping（gamma=0.99）
-           → 后退会扣分，循环刷分无效
-        F. r_lift 势函数 shaping（gamma=0.99）
-           → 下降会扣分，循环刷分无效
+        A. 严格中心线几何：y_err / yaw_err 基于托盘局部坐标轴，不再随距离变分母
+        B. 三阶段势函数 shaping：
+           Stage 1 (phi1): 距离带 [d1_min, d1_max] + 粗对齐
+           Stage 2 (phi2): 微调接近（带距离带门控 + 粗对齐门控）
+           Stage 3 (phi_ins): 插入深化（带严对齐门控）
+           + phi_lift: 举升（带插入门控 + 严对齐门控）
+        C. 全局 r_pot = gamma * phi_total_t - phi_total_{t-1}
+           → 原地抖动净亏损，后退自动扣分
+        D. action std 约束（配合 rsl_rl_ppo_cfg.py 修改）
         ──────────────────────────────────────────────────────────
 
         奖励结构（每 step 叠加）:
-          rew = r_approach + r_align + r_forward          # 阶段1: 接近 + 对齐
-               + pen_align_abs                             # 近处绝对对齐惩罚
-               + r_insert                                  # 阶段2: 插入（势函数）
-               + r_lift + pen_premature                    # 阶段3: 举升（势函数）+ 空举惩罚
-               + pen_action + pen_time + pen_dist_far      # 常驻惩罚
-               + success_reward                            # 终局成功奖励
+          rew = r_pot                                      # 势函数 shaping
+               + pen_premature                              # 空举惩罚
+               + pen_dense                                  # 时间 + 动作L2 + 距离惩罚
+               + r_terminal                                 # 成功/超时终局奖励
         """
         # ---- 从 PhysX view 刷新关节数据 ----
         # _get_rewards() 在 _get_observations() 之前调用，需要先刷新
@@ -812,169 +798,122 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self._joint_vel[:] = self.robot.root_physx_view.get_dof_velocities()
 
         # ==================================================================
-        # Step 0: 基础量计算
+        # S1.0k: 三阶段势函数 shaping + 严格中心线几何
         # ==================================================================
-        # 机器人/托盘位姿（提前获取，后续 insert_depth 和 y_err 都需要）
+
+        # ---- 基础量 ----
         root_pos = self.robot.data.root_pos_w
         pallet_pos = self.pallet.data.root_pos_w
-
         tip = self._compute_fork_tip()                                       # (N, 3)
-        # 注意：tip 是世界坐标，必须用 pallet 的世界坐标计算 front_x，不能用局部坐标标量
-        pallet_front_x = pallet_pos[:, 0] - self.cfg.pallet_depth_m * 0.5   # (N,) 世界坐标
-        insert_depth = torch.clamp(tip[:, 0] - pallet_front_x, min=0.0)     # 已插入距离 (m)
-        insert_norm = insert_depth / (self.cfg.pallet_depth_m + 1e-6)        # 归一化 [0, 1]
 
-        # dist_front: 货叉尖端到 pocket 开口的剩余距离（正=尚未到达，0=已过开口）
-        dist_front = pallet_front_x - tip[:, 0]
-        dist_front_clamped = torch.clamp(dist_front, min=0.0)
-        y_err = torch.abs(pallet_pos[:, 1] - root_pos[:, 1])                # 横向误差 (m)
+        robot_yaw = _quat_to_yaw(self.robot.data.root_quat_w)               # (N,)
+        pallet_yaw = _quat_to_yaw(self.pallet.data.root_quat_w)             # (N,)
 
-        yaw = _quat_to_yaw(self.robot.data.root_quat_w)                     # 机器人 yaw (rad)
-        pallet_yaw = _quat_to_yaw(self.pallet.data.root_quat_w)             # 托盘 yaw (rad)
+        # ---- 严格中心线几何 ----
+        cp = torch.cos(pallet_yaw)
+        sp = torch.sin(pallet_yaw)
+        u_in = torch.stack([cp, sp], dim=-1)                                 # (N,2) 插入方向
+        v_lat = torch.stack([-sp, cp], dim=-1)                               # (N,2) 横向
 
-        # ==================================================================
-        # Step 1: 距离自适应权重 w_close / w_far
-        # ==================================================================
-        # smoothstep 在 [d_close, d_far] 区间从 1→0 过渡
-        w_close = smoothstep(
-            (self.cfg.d_far - dist_front_clamped) / (self.cfg.d_far - self.cfg.d_close)
+        # 横向误差（中心线重叠度）
+        rel_robot = root_pos[:, :2] - pallet_pos[:, :2]
+        y_signed = torch.sum(rel_robot * v_lat, dim=-1)
+        y_err = torch.abs(y_signed)
+
+        # 偏航误差（中心线平行度）
+        yaw_err = torch.atan2(
+            torch.sin(robot_yaw - pallet_yaw),
+            torch.cos(robot_yaw - pallet_yaw),
         )
-        w_far = 1.0 - w_close
+        yaw_err_deg = torch.abs(yaw_err) * (180.0 / math.pi)
+        yaw_err_rad = torch.abs(yaw_err)
 
-        # ==================================================================
-        # Step 2: 修改 C — yaw 目标分两段
-        # ==================================================================
-        # 远处：对准 "机器人→托盘中心" 方向（允许先打角消除横向误差）
-        yaw_to_target = torch.atan2(
-            pallet_pos[:, 1] - root_pos[:, 1],
-            pallet_pos[:, 0] - root_pos[:, 0],
-        )
-        dyaw_to_target = (yaw_to_target - yaw + math.pi) % (2 * math.pi) - math.pi
+        # 沿托盘插入轴的标量坐标
+        rel_tip = tip[:, :2] - pallet_pos[:, :2]
+        s_tip = torch.sum(rel_tip * u_in, dim=-1)
+        s_front = -0.5 * self.cfg.pallet_depth_m
 
-        # 近处：对准托盘朝向（要求平行对接，精确插入）
-        dyaw_to_pallet = (pallet_yaw - yaw + math.pi) % (2 * math.pi) - math.pi
+        dist_front = torch.clamp(s_front - s_tip, min=0.0)
+        insert_depth = torch.clamp(s_tip - s_front, min=0.0)
+        insert_norm = torch.clamp(insert_depth / (self.cfg.pallet_depth_m + 1e-6), 0.0, 1.0)
 
-        # 距离插值混合
-        dyaw = dyaw_to_target * w_far + dyaw_to_pallet * w_close
-        yaw_err_deg = torch.abs(dyaw) * (180.0 / math.pi)
-        yaw_err_rad = torch.abs(dyaw)
-
-        # ==================================================================
-        # Step 3: 修改 B — 对齐阈值随距离插值（远处松、近处紧）
-        # ==================================================================
-        # 远处宽松：允许策略在未完全对齐时也能接近，获得近处高质量对齐信号
-        # 近处严格：确保插入前精确对齐
-        lat_ready_m = self.cfg.lat_ready_far * w_far + self.cfg.lat_ready_close * w_close
-        yaw_ready_deg = self.cfg.yaw_ready_far_deg * w_far + self.cfg.yaw_ready_close_deg * w_close
-
-        # 归一化对齐误差（E_align > 1 表示未满足当前距离下的对齐要求）
-        E_align = y_err / lat_ready_m + yaw_err_deg / yaw_ready_deg
-
-        # 乘法门控 w_ready：任一维度达到阈值 → w_ready = 0
-        w_lat = torch.clamp(1.0 - y_err / lat_ready_m, min=0.0, max=1.0)
-        w_yaw = torch.clamp(1.0 - yaw_err_deg / yaw_ready_deg, min=0.0, max=1.0)
-        w_ready = w_lat * w_yaw
-
-        # 举升门控：插入深度超过阈值 + 对齐质量
-        w_lift_base = torch.clamp(
-            (insert_norm - self.cfg.insert_gate_norm) / self.cfg.insert_ramp_norm,
-            min=0.0, max=1.0,
-        )
-        w_lift = w_lift_base * w_ready  # 必须对齐才能举升
-
-        # ==================================================================
-        # Step 4: 距离自适应奖励系数
-        # ==================================================================
-        k_approach = self.cfg.k_app_far * w_far + self.cfg.k_app_close * w_close
-        k_align = self.cfg.k_align_far * w_far + self.cfg.k_align_close * w_close
-        k_insert = self.cfg.k_ins_far * w_far + self.cfg.k_ins_close * w_close
-        k_premature = self.cfg.k_pre_far * w_far + self.cfg.k_pre_close * w_close
-
-        # ==================================================================
-        # Step 5: 增量计算（用于 r_approach, r_align, pen_premature）
-        # ==================================================================
-        delta_E_align = self._last_E_align - E_align        # 对齐改善 > 0 = 奖励
-        self._last_E_align = E_align.detach()
-
-        # S1.0j: 2D 接近距离（横向修正也算"接近"）
-        d_xy = torch.sqrt(dist_front_clamped ** 2 + y_err ** 2)
-        delta_d_xy = self._last_d_xy - d_xy  # 正 = 接近
-        self._last_d_xy = d_xy.detach()
-
-        # 仍需 insert_depth 增量用于 _apply_action 中的安全制动判断
+        # 仍需 insert_depth 用于 _apply_action 安全制动
         self._last_insert_depth = insert_depth.detach()
 
-        # 举升增量（用于 pen_premature 空举惩罚）
-        lift_height = tip[:, 2] - self._fork_tip_z0       # 当前举升高度
-        delta_lift = lift_height - self._last_lift_pos     # 举升增量
+        # 举升
+        lift_height = tip[:, 2] - self._fork_tip_z0
+        delta_lift = lift_height - self._last_lift_pos
         self._last_lift_pos = lift_height.detach()
 
-        # ==================================================================
-        # 阶段 1: 接近 + 对齐
-        # ==================================================================
-        rew = torch.zeros((self.num_envs,), device=self.device)
+        # 2D 距离（用于连续距离惩罚）
+        d_xy = torch.sqrt(dist_front ** 2 + y_err ** 2)
 
-        # S1.0j: r_approach 去门控 + 2D 距离增量（横向修正也产生接近奖励）
-        r_approach = k_approach * delta_d_xy
-        r_approach = torch.where(self._is_first_step, torch.zeros_like(r_approach), r_approach)
-        rew += r_approach
+        # ---- Stage 1: 距离带 + 粗对齐 (Phi1 >= 0) ----
+        e_band = torch.where(
+            dist_front < self.cfg.d1_min, self.cfg.d1_min - dist_front,
+            torch.where(dist_front > self.cfg.d1_max, dist_front - self.cfg.d1_max,
+                        torch.zeros_like(dist_front))
+        )
+        E1 = (e_band / self.cfg.e_band_scale
+              + y_err / self.cfg.y_scale1
+              + yaw_err_deg / self.cfg.yaw_scale1)
+        phi1 = self.cfg.k_phi1 / (1.0 + E1)
 
-        # 对齐改善奖励（增量式）
-        r_align = k_align * delta_E_align
-        r_align = torch.where(self._is_first_step, torch.zeros_like(r_align), r_align)
-        rew += r_align
+        # ---- Stage 2: 微调接近，带软门控 ----
+        E2 = (dist_front / self.cfg.d2_scale
+              + y_err / self.cfg.y_scale2
+              + yaw_err_deg / self.cfg.yaw_scale2)
+        phi2_base = self.cfg.k_phi2 / (1.0 + E2)
 
-        # 绝对对齐惩罚（距离无关，E_align 本身已含距离自适应阈值）
-        pen_align_abs = -self.cfg.k_align_abs * torch.clamp(E_align, 0.0, 2.0)
-        rew += pen_align_abs
+        # 距离带权重（从 d1_max 到 d1_min 平滑打开）
+        w_band = smoothstep(
+            (self.cfg.d1_max - dist_front) / (self.cfg.d1_max - self.cfg.d1_min)
+        )
+        # 粗对齐门控（指数软门控）
+        w_align2 = torch.exp(
+            -(y_err / self.cfg.y_gate2) ** 2
+            - (yaw_err_deg / self.cfg.yaw_gate2) ** 2
+        )
+        phi2 = phi2_base * w_band * w_align2
 
-        # ==================================================================
-        # 阶段 2: 插入（修改 E — 势函数 shaping，防止奖励泵漏洞）
-        # ==================================================================
-        # Phi_insert = k_insert * w_ready * insert_norm
-        # r_insert = gamma * Phi_t - Phi_{t-1}
-        # 优点：后退（insert_norm↓）自动扣分，循环刷分无效
-        gamma = 0.99  # PPO 折扣因子
-        Phi_insert = k_insert * w_ready * insert_norm
-        r_insert = gamma * Phi_insert - self._last_Phi_insert
-        self._last_Phi_insert = Phi_insert.detach()
-        rew += r_insert
+        # ---- Stage 3: 插入深化 ----
+        w3 = smoothstep(
+            (insert_norm - self.cfg.ins_start) / self.cfg.ins_ramp
+        )
+        # 严对齐门控
+        w_align3 = torch.exp(
+            -(y_err / self.cfg.y_gate3) ** 2
+            - (yaw_err_deg / self.cfg.yaw_gate3) ** 2
+        )
+        phi_ins = self.cfg.k_ins * (0.2 + 0.8 * w_align3) * insert_norm * w3
 
-        # ==================================================================
-        # 阶段 3: 举升（修改 F — 势函数 shaping，防止奖励泵漏洞）
-        # ==================================================================
-        # Phi_lift = k_lift * w_lift * lift_height
-        # r_lift = gamma * Phi_t - Phi_{t-1}
-        # 优点：下降（lift_height↓）自动扣分，循环刷分无效
-        Phi_lift = self.cfg.k_lift * w_lift * lift_height
-        r_lift = gamma * Phi_lift - self._last_Phi_lift
-        self._last_Phi_lift = Phi_lift.detach()
-        rew += r_lift
+        # ---- 举升势函数 + 空举惩罚 ----
+        w_lift_base = smoothstep(
+            (insert_norm - self.cfg.insert_gate_norm) / self.cfg.insert_ramp_norm
+        )
+        w_lift = w_lift_base * w_align3
+        phi_lift = self.cfg.k_lift * w_lift * lift_height
 
-        # 空举惩罚：插入深度不足时尝试举升的惩罚
-        pen_premature = -k_premature * (1.0 - w_lift_base) * torch.clamp(delta_lift, min=0.0)
+        pen_premature = -self.cfg.k_pre * (1.0 - w_lift_base) * torch.clamp(delta_lift, min=0.0)
         pen_premature = torch.where(self._is_first_step, torch.zeros_like(pen_premature), pen_premature)
-        rew += pen_premature
 
-        # ==================================================================
-        # 常驻惩罚
-        # ==================================================================
-        rew += self.cfg.rew_action_l2 * (self.actions ** 2).sum(dim=1)       # 动作 L2
-        rew += self.cfg.rew_time_penalty                                      # 时间惩罚
+        # ---- 总势函数 & shaping ----
+        # 插入前 phi1+phi2 主导；插入后 phi_ins+phi_lift 主导
+        phi_total = (phi1 + phi2) * (1.0 - w3) + phi_ins + phi_lift
 
-        # 距离过远额外惩罚（鼓励接近）
-        dist_far_threshold = 2.0
-        dist_excess = torch.clamp(dist_front_clamped - dist_far_threshold, min=0.0)
-        pen_dist_far = -self.cfg.k_dist_far * dist_excess
-        rew += pen_dist_far
+        gamma = self.cfg.gamma
+        r_pot = gamma * phi_total - self._last_phi_total
+        r_pot = torch.where(self._is_first_step, torch.zeros_like(r_pot), r_pot)
+        self._last_phi_total = phi_total.detach()
 
-        # S1.0j: 全距离连续距离惩罚（在所有距离上提供"应更近"的梯度）
-        pen_dist_cont = -self.cfg.k_dist_cont * d_xy
-        rew += pen_dist_cont
+        # ---- 常驻惩罚 ----
+        pen_dense = (
+            self.cfg.rew_time_penalty
+            + self.cfg.rew_action_l2 * (self.actions ** 2).sum(dim=1)
+            - self.cfg.k_dist_cont * d_xy
+        )
 
-        # ==================================================================
-        # 成功判定与奖励
-        # ==================================================================
+        # ---- 成功判定与终局奖励 ----
         inserted_enough = insert_depth >= self._insert_thresh
         aligned_enough = (y_err <= self.cfg.max_lateral_err_m) & (
             yaw_err_rad <= math.radians(self.cfg.max_yaw_err_deg)
@@ -989,21 +928,22 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
 
         time_ratio = self.episode_length_buf.float() / (self.max_episode_length + 1e-6)
         time_bonus = self.cfg.rew_success_time * (1.0 - time_ratio)
-        success_reward = torch.where(
+
+        r_terminal = torch.zeros((self.num_envs,), device=self.device)
+        r_terminal = torch.where(
             success,
             self.cfg.rew_success + time_bonus,
-            torch.zeros_like(rew),
+            r_terminal,
         )
-        rew += success_reward
-
-        # S1.0j: 超时终局惩罚（未成功就超时 → 显著负信号）
         time_out_now = self.episode_length_buf >= self.max_episode_length - 1
-        pen_timeout = torch.where(
+        r_terminal = torch.where(
             time_out_now & ~success,
-            torch.full_like(rew, self.cfg.rew_timeout),
-            torch.zeros_like(rew),
+            r_terminal + self.cfg.rew_timeout,
+            r_terminal,
         )
-        rew += pen_timeout
+
+        # ---- 总奖励 ----
+        rew = r_pot + pen_premature + pen_dense + r_terminal
 
         # 清除首步标记
         self._is_first_step[:] = False
@@ -1014,50 +954,35 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         if "log" not in self.extras:
             self.extras["log"] = {}
 
-        # 核心诊断指标
-        self.extras["log"]["s0/E_align"] = E_align.mean()
-        self.extras["log"]["s0/w_ready"] = w_ready.mean()
-        self.extras["log"]["s0/w_lift"] = w_lift.mean()
-        self.extras["log"]["s0/w_close"] = w_close.mean()
-        self.extras["log"]["s0/w_far"] = w_far.mean()
-        # S1.0h 新增：监控动态阈值效果
-        self.extras["log"]["s0/lat_ready_m"] = lat_ready_m.mean()
-        self.extras["log"]["s0/yaw_ready_deg"] = yaw_ready_deg.mean()
+        # 势函数分量
+        self.extras["log"]["phi/phi1"] = phi1.mean()
+        self.extras["log"]["phi/phi2"] = phi2.mean()
+        self.extras["log"]["phi/phi_ins"] = phi_ins.mean()
+        self.extras["log"]["phi/phi_lift"] = phi_lift.mean()
+        self.extras["log"]["phi/phi_total"] = phi_total.mean()
 
         # 奖励分量
-        self.extras["log"]["s0/r_align"] = r_align.mean()
-        self.extras["log"]["s0/r_approach"] = r_approach.mean()
-
-        self.extras["log"]["s0/r_insert"] = r_insert.mean()
-        self.extras["log"]["s0/r_lift"] = r_lift.mean()
-        self.extras["log"]["s0/pen_align_abs"] = pen_align_abs.mean()
+        self.extras["log"]["s0/r_pot"] = r_pot.mean()
         self.extras["log"]["s0/pen_premature"] = pen_premature.mean()
-        self.extras["log"]["s0/pen_dist_far"] = pen_dist_far.mean()
-        self.extras["log"]["s0/pen_dist_cont"] = pen_dist_cont.mean()  # S1.0j
-        self.extras["log"]["s0/time_penalty"] = self.cfg.rew_time_penalty
-        self.extras["log"]["s0/time_bonus"] = torch.where(
-            success, time_bonus, torch.zeros_like(time_bonus)
-        ).mean()
-        self.extras["log"]["s0/success"] = success_reward.mean()
-        self.extras["log"]["s0/pen_timeout"] = pen_timeout.mean()  # S1.0j
+        self.extras["log"]["s0/pen_dense"] = pen_dense.mean()
+        self.extras["log"]["s0/r_terminal"] = r_terminal.mean()
 
-        # 有效系数（观察距离自适应是否生效）
-        self.extras["log"]["s0/k_approach_eff"] = k_approach.mean()
-        self.extras["log"]["s0/k_align_eff"] = k_align.mean()
-        self.extras["log"]["s0/k_insert_eff"] = k_insert.mean()
-        self.extras["log"]["s0/k_premature_eff"] = k_premature.mean()
-
-        # 势函数监控（检验势函数 shaping 是否工作正常）
-        self.extras["log"]["phi/Phi_insert"] = Phi_insert.mean()
-        self.extras["log"]["phi/Phi_lift"] = Phi_lift.mean()
+        # 门控权重
+        self.extras["log"]["s0/w_band"] = w_band.mean()
+        self.extras["log"]["s0/w3"] = w3.mean()
+        self.extras["log"]["s0/w_align2"] = w_align2.mean()
+        self.extras["log"]["s0/w_align3"] = w_align3.mean()
+        self.extras["log"]["s0/w_lift_base"] = w_lift_base.mean()
+        self.extras["log"]["s0/w_lift"] = w_lift.mean()
+        self.extras["log"]["s0/e_band"] = e_band.mean()
 
         # 误差分布
         self.extras["log"]["err/lateral_mean"] = y_err.mean()
         self.extras["log"]["err/yaw_deg_mean"] = yaw_err_deg.mean()
         self.extras["log"]["err/insert_norm_mean"] = insert_norm.mean()
         self.extras["log"]["err/lift_height_mean"] = lift_height.mean()
-        self.extras["log"]["err/dist_front_mean"] = dist_front_clamped.mean()
-        self.extras["log"]["err/d_xy_mean"] = d_xy.mean()  # S1.0j: 2D 接近距离
+        self.extras["log"]["err/dist_front_mean"] = dist_front.mean()
+        self.extras["log"]["err/d_xy_mean"] = d_xy.mean()
 
         # 阶段命中率
         self.extras["log"]["phase/frac_inserted"] = inserted_enough.float().mean()
@@ -1078,7 +1003,6 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         tipped = (torch.abs(roll) > self.cfg.max_roll_pitch_rad) | (
             torch.abs(pitch) > self.cfg.max_roll_pitch_rad
         )
-        time_out_now = self.episode_length_buf >= self.max_episode_length - 1
         self.extras["log"]["term/frac_tipped"] = tipped.float().mean()
         self.extras["log"]["term/frac_timeout"] = time_out_now.float().mean()
 
@@ -1169,30 +1093,45 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         # _fork_z_base = 0.0（训练日志实测），因此 fork_tip_z0 = root_z = z.squeeze(-1)，误差为零。
         self._fork_tip_z0[env_ids] = z.squeeze(-1)
 
-        # ---- S1.0h: 初始化增量奖励缓存（防止首步异常奖励） ----
-        # 注：此处用 robot center x 近似 fork tip x 位置，
-        # 误差在 _is_first_step 保护下可忽略（首步增量奖励被清零）
-        dist_front_reset = torch.clamp(self._pallet_front_x - x.squeeze(-1), min=0.0)
-        y_err_reset = torch.abs(y.squeeze(-1))
-        d_xy_reset = torch.sqrt(dist_front_reset ** 2 + y_err_reset ** 2)
-        self._last_d_xy[env_ids] = d_xy_reset
-
-        # E_align 初始化：reset 时机器人远离托盘，使用远处阈值（lat_ready_far, yaw_ready_far_deg）
+        # ---- S1.0k: 初始化势函数缓存 ----
+        # reset 时 insert_depth ≈ 0、lift_height ≈ 0
+        # 精确计算 phi_total 初始值，避免首步异常大的 r_pot
+        # 注：_is_first_step 保护会清零首步 r_pot，但精确初始化更安全
         y_err_reset = torch.abs(y.squeeze(-1))
         yaw_err_deg_reset = torch.abs(yaw.squeeze(-1)) * (180.0 / math.pi)
-        E_align_reset = (y_err_reset / self.cfg.lat_ready_far
-                         + yaw_err_deg_reset / self.cfg.yaw_ready_far_deg)
-        self._last_E_align[env_ids] = E_align_reset
+        dist_front_reset = torch.clamp(self._pallet_front_x - x.squeeze(-1), min=0.0)
 
-        # 举升增量缓存（reset 时 lift=0，lift_height 恒等于 0）
+        # 计算 phi1 初始值
+        e_band_reset = torch.where(
+            dist_front_reset < self.cfg.d1_min, self.cfg.d1_min - dist_front_reset,
+            torch.where(dist_front_reset > self.cfg.d1_max, dist_front_reset - self.cfg.d1_max,
+                        torch.zeros_like(dist_front_reset))
+        )
+        E1_reset = (e_band_reset / self.cfg.e_band_scale
+                     + y_err_reset / self.cfg.y_scale1
+                     + yaw_err_deg_reset / self.cfg.yaw_scale1)
+        phi1_reset = self.cfg.k_phi1 / (1.0 + E1_reset)
+
+        # 计算 phi2 初始值
+        E2_reset = (dist_front_reset / self.cfg.d2_scale
+                     + y_err_reset / self.cfg.y_scale2
+                     + yaw_err_deg_reset / self.cfg.yaw_scale2)
+        phi2_base_reset = self.cfg.k_phi2 / (1.0 + E2_reset)
+        w_band_reset = smoothstep(
+            (self.cfg.d1_max - dist_front_reset) / (self.cfg.d1_max - self.cfg.d1_min)
+        )
+        w_align2_reset = torch.exp(
+            -(y_err_reset / self.cfg.y_gate2) ** 2
+            - (yaw_err_deg_reset / self.cfg.yaw_gate2) ** 2
+        )
+        phi2_reset = phi2_base_reset * w_band_reset * w_align2_reset
+
+        # reset 时 insert_norm ≈ 0, lift_height ≈ 0 → phi_ins = 0, phi_lift = 0, w3 ≈ 0
+        phi_total_reset = phi1_reset + phi2_reset  # (1-w3)*(...) ≈ (...) 因为 w3≈0
+        self._last_phi_total[env_ids] = phi_total_reset
+
+        # 举升增量缓存
         self._last_lift_pos[env_ids] = 0.0
-
-        # ---- S1.0h 修改 G: 初始化势函数缓存 ----
-        # reset 时 insert_depth ≈ 0、lift_height ≈ 0 → Phi ≈ 0
-        # 如果极端情况下 fork 已过 pocket 开口，精确计算可避免首步异常大的 r_insert
-        # 这里直接置 0 是安全的：_is_first_step + 首步物理状态基本一致
-        self._last_Phi_insert[env_ids] = 0.0
-        self._last_Phi_lift[env_ids] = 0.0
 
         # 注：不再额外调用 self.robot.reset(env_ids)，
         # super()._reset_idx() 已通过 scene.reset(env_ids) 调用过一次。
