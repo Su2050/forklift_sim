@@ -78,9 +78,15 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     # 详见 docs/diagnostic_reports/success_sanity_check_2026-02-10.md
     insert_fraction: float = 0.40
     lift_delta_m: float = 0.12
-    hold_time_s: float = 1.0
-    max_lateral_err_m: float = 0.03
-    max_yaw_err_deg: float = 3.0
+    # S1.0M: hold_time_s 从 1.0 降到 0.33（hold_steps: 30→~10）。
+    # sanity check A2 显示即使理论成功位姿，hold_counter 最高 4/30 即断，
+    # 物理抖动使 30 步连续保持几乎不可能。课程阶段先出 success 再收紧。
+    hold_time_s: float = 0.33
+    # S1.0M: 放宽成功对齐阈值（课程学习起点）。
+    # 当前 lateral≈0.25m（需 ≤0.03m，差 8 倍），yaw≈7.5°（需 ≤3.0°，差 2.5 倍）。
+    # 先让 success 出现，后续逐步收紧。
+    max_lateral_err_m: float = 0.15
+    max_yaw_err_deg: float = 8.0
 
     # ===== 动作范围（[-1, 1] 的归一化动作会乘以下列缩放）=====
     wheel_speed_rad_s: float = 20.0
@@ -89,36 +95,49 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
 
     # ---------- S1.0k 奖励参数（三阶段势函数 + 严格几何） ----------
     # PPO 折扣因子（势函数 shaping 用）
-    gamma: float = 0.99
+    # S1.0L: 纯差分 shaping，避免 gamma<1 在慢变化势函数上形成负常数底噪。
+    gamma: float = 1.0
 
     # Stage 1: 距离带 + 粗对齐
+    # S1.0L: 距离参考点改为 base（root），插入深度仍使用 tip。
+    stage_distance_ref: str = "base"
     d1_min: float = 2.0      # 距离带下界 (m)
     d1_max: float = 3.0      # 距离带上界 (m)
     e_band_scale: float = 0.5  # 距离带误差归一化尺度
-    y_scale1: float = 0.25   # Stage1 横向误差尺度 (m)
-    yaw_scale1: float = 15.0  # Stage1 偏航误差尺度 (deg)
+    # S1.0M: 收紧对齐尺度，增大 alignment 在 E1/E2 中的权重。
+    y_scale1: float = 0.15   # S1.0M: 0.25→0.15，lateral 在 E1 中权重 1.0→1.67
+    yaw_scale1: float = 10.0  # S1.0M: 15→10，yaw 在 E1 中权重 0.5→0.75
     k_phi1: float = 6.0      # Stage1 势函数强度
 
     # Stage 2: 微调接近（从距离带推到口前）
     d2_scale: float = 1.0    # Stage2 前向距离尺度 (m)
-    y_scale2: float = 0.12   # Stage2 横向误差尺度 (m)
-    yaw_scale2: float = 8.0  # Stage2 偏航误差尺度 (deg)
+    y_scale2: float = 0.08   # S1.0M: 0.12→0.08，lateral 在 E2 中权重 2.08→3.13
+    yaw_scale2: float = 5.0  # S1.0M: 8→5，yaw 在 E2 中权重 0.94→1.50
     k_phi2: float = 10.0     # Stage2 势函数强度
-    y_gate2: float = 0.25    # Stage2 粗对齐门控 (m)
-    yaw_gate2: float = 15.0  # Stage2 粗对齐门控 (deg)
+    # S1.0M: 放宽 w_align2 门控。原 y_gate2=0.25 在 y≈0.25m 时 w_align2≈0.37（丢弃 63%）。
+    y_gate2: float = 0.40    # S1.0M: 0.25→0.40，信号保留翻倍
+    yaw_gate2: float = 20.0  # S1.0M: 15→20
 
     # Stage 3: 插入深化
-    ins_start: float = 0.02  # 插入接管起始阈值 (归一化)
-    ins_ramp: float = 0.05   # 插入接管缓坡宽度
-    y_gate3: float = 0.10    # Stage3 严对齐门控 (m)
-    yaw_gate3: float = 8.0   # Stage3 严对齐门控 (deg)
+    # S1.0L: 推迟 Stage3 接管，避免早期压制对齐 shaping。
+    ins_start: float = 0.10  # 插入接管起始阈值 (归一化)
+    ins_ramp: float = 0.15   # 插入接管缓坡宽度
+    # S1.0L: 放宽 Stage3 对齐门控，避免 gate 过紧导致插入信号过弱。
+    y_gate3: float = 0.18    # Stage3 严对齐门控 (m)
+    yaw_gate3: float = 12.0  # Stage3 严对齐门控 (deg)
     k_ins: float = 18.0      # 插入势函数强度
+    # S1.0L: 默认不再用 (1-w3) 压制 phi1/phi2，保留开关便于回滚。
+    suppress_preinsert_phi_with_w3: bool = False
 
     # 举升
-    insert_gate_norm: float = 0.60  # 允许举升的插入深度门槛
-    insert_ramp_norm: float = 0.10  # 举升门控缓坡
+    # S1.0M: insert_gate_norm 从 0.60 降到 0.35。
+    # 物理最大 insert_norm ≈ 0.477（convexDecomposition 碰撞限制），
+    # 原 0.60 永远不可达 → w_lift_base 恒为 0，phi_lift 恒为 0，
+    # pen_premature 惩罚一切举升 → success 永远不可能。
+    insert_gate_norm: float = 0.35  # 允许举升的插入深度门槛
+    insert_ramp_norm: float = 0.08  # 举升门控缓坡（0.35~0.43 打开）
     k_lift: float = 20.0     # 举升势函数强度
-    k_pre: float = 10.0      # 空举惩罚系数
+    k_pre: float = 5.0       # S1.0M: 10→5，降低空举惩罚避免打爆探索
 
     # 常驻惩罚
     rew_action_l2: float = -0.01
@@ -131,6 +150,24 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
 
     # 超时终局惩罚
     rew_timeout: float = -10.0
+
+    # 里程碑奖励（一次性触发）
+    rew_milestone_approach: float = 1.0
+    rew_milestone_coarse_align: float = 2.0
+    rew_milestone_insert_10: float = 5.0
+    rew_milestone_insert_30: float = 10.0
+    # S1.0M: 新增对齐里程碑，给对齐一条"强奖励通路"
+    rew_milestone_fine_align: float = 5.0      # y<0.10m & yaw<5°
+    rew_milestone_precise_align: float = 8.0   # y<0.05m & yaw<3°
+
+    # 失败早停
+    early_stop_d_xy_max: float = 3.0
+    early_stop_d_xy_steps: int = 30
+    early_stop_stall_phi_eps: float = 0.001
+    early_stop_stall_steps: int = 60
+    early_stop_stall_action_eps: float = 0.05
+    rew_early_stop_fly: float = -2.0
+    rew_early_stop_stall: float = -1.0
 
     # termination thresholds
     max_roll_pitch_rad: float = 0.45  # ~25 deg

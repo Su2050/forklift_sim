@@ -2,6 +2,14 @@
 
 > **版本**：S1.0k（基于 S1.0j 变量体系，重构为“严格定义 + 三阶段势函数”）
 >
+> **S1.0L 更新**（2026-02-10）：
+> - Stage1/2 距离参考点改为 `base`（`dist_front_base`），插入深度仍使用 `tip`
+> - `gamma=1.0`（纯差分 shaping）
+> - `ins_start=0.10, ins_ramp=0.15`（推迟 Stage3 接管）
+> - 默认不再使用 `(1-w3)` 压制 `Phi1/Phi2`（保留回滚开关）
+> - `Phi_ins` baseline 调整为 `(0.4 + 0.6*w_align3)`
+> - 新增里程碑一次性奖励 + 失败早停（跑飞/摆烂）
+>
 > **目标**：把“对齐 → 微调插入 → 居深/举升”明确成 **可计算的几何量**，并用 **潜势函数差分 shaping**（防止原地抖动/刷分）。
 >
 > **说明**：本文件写成“可直接落地到 `env.py::_get_rewards()` 的实现草案”，变量命名尽量沿用 S1.0j 的习惯（`tip / dist_front / insert_norm / lift_height` 等）。
@@ -465,6 +473,48 @@ def compute_reward_s1k(
 - entropy_coef 退火到 0
 - clamp log_std / std 上限（例如 std<=2~3）
 - 或改用 tanh-squashed distribution 并正确计算 logprob/entropy
+
+---
+
+## 8) S1.0L 实装差异（相对 S1.0k）
+
+### 8.1 Stage 距离项
+
+- Stage1/2 的 `e_band / w_band / E2` 距离项改为 `dist_front_base`
+- `insert_depth / insert_norm` 仍保持 `tip` 几何定义，不影响成功判定
+
+```python
+rel_base = root_pos[:, :2] - pallet_pos[:, :2]
+s_base = torch.sum(rel_base * u_in, dim=-1)
+dist_front_base = torch.clamp(s_front - s_base, min=0.0)
+stage_dist_front = dist_front_base
+```
+
+### 8.2 势函数与门控参数
+
+- `gamma: 0.99 -> 1.0`
+- `ins_start: 0.02 -> 0.10`
+- `ins_ramp: 0.05 -> 0.15`
+- `y_gate3: 0.10 -> 0.18`
+- `yaw_gate3: 8 -> 12`
+- `phi_ins = k_ins * (0.4 + 0.6*w_align3) * insert_norm * w3`
+
+### 8.3 总势函数组合
+
+```python
+# 默认（S1.0L）
+phi_total = phi1 + phi2 + phi_ins + phi_lift
+
+# 回滚开关（对照实验）
+if suppress_preinsert_phi_with_w3:
+    phi_total = (phi1 + phi2) * (1.0 - w3) + phi_ins + phi_lift
+```
+
+### 8.4 新增奖励/终止机制
+
+- 里程碑一次性奖励：`approach / coarse_align / insert10 / insert30`
+- 失败早停：`early_stop_fly`（跑飞）+ `early_stop_stall`（低动作且势函数长期不变）
+- 早停惩罚在 `_get_rewards()` 结算，done 在 `_get_dones()` 读取，避免时序错位
 
 ---
 

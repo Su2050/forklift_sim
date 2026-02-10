@@ -1,0 +1,42 @@
+---
+description: 训练日志文件命名规范，确保 logs/ 目录下文件可按时间排序、快速识别版本和类型
+alwaysApply: true
+---
+
+# 训练日志命名规范
+
+## 格式
+
+```
+logs/YYYYMMDD_HHMMSS_<type>_<version>.log
+```
+
+- `YYYYMMDD_HHMMSS`：训练启动的北京时间（精确到秒）
+- `<type>`：日志类型，取值：
+  - `train` — 正式训练
+  - `smoke_train` — 短迭代冒烟测试（30 iter 级别）
+  - `sanity_check` — 功能验证/诊断脚本
+- `<version>`：奖励函数版本号，如 `s1.0k`、`s1.0l`、`s1.0m`
+
+## 示例
+
+```
+20260210_100525_train_s1.0k.log        # 正式训练
+20260210_143900_smoke_train_s1.0l.log  # 冒烟测试
+20260210_143700_sanity_check_s1.0l.log # 功能验证
+```
+
+## nohup 训练命令模板
+
+```bash
+nohup bash isaaclab.sh -p scripts/reinforcement_learning/rsl_rl/train.py \
+  --task Isaac-Forklift-PalletInsertLift-Direct-v0 \
+  --headless --num_envs 1024 --max_iterations 2000 \
+  > /home/uniubi/projects/forklift_sim/logs/$(date +%Y%m%d_%H%M%S)_train_<version>.log 2>&1 &
+```
+
+## 禁止
+
+- 不要用 `_500iter`、`_2000iter` 等迭代数后缀（迭代数在日志内容中可查）
+- 不要省略时间戳（无法区分同版本多次训练）
+- 不要把版本号放在文件名开头（破坏按时间排序）

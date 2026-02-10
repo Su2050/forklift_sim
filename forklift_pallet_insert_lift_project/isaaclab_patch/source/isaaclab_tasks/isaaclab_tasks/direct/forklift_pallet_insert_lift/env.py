@@ -158,6 +158,13 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self._is_first_step = torch.ones((self.num_envs,), dtype=torch.bool, device=self.device)
         self._last_phi_total = torch.zeros((self.num_envs,), device=self.device)
         self._last_lift_pos = torch.zeros((self.num_envs,), device=self.device)
+        # S1.0L: milestones + early-stop buffers
+        # S1.0M: 从 4 列扩展到 6 列（新增 fine_align + precise_align）
+        self._milestone_flags = torch.zeros((self.num_envs, 6), dtype=torch.bool, device=self.device)
+        self._fly_counter = torch.zeros((self.num_envs,), dtype=torch.int32, device=self.device)
+        self._stall_counter = torch.zeros((self.num_envs,), dtype=torch.int32, device=self.device)
+        self._early_stop_fly = torch.zeros((self.num_envs,), dtype=torch.bool, device=self.device)
+        self._early_stop_stall = torch.zeros((self.num_envs,), dtype=torch.bool, device=self.device)
 
         # ---- 派生常量 ----
         # S1.0h 修复：符号 + → -
@@ -836,6 +843,11 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         dist_front = torch.clamp(s_front - s_tip, min=0.0)
         insert_depth = torch.clamp(s_tip - s_front, min=0.0)
         insert_norm = torch.clamp(insert_depth / (self.cfg.pallet_depth_m + 1e-6), 0.0, 1.0)
+        # S1.0L: Stage1/2 距离参考点改为 base（插入深度仍基于 tip）。
+        rel_base = root_pos[:, :2] - pallet_pos[:, :2]
+        s_base = torch.sum(rel_base * u_in, dim=-1)
+        dist_front_base = torch.clamp(s_front - s_base, min=0.0)
+        stage_dist_front = dist_front_base if self.cfg.stage_distance_ref == "base" else dist_front
 
         # 仍需 insert_depth 用于 _apply_action 安全制动
         self._last_insert_depth = insert_depth.detach()
@@ -846,12 +858,12 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self._last_lift_pos = lift_height.detach()
 
         # 2D 距离（用于连续距离惩罚）
-        d_xy = torch.sqrt(dist_front ** 2 + y_err ** 2)
+        d_xy = torch.sqrt(stage_dist_front ** 2 + y_err ** 2)
 
         # ---- Stage 1: 距离带 + 粗对齐 (Phi1 >= 0) ----
         e_band = torch.where(
-            dist_front < self.cfg.d1_min, self.cfg.d1_min - dist_front,
-            torch.where(dist_front > self.cfg.d1_max, dist_front - self.cfg.d1_max,
+            stage_dist_front < self.cfg.d1_min, self.cfg.d1_min - stage_dist_front,
+            torch.where(stage_dist_front > self.cfg.d1_max, stage_dist_front - self.cfg.d1_max,
                         torch.zeros_like(dist_front))
         )
         E1 = (e_band / self.cfg.e_band_scale
@@ -860,14 +872,14 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         phi1 = self.cfg.k_phi1 / (1.0 + E1)
 
         # ---- Stage 2: 微调接近，带软门控 ----
-        E2 = (dist_front / self.cfg.d2_scale
+        E2 = (stage_dist_front / self.cfg.d2_scale
               + y_err / self.cfg.y_scale2
               + yaw_err_deg / self.cfg.yaw_scale2)
         phi2_base = self.cfg.k_phi2 / (1.0 + E2)
 
         # 距离带权重（从 d1_max 到 d1_min 平滑打开）
         w_band = smoothstep(
-            (self.cfg.d1_max - dist_front) / (self.cfg.d1_max - self.cfg.d1_min)
+            (self.cfg.d1_max - stage_dist_front) / (self.cfg.d1_max - self.cfg.d1_min)
         )
         # 粗对齐门控（指数软门控）
         w_align2 = torch.exp(
@@ -885,7 +897,7 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
             -(y_err / self.cfg.y_gate3) ** 2
             - (yaw_err_deg / self.cfg.yaw_gate3) ** 2
         )
-        phi_ins = self.cfg.k_ins * (0.2 + 0.8 * w_align3) * insert_norm * w3
+        phi_ins = self.cfg.k_ins * (0.4 + 0.6 * w_align3) * insert_norm * w3
 
         # ---- 举升势函数 + 空举惩罚 ----
         w_lift_base = smoothstep(
@@ -898,12 +910,16 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         pen_premature = torch.where(self._is_first_step, torch.zeros_like(pen_premature), pen_premature)
 
         # ---- 总势函数 & shaping ----
-        # 插入前 phi1+phi2 主导；插入后 phi_ins+phi_lift 主导
-        phi_total = (phi1 + phi2) * (1.0 - w3) + phi_ins + phi_lift
+        # S1.0L: 默认不压制 phi1/phi2，保留开关可回滚旧逻辑。
+        if self.cfg.suppress_preinsert_phi_with_w3:
+            phi_total = (phi1 + phi2) * (1.0 - w3) + phi_ins + phi_lift
+        else:
+            phi_total = phi1 + phi2 + phi_ins + phi_lift
 
         gamma = self.cfg.gamma
         r_pot = gamma * phi_total - self._last_phi_total
         r_pot = torch.where(self._is_first_step, torch.zeros_like(r_pot), r_pot)
+        phi_delta_abs = torch.abs(phi_total - self._last_phi_total)
         self._last_phi_total = phi_total.detach()
 
         # ---- 常驻惩罚 ----
@@ -911,6 +927,48 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
             self.cfg.rew_time_penalty
             + self.cfg.rew_action_l2 * (self.actions ** 2).sum(dim=1)
             - self.cfg.k_dist_cont * d_xy
+        )
+
+        # ---- 里程碑奖励（一次性）----
+        milestone_approach = dist_front <= 0.25
+        milestone_coarse_align = (y_err <= 0.20) & (yaw_err_deg <= 10.0)
+        milestone_insert10 = insert_norm >= 0.10
+        milestone_insert30 = insert_norm >= 0.30
+        # S1.0M: 新增对齐里程碑（使用与 aligned_enough 同源的 y_err/yaw_err_deg）
+        milestone_fine_align = (y_err <= 0.10) & (yaw_err_deg <= 5.0)
+        milestone_precise_align = (y_err <= 0.05) & (yaw_err_deg <= 3.0)
+
+        milestone_hits = torch.stack(
+            [milestone_approach, milestone_coarse_align, milestone_insert10, milestone_insert30,
+             milestone_fine_align, milestone_precise_align], dim=-1
+        )
+        new_hits = milestone_hits & (~self._milestone_flags)
+        self._milestone_flags |= milestone_hits
+
+        milestone_reward = (
+            new_hits[:, 0].float() * self.cfg.rew_milestone_approach
+            + new_hits[:, 1].float() * self.cfg.rew_milestone_coarse_align
+            + new_hits[:, 2].float() * self.cfg.rew_milestone_insert_10
+            + new_hits[:, 3].float() * self.cfg.rew_milestone_insert_30
+            + new_hits[:, 4].float() * self.cfg.rew_milestone_fine_align
+            + new_hits[:, 5].float() * self.cfg.rew_milestone_precise_align
+        )
+
+        # ---- 失败早停计数（惩罚在 reward，终止在 dones）----
+        fly_cond = d_xy > self.cfg.early_stop_d_xy_max
+        self._fly_counter = torch.where(fly_cond, self._fly_counter + 1, torch.zeros_like(self._fly_counter))
+        self._early_stop_fly = self._fly_counter >= self.cfg.early_stop_d_xy_steps
+
+        action_abs_max = torch.max(torch.abs(self.actions), dim=1).values
+        stall_cond = (~self._is_first_step) & (phi_delta_abs < self.cfg.early_stop_stall_phi_eps) & (
+            action_abs_max < self.cfg.early_stop_stall_action_eps
+        )
+        self._stall_counter = torch.where(stall_cond, self._stall_counter + 1, torch.zeros_like(self._stall_counter))
+        self._early_stop_stall = self._stall_counter >= self.cfg.early_stop_stall_steps
+
+        early_stop_penalty = (
+            self._early_stop_fly.float() * self.cfg.rew_early_stop_fly
+            + self._early_stop_stall.float() * self.cfg.rew_early_stop_stall
         )
 
         # ---- 成功判定与终局奖励 ----
@@ -943,7 +1001,7 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         )
 
         # ---- 总奖励 ----
-        rew = r_pot + pen_premature + pen_dense + r_terminal
+        rew = r_pot + pen_premature + pen_dense + r_terminal + milestone_reward + early_stop_penalty
 
         # 清除首步标记
         self._is_first_step[:] = False
@@ -966,6 +1024,8 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self.extras["log"]["s0/pen_premature"] = pen_premature.mean()
         self.extras["log"]["s0/pen_dense"] = pen_dense.mean()
         self.extras["log"]["s0/r_terminal"] = r_terminal.mean()
+        self.extras["log"]["s0/r_milestone"] = milestone_reward.mean()
+        self.extras["log"]["s0/pen_early_stop"] = early_stop_penalty.mean()
 
         # 门控权重
         self.extras["log"]["s0/w_band"] = w_band.mean()
@@ -982,6 +1042,8 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self.extras["log"]["err/insert_norm_mean"] = insert_norm.mean()
         self.extras["log"]["err/lift_height_mean"] = lift_height.mean()
         self.extras["log"]["err/dist_front_mean"] = dist_front.mean()
+        self.extras["log"]["err/dist_front_base_mean"] = dist_front_base.mean()
+        self.extras["log"]["err/stage_dist_front_mean"] = stage_dist_front.mean()
         self.extras["log"]["err/d_xy_mean"] = d_xy.mean()
 
         # 阶段命中率
@@ -991,6 +1053,13 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self.extras["log"]["phase/frac_success_now"] = success_now.float().mean()
         self.extras["log"]["phase/frac_success"] = success.float().mean()
         self.extras["log"]["phase/hold_counter_max"] = self._hold_counter.float().max()
+        self.extras["log"]["milestone/hit_approach"] = new_hits[:, 0].float().mean()
+        self.extras["log"]["milestone/hit_align"] = new_hits[:, 1].float().mean()
+        self.extras["log"]["milestone/hit_insert10"] = new_hits[:, 2].float().mean()
+        self.extras["log"]["milestone/hit_insert30"] = new_hits[:, 3].float().mean()
+        # S1.0M: 对齐里程碑日志
+        self.extras["log"]["milestone/hit_fine_align"] = new_hits[:, 4].float().mean()
+        self.extras["log"]["milestone/hit_precise_align"] = new_hits[:, 5].float().mean()
 
         # 终止原因
         q = self.robot.data.root_quat_w
@@ -1005,6 +1074,8 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         )
         self.extras["log"]["term/frac_tipped"] = tipped.float().mean()
         self.extras["log"]["term/frac_timeout"] = time_out_now.float().mean()
+        self.extras["log"]["term/frac_early_fly"] = self._early_stop_fly.float().mean()
+        self.extras["log"]["term/frac_early_stall"] = self._early_stop_stall.float().mean()
 
         return rew
 
@@ -1027,7 +1098,7 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         pitch = torch.asin(torch.clamp(sinp, -1.0, 1.0))
         tipped = (torch.abs(roll) > self.cfg.max_roll_pitch_rad) | (torch.abs(pitch) > self.cfg.max_roll_pitch_rad)
 
-        terminated = tipped | success
+        terminated = tipped | success | self._early_stop_fly | self._early_stop_stall
         return terminated, time_out
 
     # ---------------------------
@@ -1056,6 +1127,11 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self._hold_counter[env_ids] = 0
         self._is_first_step[env_ids] = True
         self._lift_pos_target[env_ids] = 0.0
+        self._milestone_flags[env_ids] = False
+        self._fly_counter[env_ids] = 0
+        self._stall_counter[env_ids] = 0
+        self._early_stop_fly[env_ids] = False
+        self._early_stop_stall[env_ids] = False
 
         # ---- 托盘固定位姿（可选：后续可加随机化） ----
         pallet_pos = torch.tensor(self.cfg.pallet_cfg.init_state.pos, device=self.device).repeat(len(env_ids), 1)
@@ -1099,7 +1175,24 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         # 注：_is_first_step 保护会清零首步 r_pot，但精确初始化更安全
         y_err_reset = torch.abs(y.squeeze(-1))
         yaw_err_deg_reset = torch.abs(yaw.squeeze(-1)) * (180.0 / math.pi)
-        dist_front_reset = torch.clamp(self._pallet_front_x - x.squeeze(-1), min=0.0)
+        # S1.0L: reset 初始化与 _get_rewards 保持一致（stage_distance_ref=base）。
+        cp_reset = torch.cos(torch.zeros_like(x.squeeze(-1)))
+        sp_reset = torch.sin(torch.zeros_like(x.squeeze(-1)))
+        u_in_reset = torch.stack([cp_reset, sp_reset], dim=-1)
+        pallet_pos_reset = pallet_pos[:, :2]
+        rel_base_reset = pos[:, :2] - pallet_pos_reset
+        s_base_reset = torch.sum(rel_base_reset * u_in_reset, dim=-1)
+        s_front_reset = -0.5 * self.cfg.pallet_depth_m
+        if self.cfg.stage_distance_ref == "base":
+            dist_front_reset = torch.clamp(s_front_reset - s_base_reset, min=0.0)
+        else:
+            cos_yaw_reset = torch.cos(yaw.squeeze(-1))
+            sin_yaw_reset = torch.sin(yaw.squeeze(-1))
+            tip_x_reset = pos[:, 0] + self._fork_forward_offset * cos_yaw_reset
+            tip_y_reset = pos[:, 1] + self._fork_forward_offset * sin_yaw_reset
+            rel_tip_reset = torch.stack([tip_x_reset, tip_y_reset], dim=-1) - pallet_pos_reset
+            s_tip_reset = torch.sum(rel_tip_reset * u_in_reset, dim=-1)
+            dist_front_reset = torch.clamp(s_front_reset - s_tip_reset, min=0.0)
 
         # 计算 phi1 初始值
         e_band_reset = torch.where(
@@ -1126,8 +1219,11 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         )
         phi2_reset = phi2_base_reset * w_band_reset * w_align2_reset
 
-        # reset 时 insert_norm ≈ 0, lift_height ≈ 0 → phi_ins = 0, phi_lift = 0, w3 ≈ 0
-        phi_total_reset = phi1_reset + phi2_reset  # (1-w3)*(...) ≈ (...) 因为 w3≈0
+        # reset 时 insert_norm ≈ 0, lift_height ≈ 0 → phi_ins = 0, phi_lift = 0
+        if self.cfg.suppress_preinsert_phi_with_w3:
+            phi_total_reset = phi1_reset + phi2_reset  # w3≈0 时等价
+        else:
+            phi_total_reset = phi1_reset + phi2_reset
         self._last_phi_total[env_ids] = phi_total_reset
 
         # 举升增量缓存

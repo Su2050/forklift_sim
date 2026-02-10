@@ -30,7 +30,7 @@ class ForkliftInsertLiftPPORunnerCfg(RslRlOnPolicyRunnerCfg):
 
     # policy network：Actor-Critic 网络结构与归一化
     policy = RslRlPpoActorCriticCfg(
-        init_noise_std=1.0,  # S1.0k: 3.0→1.0，避免初始过度随机（std=3 在 clip[-1,1] 下≈均匀噪声）
+        init_noise_std=0.5,  # S1.0M: 1.0→0.5，降低初始噪声让精细转向不被淹没
         noise_std_type="log",  # S1.0k: scalar→log，log 空间梯度更新为乘法式，防止 std 线性膨胀
         actor_obs_normalization=True,  # Actor 观测归一化
         critic_obs_normalization=True,  # Critic 观测归一化
@@ -47,7 +47,7 @@ class ForkliftInsertLiftPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         schedule="adaptive",  # 学习率调度策略
         gamma=0.99,  # 折扣因子
         lam=0.95,  # GAE 参数
-        entropy_coef=0.001,  # S1.0k: 0.005→0.001，降低推高 std 的梯度压力
+        entropy_coef=0.0005,  # S1.0M: 0.001→0.0005，进一步降低推高 std 的梯度压力
         desired_kl=0.01,  # KL 目标，用于自适应调整
         max_grad_norm=1.0,  # 梯度裁剪阈值
         value_loss_coef=1.0,  # 价值函数损失权重

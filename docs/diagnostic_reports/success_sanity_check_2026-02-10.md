@@ -399,3 +399,70 @@ bash forklift_pallet_insert_lift_project/scripts/install_into_isaaclab.sh \
 2. 物理可达性验证（B 层）全部通过，插入深度和举升高度均超过阈值
 3. 综合诊断结论："判定逻辑和物理可达性均正常，所有检查通过"
 4. **可以重新启动 S1.0k 训练**，预期 `frac_success` 将不再为 0
+
+---
+
+## 8. S1.0L 奖励整改落地记录（2026-02-10）
+
+### 8.1 本次代码变更
+
+已在 `env.py` / `env_cfg.py` 落地以下 S1.0L 改动：
+
+1. **Stage1/2 距离参考点改为 base**
+   - `e_band`、`w_band`、`E2` 的距离项使用 `dist_front_base`
+   - `insert_depth/insert_norm` 仍基于 `tip`，成功判定不变
+2. **推迟 Stage3 接管**
+   - `ins_start: 0.02 -> 0.10`
+   - `ins_ramp: 0.05 -> 0.15`
+3. **纯差分 shaping**
+   - `gamma: 0.99 -> 1.0`
+4. **默认不压制 phi1/phi2**
+   - 默认 `phi_total = phi1 + phi2 + phi_ins + phi_lift`
+   - 保留回滚开关 `suppress_preinsert_phi_with_w3`
+5. **Stage3 门控放宽 + 插入势函数 baseline 提升**
+   - `y_gate3: 0.10 -> 0.18`
+   - `yaw_gate3: 8 -> 12`
+   - `phi_ins` baseline 从 `0.2` 提升到 `0.4`
+6. **新增里程碑奖励与失败早停**
+   - milestones: `approach/align/insert10/insert30`
+   - early-stop: `fly/stall`（惩罚在 reward，done 在 dones）
+
+### 8.2 冒烟训练验证（30 iterations）
+
+运行命令：
+
+```bash
+cd /home/uniubi/projects/forklift_sim/IsaacLab
+CONDA_PREFIX= CONDA_DEFAULT_ENV= TERM=xterm ./isaaclab.sh -p scripts/reinforcement_learning/rsl_rl/train.py \
+  --task Isaac-Forklift-PalletInsertLift-Direct-v0 \
+  --headless --num_envs 64 --max_iterations 30 --run_name s1.0l_smoke
+```
+
+日志文件：`logs/s1.0l_smoke_train.log`
+
+关键观测（iter 0 -> iter 29）：
+
+- `s0/w_band`: `0.6171 -> 0.9654`（不再是旧版那种长期焊死 1.0）
+- `s0/e_band`: `0.0829 -> 0.3018`（进入可学习量级，不再是 1.6+ 的失配区间）
+- `s0/r_pot`: `0.0004 -> 0.0019`（均值接近 0，已摆脱固定负底噪）
+- `err/insert_norm_mean`: `0.0196 -> 0.0799`
+- `phase/frac_inserted`: 从长期 `0.0000` 提升到阶段性非零（最高见到 `0.0938`）
+- `phase/frac_aligned`: 从 `~0.01` 抬升到 `0.0312` 量级
+
+新增日志项可正常产出：
+
+- `err/dist_front_base_mean`
+- `err/stage_dist_front_mean`
+- `s0/r_milestone`
+- `s0/pen_early_stop`
+- `term/frac_early_fly`
+- `term/frac_early_stall`
+
+### 8.3 当前结论
+
+S1.0L 已完成代码落地与短训冒烟，结果显示：
+
+1. 奖励结构从“尺度失配 + 负常数底噪”状态中解耦成功；
+2. 插入相关统计已出现非零（`frac_inserted > 0`）；
+3. 仍未在 30 iter 内出现 `frac_success > 0`，属于预期（训练轮次不足，且 lift 阶段尚未形成稳定策略）；
+4. 建议进入下一轮中等规模训练（例如 200~500 iter）继续观测 `frac_success` 与 `hold_counter_max`。
