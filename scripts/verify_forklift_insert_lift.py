@@ -47,6 +47,7 @@ import argparse
 parser = argparse.ArgumentParser(description="验证叉车插入举升功能")
 parser.add_argument("--manual", action="store_true", help="启用手动键盘控制模式")
 parser.add_argument("--auto-align", action="store_true", help="手动模式下先自动对齐到理想位置")
+parser.add_argument("--sanity-check", action="store_true", help="运行 success 判定 sanity check（A层逻辑+B层物理可达性）")
 AppLauncher.add_app_launcher_args(parser)
 args_cli, _ = parser.parse_known_args()
 
@@ -669,23 +670,24 @@ class ForkliftVerification:
         insert_depth = torch.clamp(tip[:, 0] - self.env._pallet_front_x, min=0.0)
         self.env._last_insert_depth[0] = insert_depth[0]
 
-        # FIX #5: E_align 使用 env.py 的距离自适应阈值公式
-        root_pos = self.env.robot.data.root_pos_w[0:1]
-        pallet_pos_b = self.env.pallet.data.root_pos_w[0:1]
-        y_err = torch.abs(pallet_pos_b[:, 1] - root_pos[:, 1])
-        yaw_robot = self._quat_to_yaw(self.env.robot.data.root_quat_w[0:1])
-        yaw_pallet_b = self._quat_to_yaw(self.env.pallet.data.root_quat_w[0:1])
-        dyaw = (yaw_pallet_b - yaw_robot + math.pi) % (2 * math.pi) - math.pi
-        yaw_err_deg = torch.abs(dyaw) * (180.0 / math.pi)
-        # set_ideal_position 把机器人放在近处，用 close 阈值近似
-        lat_ready = self.cfg.lat_ready_close if hasattr(self.cfg, 'lat_ready_close') else 0.10
-        yaw_ready = self.cfg.yaw_ready_close_deg if hasattr(self.cfg, 'yaw_ready_close_deg') else 10.0
-        E_align = y_err / lat_ready + yaw_err_deg / yaw_ready
-        self.env._last_E_align[0] = E_align[0]
+        # FIX #5: E_align（S1.0j 专属，S1.0k 已移除）
+        if hasattr(self.env, '_last_E_align'):
+            root_pos = self.env.robot.data.root_pos_w[0:1]
+            pallet_pos_b = self.env.pallet.data.root_pos_w[0:1]
+            y_err = torch.abs(pallet_pos_b[:, 1] - root_pos[:, 1])
+            yaw_robot = self._quat_to_yaw(self.env.robot.data.root_quat_w[0:1])
+            yaw_pallet_b = self._quat_to_yaw(self.env.pallet.data.root_quat_w[0:1])
+            dyaw = (yaw_pallet_b - yaw_robot + math.pi) % (2 * math.pi) - math.pi
+            yaw_err_deg = torch.abs(dyaw) * (180.0 / math.pi)
+            lat_ready = self.cfg.lat_ready_close if hasattr(self.cfg, 'lat_ready_close') else 0.10
+            yaw_ready = self.cfg.yaw_ready_close_deg if hasattr(self.cfg, 'yaw_ready_close_deg') else 10.0
+            E_align = y_err / lat_ready + yaw_err_deg / yaw_ready
+            self.env._last_E_align[0] = E_align[0]
 
-        # FIX #4: dist_front 使用 env.py 约定（正=剩余距离，clamped >= 0）
-        dist_front = torch.clamp(self.env._pallet_front_x - tip[:, 0], min=0.0)
-        self.env._last_dist_front[0] = dist_front[0]
+        # FIX #4: dist_front（S1.0j 专属，S1.0k 已移除）
+        if hasattr(self.env, '_last_dist_front'):
+            dist_front = torch.clamp(self.env._pallet_front_x - tip[:, 0], min=0.0)
+            self.env._last_dist_front[0] = dist_front[0]
 
         # FIX #8: lift_pos 使用 env.py 约定（lift_height = tip_z - fork_tip_z0）
         self.env._last_lift_pos[0] = tip[0, 2] - self.env._fork_tip_z0[0]
@@ -696,9 +698,13 @@ class ForkliftVerification:
         # FIX #9: 重置 episode 计时器，防止跨测试累计导致 episode timeout
         self.env.episode_length_buf[0] = 0
 
-        # FIX #7: 重置势函数缓存
-        self.env._last_Phi_insert[0] = 0.0
-        self.env._last_Phi_lift[0] = 0.0
+        # FIX #7: 重置势函数缓存（兼容 S1.0j 和 S1.0k）
+        if hasattr(self.env, '_last_Phi_insert'):
+            self.env._last_Phi_insert[0] = 0.0
+        if hasattr(self.env, '_last_Phi_lift'):
+            self.env._last_Phi_lift[0] = 0.0
+        if hasattr(self.env, '_last_phi_total'):
+            self.env._last_phi_total[0] = 0.0
 
         # 重置 actions 缓存
         self.env.actions[0] = 0.0
@@ -1584,6 +1590,472 @@ class ForkliftVerification:
         if pallet_front_test and not pallet_front_test.passed:
             print("\n⚠️  托盘前部x坐标计算验证未通过，需要检查_pallet_front_x计算")
     
+    # ==================================================================
+    # Success Sanity Check（A层逻辑 + B层物理可达性）
+    # ==================================================================
+
+    def teleport_to_success_pose(self, desired_insert: float = 1.5, lift_val: float = 0.15):
+        """将叉车传送到"理应成功"的完美位姿，同步所有内部缓存。
+
+        Args:
+            desired_insert: 目标插入深度 (m)，默认 1.5m（> 阈值 1.44m）
+            lift_val: lift 关节位置 (m)，默认 0.15m（> 阈值 0.12m）
+        """
+        env = self.env
+        cfg = self.cfg
+        env_ids = torch.tensor([0], device=env.device)
+
+        # ---- 1. 读取托盘状态 ----
+        pallet_pos = env.pallet.data.root_pos_w[0]  # (3,)
+        pallet_yaw = self._quat_to_yaw(env.pallet.data.root_quat_w[0])
+
+        # ---- 2. 计算目标 tip 位置（沿托盘插入轴） ----
+        # S1.0k: s_front = -0.5 * pallet_depth_m
+        # insert_depth = clamp(s_tip - s_front, min=0)
+        # 我们要 s_tip = s_front + desired_insert
+        # s_tip = (tip_xy - pallet_xy) . u_in
+        # 所以 tip 在世界坐标中：
+        cos_yaw = math.cos(pallet_yaw.item())
+        sin_yaw = math.sin(pallet_yaw.item())
+
+        s_front = -0.5 * cfg.pallet_depth_m
+        desired_s_tip = s_front + desired_insert
+
+        # tip 世界坐标 = pallet_xy + desired_s_tip * u_in
+        desired_tip_x = pallet_pos[0].item() + desired_s_tip * cos_yaw
+        desired_tip_y = pallet_pos[1].item() + desired_s_tip * sin_yaw
+
+        # ---- 3. 从 tip 反推 root ----
+        # tip = root + fork_forward_offset * [cos(yaw), sin(yaw)]
+        fwd = env._fork_forward_offset
+        root_x = desired_tip_x - fwd * cos_yaw
+        root_y = desired_tip_y - fwd * sin_yaw
+        root_z = 0.03  # 与 _reset_idx 一致
+
+        # ---- 4. 写入位姿 ----
+        pos = torch.tensor([[root_x, root_y, root_z]], device=env.device)
+        quat = self._yaw_to_quat(pallet_yaw).unsqueeze(0)
+        env._write_root_pose(env.robot, pos, quat, env_ids)
+
+        zeros3 = torch.zeros((1, 3), device=env.device)
+        env._write_root_vel(env.robot, zeros3, zeros3, env_ids)
+
+        # ---- 5. 写入关节状态 (lift=lift_val) ----
+        joint_pos = env.robot.data.default_joint_pos[env_ids].clone()
+        joint_pos[0, env._lift_id] = lift_val
+        joint_vel = torch.zeros_like(joint_pos)
+        env._write_joint_state(env.robot, joint_pos, joint_vel, env_ids)
+
+        # ---- 6. 物理同步 ----
+        # 注意：不能调用 env.sim.reset()！
+        # sim.reset() 是全局 PhysX 引擎重置，会将所有环境的位姿覆盖回 config 默认值，
+        # 完全摧毁上面刚写入的传送位姿（详见 env.py _reset_idx 中的 S0.7 postmortem）。
+        # 正确做法：write_data_to_sim → 单步物理推进 → scene.update 刷新数据
+        env.scene.write_data_to_sim()
+        env.sim.step(render=False)
+        env.scene.update(env.cfg.sim.dt)
+
+        # ---- 7. 刷新关节缓存（physx view → 内部 tensor） ----
+        env._joint_pos[:] = env.robot.root_physx_view.get_dof_positions()
+        env._joint_vel[:] = env.robot.root_physx_view.get_dof_velocities()
+
+        # ---- 8. 同步所有内部缓存 ----
+        env._lift_pos_target[0] = lift_val       # 关键：防止 _apply_action 拉回 0
+        env._fork_tip_z0[0] = root_z             # lift_height 基准
+        env._last_insert_depth[0] = 0.0
+        env._last_lift_pos[0] = 0.0
+        env._is_first_step[0] = True
+        env._hold_counter[0] = 0
+        env.episode_length_buf[0] = 0
+        env.actions[0] = 0.0
+
+        # 计算初始 phi_total 并写入缓存（与 _reset_idx 同理）
+        y_err_r = torch.tensor([0.0], device=env.device)   # 完美对齐
+        yaw_err_deg_r = torch.tensor([0.0], device=env.device)
+        dist_front_r = torch.tensor([0.0], device=env.device)  # 已深插入，dist_front=0
+        e_band_r = torch.tensor([cfg.d1_min], device=env.device)  # dist_front=0 < d1_min
+        E1_r = (e_band_r / cfg.e_band_scale
+                + y_err_r / cfg.y_scale1
+                + yaw_err_deg_r / cfg.yaw_scale1)
+        phi1_r = cfg.k_phi1 / (1.0 + E1_r)
+        E2_r = (dist_front_r / cfg.d2_scale
+                + y_err_r / cfg.y_scale2
+                + yaw_err_deg_r / cfg.yaw_scale2)
+        phi2_base_r = cfg.k_phi2 / (1.0 + E2_r)
+        # w_band: dist_front=0 < d1_min → (d1_max - 0)/(d1_max - d1_min) > 1 → clamp → 1
+        phi2_r = phi2_base_r * 1.0 * 1.0  # w_band=1, w_align2=1 (完美对齐)
+        # insert_norm = desired_insert / pallet_depth
+        ins_norm_r = desired_insert / (cfg.pallet_depth_m + 1e-6)
+        # w3: smoothstep((ins_norm - ins_start) / ins_ramp) → 接近 1
+        w3_raw = (ins_norm_r - cfg.ins_start) / cfg.ins_ramp
+        w3_r = min(max(w3_raw, 0.0), 1.0)
+        w3_r = w3_r * w3_r * (3.0 - 2.0 * w3_r)  # smoothstep
+        phi_ins_r = cfg.k_ins * (0.2 + 0.8 * 1.0) * ins_norm_r * w3_r  # w_align3=1
+        # phi_lift
+        w_lift_base_raw = (ins_norm_r - cfg.insert_gate_norm) / cfg.insert_ramp_norm
+        w_lift_base_r = min(max(w_lift_base_raw, 0.0), 1.0)
+        w_lift_base_r = w_lift_base_r * w_lift_base_r * (3.0 - 2.0 * w_lift_base_r)
+        # lift_height ≈ lift_val (因为 root_z = fork_tip_z0, fork_z_base ≈ 0)
+        phi_lift_r = cfg.k_lift * w_lift_base_r * 1.0 * lift_val  # w_align3=1
+        phi_total_r = (phi1_r + phi2_r) * (1.0 - w3_r) + phi_ins_r + phi_lift_r
+        env._last_phi_total[0] = phi_total_r.item() if isinstance(phi_total_r, torch.Tensor) else phi_total_r
+
+        # 验证传送结果
+        tip = self.get_fork_tip_position()
+        print(f"  [teleport] root=({root_x:.4f}, {root_y:.4f}, {root_z:.4f})")
+        print(f"  [teleport] tip =({tip[0]:.4f}, {tip[1]:.4f}, {tip[2]:.4f})")
+        print(f"  [teleport] pallet=({pallet_pos[0]:.4f}, {pallet_pos[1]:.4f}, {pallet_pos[2]:.4f})")
+        print(f"  [teleport] lift_joint={lift_val:.4f}m, _lift_pos_target={env._lift_pos_target[0]:.4f}")
+        print(f"  [teleport] _fork_tip_z0={env._fork_tip_z0[0]:.4f}, _last_phi_total={env._last_phi_total[0]:.4f}")
+
+    def _read_success_components(self):
+        """读取环境内部的 success 判定各分量（需在 step 之后调用）。
+
+        Returns:
+            dict with keys: insert_depth, y_err, yaw_err_deg, lift_height,
+                            inserted_enough, aligned_enough, lifted_enough,
+                            success_now, hold_counter, hold_steps
+        """
+        env = self.env
+        cfg = self.cfg
+
+        # 刷新关节数据（与 _get_rewards 一致）
+        env._joint_pos[:] = env.robot.root_physx_view.get_dof_positions()
+        env._joint_vel[:] = env.robot.root_physx_view.get_dof_velocities()
+
+        root_pos = env.robot.data.root_pos_w
+        pallet_pos = env.pallet.data.root_pos_w
+        tip = env._compute_fork_tip()
+
+        robot_yaw = self._quat_to_yaw(env.robot.data.root_quat_w[0])
+        pallet_yaw = self._quat_to_yaw(env.pallet.data.root_quat_w[0])
+
+        # S1.0k 中心线几何
+        cp = torch.cos(pallet_yaw)
+        sp = torch.sin(pallet_yaw)
+        u_in = torch.stack([cp, sp])
+        v_lat = torch.stack([-sp, cp])
+
+        rel_robot = root_pos[0, :2] - pallet_pos[0, :2]
+        y_err = torch.abs(torch.dot(rel_robot, v_lat)).item()
+
+        yaw_err = torch.atan2(
+            torch.sin(robot_yaw - pallet_yaw),
+            torch.cos(robot_yaw - pallet_yaw),
+        )
+        yaw_err_deg = abs(yaw_err.item()) * (180.0 / math.pi)
+        yaw_err_rad = abs(yaw_err.item())
+
+        # 插入深度
+        rel_tip = tip[0, :2] - pallet_pos[0, :2]
+        s_tip = torch.dot(rel_tip, u_in).item()
+        s_front = -0.5 * cfg.pallet_depth_m
+        insert_depth = max(s_tip - s_front, 0.0)
+
+        # 举升
+        lift_height = (tip[0, 2] - env._fork_tip_z0[0]).item()
+
+        # 判定
+        inserted_enough = insert_depth >= env._insert_thresh
+        aligned_enough = (y_err <= cfg.max_lateral_err_m) and (yaw_err_rad <= math.radians(cfg.max_yaw_err_deg))
+        lifted_enough = lift_height >= cfg.lift_delta_m
+        success_now = inserted_enough and aligned_enough and lifted_enough
+
+        return {
+            "insert_depth": insert_depth,
+            "y_err": y_err,
+            "yaw_err_deg": yaw_err_deg,
+            "lift_height": lift_height,
+            "inserted_enough": inserted_enough,
+            "aligned_enough": aligned_enough,
+            "lifted_enough": lifted_enough,
+            "success_now": success_now,
+            "hold_counter": env._hold_counter[0].item(),
+            "hold_steps": env._hold_steps,
+            "insert_thresh": env._insert_thresh,
+        }
+
+    def run_sanity_check(self):
+        """运行 success 判定 sanity check（A层逻辑 + B层物理可达性）"""
+        print("=" * 80)
+        print("  SUCCESS 判定 SANITY CHECK")
+        print("=" * 80)
+
+        # 初始化环境
+        if not self.initialize_environment():
+            print("[FATAL] 环境初始化失败")
+            return
+
+        cfg = self.cfg
+        env = self.env
+
+        # 打印关键阈值
+        print_section("关键阈值")
+        print_info("insert_thresh", f"{env._insert_thresh:.4f}m (insert_fraction={cfg.insert_fraction:.4f} * pallet_depth={cfg.pallet_depth_m:.4f})")
+        print_info("max_lateral_err_m", f"{cfg.max_lateral_err_m:.4f}m")
+        print_info("max_yaw_err_deg", f"{cfg.max_yaw_err_deg:.2f}deg")
+        print_info("lift_delta_m", f"{cfg.lift_delta_m:.4f}m")
+        print_info("hold_steps", f"{env._hold_steps} (hold_time_s={cfg.hold_time_s:.2f}s)")
+        print_info("fork_forward_offset", f"{env._fork_forward_offset:.4f}m")
+        print_info("fork_z_base", f"{env._fork_z_base:.4f}m")
+
+        # 收集诊断结果
+        diag = {}
+
+        # ==================================================================
+        # A1：传送到完美位姿，step 1 步
+        # ==================================================================
+        print_section("A1: 传送到完美位姿 → step 1 步")
+        self.teleport_to_success_pose(desired_insert=1.5, lift_val=0.15)
+
+        # step 1 步（零动作）
+        actions = torch.tensor([[0.0, 0.0, 0.0]], device=env.device)
+        env.step(actions)
+
+        comp = self._read_success_components()
+        print("\n  [A1] step 1 后各分量:")
+        print_info("insert_depth", f"{comp['insert_depth']:.4f}m (阈值={comp['insert_thresh']:.4f}m) → {'PASS' if comp['inserted_enough'] else 'FAIL'}")
+        print_info("y_err", f"{comp['y_err']:.6f}m (阈值={cfg.max_lateral_err_m:.4f}m) → {'PASS' if comp['aligned_enough'] else 'FAIL'}")
+        print_info("yaw_err_deg", f"{comp['yaw_err_deg']:.4f}deg (阈值={cfg.max_yaw_err_deg:.2f}deg)")
+        print_info("lift_height", f"{comp['lift_height']:.4f}m (阈值={cfg.lift_delta_m:.4f}m) → {'PASS' if comp['lifted_enough'] else 'FAIL'}")
+        print_info("success_now", f"{'TRUE' if comp['success_now'] else 'FALSE'}")
+        print_info("hold_counter", f"{comp['hold_counter']:.0f}/{comp['hold_steps']}")
+
+        diag["a1_success_now"] = comp["success_now"]
+        diag["a1_inserted"] = comp["inserted_enough"]
+        diag["a1_aligned"] = comp["aligned_enough"]
+        diag["a1_lifted"] = comp["lifted_enough"]
+        diag["a1_insert_depth"] = comp["insert_depth"]
+        diag["a1_y_err"] = comp["y_err"]
+        diag["a1_yaw_err_deg"] = comp["yaw_err_deg"]
+        diag["a1_lift_height"] = comp["lift_height"]
+
+        # ==================================================================
+        # A2：连续 step 40 步，检查 hold_counter
+        # ==================================================================
+        print_section("A2: 连续 step 40 步（零动作）检查 hold_counter")
+
+        max_hold = 0
+        hold_broke_at = -1
+        hold_broke_reason = ""
+        a2_terminated = False
+
+        for step_i in range(40):
+            env.step(actions)
+            comp = self._read_success_components()
+            hc = int(comp["hold_counter"])
+            max_hold = max(max_hold, hc)
+
+            if step_i < 5 or step_i % 10 == 0 or hc == 0:
+                print(f"  step {step_i+2:3d}: hold_counter={hc:3d}, success_now={'T' if comp['success_now'] else 'F'}"
+                      f"  ins={comp['insert_depth']:.4f} y={comp['y_err']:.5f} yaw={comp['yaw_err_deg']:.3f} lift={comp['lift_height']:.4f}")
+
+            # 检查 hold 中断
+            if not comp["success_now"] and hold_broke_at < 0 and max_hold > 0:
+                hold_broke_at = step_i + 2
+                reasons = []
+                if not comp["inserted_enough"]:
+                    reasons.append(f"inserted_enough=F (insert_depth={comp['insert_depth']:.4f})")
+                if not comp["aligned_enough"]:
+                    reasons.append(f"aligned_enough=F (y={comp['y_err']:.5f}, yaw={comp['yaw_err_deg']:.3f})")
+                if not comp["lifted_enough"]:
+                    reasons.append(f"lifted_enough=F (lift={comp['lift_height']:.4f})")
+                hold_broke_reason = "; ".join(reasons)
+
+            # 检查 terminated
+            terminated, _ = env._get_dones()
+            if terminated[0].item():
+                a2_terminated = True
+                print(f"  → terminated=True at step {step_i+2}, hold_counter={hc}")
+                break
+
+        a2_success = max_hold >= env._hold_steps
+        print(f"\n  [A2] hold_counter 最高: {max_hold}/{env._hold_steps}")
+        print(f"  [A2] success (terminated): {'TRUE' if a2_terminated else 'FALSE'}")
+        if hold_broke_at >= 0:
+            print(f"  [A2] hold 中断于 step {hold_broke_at}: {hold_broke_reason}")
+
+        diag["a2_max_hold"] = max_hold
+        diag["a2_success"] = a2_success
+        diag["a2_terminated"] = a2_terminated
+        diag["a2_hold_broke_reason"] = hold_broke_reason
+
+        # ==================================================================
+        # B1：物理插入深度可达性
+        # ==================================================================
+        print_section("B1: 物理插入深度可达性（从对齐位置前进）")
+
+        # 重置环境
+        env.reset()
+        self.set_robot_ideal_position(distance_from_front=0.5)
+
+        max_insert = 0.0
+        stall_count = 0
+        stall_threshold = 80
+        b1_steps = 0
+
+        for step_i in range(800):
+            self.manual_control(drive=0.3, steer=0.0, lift=0.0, steps=1)
+            metrics = self.get_insertion_metrics()
+            cur_insert = metrics["insert_depth"]
+
+            if cur_insert > max_insert + 0.001:
+                max_insert = cur_insert
+                stall_count = 0
+            else:
+                stall_count += 1
+
+            b1_steps = step_i + 1
+
+            if step_i % 100 == 0 or stall_count == stall_threshold:
+                print(f"  step {step_i:4d}: insert_depth={cur_insert:.4f}m, max={max_insert:.4f}m, stall={stall_count}")
+
+            if stall_count >= stall_threshold:
+                # 输出卡住诊断
+                front_vel = env._joint_vel[0, env._front_wheel_ids].mean().item()
+                root_vel = env.robot.data.root_lin_vel_w[0]
+                speed = torch.norm(root_vel[:2]).item()
+                print(f"  [B1] 卡住！连续 {stall_threshold} 步无增长")
+                print(f"       轮速={front_vel:.4f} rad/s, 车体速度={speed:.4f} m/s")
+                if speed < 0.005 and abs(front_vel) > 0.1:
+                    print(f"       → 轮子在转但车不动 → 碰撞阻挡")
+                elif speed < 0.005:
+                    print(f"       → 轮子和车都不动 → 可能被完全卡死")
+                else:
+                    print(f"       → 车在动但插入深度不增 → 可能滑移/偏航")
+                break
+
+        b1_reachable = max_insert >= env._insert_thresh
+        print(f"\n  [B1] 最大插入深度: {max_insert:.4f}m (阈值={env._insert_thresh:.4f}m)")
+        print(f"  [B1] 结论: {'可达' if b1_reachable else '不可达'}")
+        if not b1_reachable:
+            print(f"  [B1] 缺口: {env._insert_thresh - max_insert:.4f}m")
+
+        diag["b1_max_insert"] = max_insert
+        diag["b1_reachable"] = b1_reachable
+        diag["b1_steps"] = b1_steps
+
+        # ==================================================================
+        # B2：物理举升高度可达性
+        # ==================================================================
+        print_section("B2: 物理举升高度可达性（在当前插入状态下举升）")
+
+        # 重置 episode 计时器
+        env.episode_length_buf[0] = 0
+
+        max_lift = -999.0
+        stall_count = 0
+        stall_threshold = 60
+        b2_steps = 0
+        initial_lift_pos = env._joint_pos[0, env._lift_id].item()
+
+        for step_i in range(400):
+            self.manual_control(drive=0.0, steer=0.0, lift=1.0, steps=1)
+
+            tip = self.get_fork_tip_position()
+            cur_lift = (tip[2] - env._fork_tip_z0[0]).item()
+
+            if cur_lift > max_lift + 0.001:
+                max_lift = cur_lift
+                stall_count = 0
+            else:
+                stall_count += 1
+
+            b2_steps = step_i + 1
+
+            if step_i % 60 == 0 or stall_count == stall_threshold:
+                lift_joint = env._joint_pos[0, env._lift_id].item()
+                print(f"  step {step_i:4d}: lift_height={cur_lift:.4f}m, max={max_lift:.4f}m, lift_joint={lift_joint:.4f}m")
+
+            if stall_count >= stall_threshold:
+                lift_joint = env._joint_pos[0, env._lift_id].item()
+                print(f"  [B2] 卡住！连续 {stall_threshold} 步无增长")
+                print(f"       lift_joint={lift_joint:.4f}m, _lift_pos_target={env._lift_pos_target[0]:.4f}m")
+                break
+
+        b2_reachable = max_lift >= cfg.lift_delta_m
+        print(f"\n  [B2] 最大举升高度: {max_lift:.4f}m (阈值={cfg.lift_delta_m:.4f}m)")
+        print(f"  [B2] 结论: {'可达' if b2_reachable else '不可达'}")
+
+        diag["b2_max_lift"] = max_lift
+        diag["b2_reachable"] = b2_reachable
+        diag["b2_steps"] = b2_steps
+
+        # ==================================================================
+        # 综合诊断报告
+        # ==================================================================
+        print("\n")
+        print("=" * 64)
+        print("          SUCCESS SANITY CHECK 诊断报告")
+        print("=" * 64)
+
+        print("\n--- A 层：判定逻辑验证 ---")
+        a1_ok = diag["a1_success_now"]
+        print(f"[A1] 传送到完美位姿后 (step 1):")
+        print(f"  inserted_enough: {'PASS' if diag['a1_inserted'] else 'FAIL'}  (insert_depth={diag['a1_insert_depth']:.4f}m, 阈值={env._insert_thresh:.4f}m)")
+        print(f"  aligned_enough:  {'PASS' if diag['a1_aligned'] else 'FAIL'}  (y_err={diag['a1_y_err']:.6f}m, yaw_err={diag['a1_yaw_err_deg']:.4f}deg)")
+        print(f"  lifted_enough:   {'PASS' if diag['a1_lifted'] else 'FAIL'}  (lift_height={diag['a1_lift_height']:.4f}m, 阈值={cfg.lift_delta_m:.4f}m)")
+        print(f"  success_now:     {'PASS' if a1_ok else 'FAIL'}")
+
+        print(f"\n[A2] 连续 hold 40 步:")
+        print(f"  hold_counter 最高: {diag['a2_max_hold']}/{env._hold_steps}")
+        print(f"  success (terminated): {'PASS' if diag['a2_terminated'] else 'FAIL'}")
+        if diag["a2_hold_broke_reason"]:
+            print(f"  hold 中断原因: {diag['a2_hold_broke_reason']}")
+
+        print(f"\n--- B 层：物理可达性验证 ---")
+        print(f"[B1] 物理最大插入深度: {diag['b1_max_insert']:.4f}m (阈值={env._insert_thresh:.4f}m)")
+        print(f"  结论: {'可达' if diag['b1_reachable'] else '不可达'}")
+
+        print(f"\n[B2] 物理最大举升高度: {diag['b2_max_lift']:.4f}m (阈值={cfg.lift_delta_m:.4f}m)")
+        print(f"  结论: {'可达' if diag['b2_reachable'] else '不可达'}")
+
+        print(f"\n{'=' * 64}")
+        print(f"          综合诊断")
+        print(f"{'=' * 64}")
+
+        has_issue = False
+        if not a1_ok:
+            has_issue = True
+            if not diag["a1_inserted"]:
+                print("  [CRITICAL] A1 inserted_enough=FAIL → 插入深度计算/阈值/坐标系有 bug")
+            if not diag["a1_aligned"]:
+                print("  [CRITICAL] A1 aligned_enough=FAIL → 对齐误差计算/阈值有 bug")
+            if not diag["a1_lifted"]:
+                print("  [CRITICAL] A1 lifted_enough=FAIL → lift_height 计算或 _fork_tip_z0 有 bug")
+
+        if not diag["a2_terminated"] and a1_ok:
+            has_issue = True
+            print("  [CRITICAL] A2 hold_counter 未累积到阈值 → 位姿漂移或 hold_counter 逻辑 bug")
+
+        if not diag["b1_reachable"]:
+            has_issue = True
+            print(f"  [CRITICAL] B1 物理最大插入={diag['b1_max_insert']:.4f}m < 阈值 {env._insert_thresh:.4f}m")
+            print(f"             → 碰撞配置阻止深插入，需修改碰撞体或降低 insert_fraction")
+
+        if not diag["b2_reachable"]:
+            has_issue = True
+            print(f"  [WARNING]  B2 物理最大举升={diag['b2_max_lift']:.4f}m < 阈值 {cfg.lift_delta_m:.4f}m")
+            print(f"             → lift 关节驱动/限位有问题")
+
+        if a1_ok and diag["a2_terminated"] and not diag["b1_reachable"]:
+            print(f"\n  >>> 训练 success=0 的根因：物理上插入深度不可达 <<<")
+            print(f"  >>> 建议：降低 insert_fraction 或修改碰撞体 <<<")
+
+        if a1_ok and diag["a2_terminated"] and diag["b1_reachable"] and diag["b2_reachable"]:
+            print(f"\n  >>> 判定逻辑和物理可达性均正常，训练 success=0 是策略问题 <<<")
+            print(f"  >>> 建议：调整奖励/课程学习/超参数 <<<")
+
+        if not has_issue:
+            print("  所有检查通过！")
+
+        print("=" * 64)
+
+        # 关闭
+        if env:
+            env.close()
+        simulation_app.close()
+
     def run_all_tests(self):
         """运行所有测试"""
         print("=" * 80)
@@ -1623,7 +2095,9 @@ class ForkliftVerification:
 def main():
     """主函数"""
     verifier = ForkliftVerification()
-    if args_cli.manual:
+    if getattr(args_cli, "sanity_check", False):
+        verifier.run_sanity_check()
+    elif args_cli.manual:
         if getattr(args_cli, "headless", False):
             print("[错误] 手动模式需要可视化界面，请去掉 --headless 参数运行。")
             simulation_app.close()

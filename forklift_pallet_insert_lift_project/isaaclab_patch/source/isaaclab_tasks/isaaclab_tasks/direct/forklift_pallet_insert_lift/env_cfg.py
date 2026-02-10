@@ -73,7 +73,10 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     pallet_depth_m: float = 2.16
 
     # ===== KPI（成功判定指标）=====
-    insert_fraction: float = 2.0 / 3.0
+    # S1.0k sanity check 发现：convexDecomposition 碰撞体阻止叉齿插入超过 ~1.03m，
+    # 原 2/3 (1.44m) 阈值物理不可达。降低到 0.40 (0.864m)，留 15% 安全余量。
+    # 详见 docs/diagnostic_reports/success_sanity_check_2026-02-10.md
+    insert_fraction: float = 0.40
     lift_delta_m: float = 0.12
     hold_time_s: float = 1.0
     max_lateral_err_m: float = 0.03
