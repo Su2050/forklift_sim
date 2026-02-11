@@ -1078,6 +1078,7 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         success = self._hold_counter >= self._hold_steps
 
         # 保留兼容变量（用于日志）
+        grace_zone = (~still_ok) & (~confirmed_exit)  # S1.0O-C1: grace zone 含短暂越界未确认
         inserted_enough = insert_entry
         aligned_enough = align_entry
         lifted_enough = lift_entry
