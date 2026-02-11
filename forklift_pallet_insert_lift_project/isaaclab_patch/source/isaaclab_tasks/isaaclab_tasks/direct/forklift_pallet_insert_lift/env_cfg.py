@@ -92,6 +92,8 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     hysteresis_ratio: float = 1.2       # 对齐 exit 阈值 = entry × 1.2
     insert_exit_epsilon: float = 0.02   # 插入深度 exit 容差（与 insert_depth 同单位）
     lift_exit_epsilon: float = 0.01     # 举升高度 exit 容差 (m)
+    # S1.0O-C1: exit debounce — 连续越界 N 步才判定失败并清零
+    exit_debounce_steps: int = 3
 
     # ===== 动作范围（[-1, 1] 的归一化动作会乘以下列缩放）=====
     wheel_speed_rad_s: float = 20.0

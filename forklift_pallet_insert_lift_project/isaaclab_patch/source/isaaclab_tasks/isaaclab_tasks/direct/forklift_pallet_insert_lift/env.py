@@ -164,6 +164,8 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self._milestone_flags = torch.zeros((self.num_envs, 7), dtype=torch.bool, device=self.device)
         # S1.0N: delta hold-align shaping 状态量
         self._prev_phi_align = torch.zeros((self.num_envs,), device=self.device)
+        # S1.0O-C1: exit debounce 计数器
+        self._exit_debounce_counter = torch.zeros((self.num_envs,), dtype=torch.int32, device=self.device)
         self._fly_counter = torch.zeros((self.num_envs,), dtype=torch.int32, device=self.device)
         self._stall_counter = torch.zeros((self.num_envs,), dtype=torch.int32, device=self.device)
         self._early_stop_fly = torch.zeros((self.num_envs,), dtype=torch.bool, device=self.device)
@@ -1052,18 +1054,25 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         lift_entry = lift_height >= self.cfg.lift_delta_m
         lift_exit_exceeded = lift_height < (self.cfg.lift_delta_m - self.cfg.lift_exit_epsilon)
 
-        # 三段式更新
+        # 三段式更新 + S1.0O-C1 exit debounce
         still_ok = insert_entry & align_entry & lift_entry
         any_exit_exceeded = align_exit_exceeded | insert_exit_exceeded | lift_exit_exceeded
-        grace_zone = (~still_ok) & (~any_exit_exceeded)
+
+        # S1.0O-C1: debounce — 连续越界 N 步才确认失败
+        self._exit_debounce_counter = torch.where(
+            any_exit_exceeded,
+            self._exit_debounce_counter + 1,
+            torch.zeros_like(self._exit_debounce_counter),
+        )
+        confirmed_exit = self._exit_debounce_counter >= self.cfg.exit_debounce_steps
 
         self._hold_counter = torch.where(
             still_ok,
             self._hold_counter + 1,
             torch.where(
-                grace_zone,
-                self._hold_counter,                        # hold constant: 不加不减
-                torch.zeros_like(self._hold_counter),      # 真正跑飞: 归零
+                ~confirmed_exit,                           # grace zone + 未确认越界: 保持
+                self._hold_counter,
+                torch.zeros_like(self._hold_counter),      # 确认越界才清零
             ),
         )
         success = self._hold_counter >= self._hold_steps
@@ -1239,6 +1248,8 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self._early_stop_stall[env_ids] = False
         # S1.0N: _prev_phi_align 暂时清零，在位姿写入后再初始化为当前 phi_align
         self._prev_phi_align[env_ids] = 0.0
+        # S1.0O-C1: exit debounce 计数器清零
+        self._exit_debounce_counter[env_ids] = 0
 
         # ---- 托盘固定位姿（可选：后续可加随机化） ----
         pallet_pos = torch.tensor(self.cfg.pallet_cfg.init_state.pos, device=self.device).repeat(len(env_ids), 1)
