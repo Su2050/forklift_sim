@@ -178,7 +178,7 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     # S1.0O-B1: 增大 sigma + k，让 lateral 0.2~0.4m 区间梯度更强（S1.0N: 0.1/0.15/8.0）
     k_hold_align: float = 0.3          # delta shaping 权重
     hold_align_sigma_y: float = 0.25   # 横向尺度 (m)
-    hold_align_sigma_yaw: float = 12.0 # 偏航尺度 (deg)
+    hold_align_sigma_yaw: float = 8.0  # 偏航尺度 (deg) — A3B1C2_v2: 12→8 收紧 yaw 梯度
 
     # 失败早停
     early_stop_d_xy_max: float = 3.0
