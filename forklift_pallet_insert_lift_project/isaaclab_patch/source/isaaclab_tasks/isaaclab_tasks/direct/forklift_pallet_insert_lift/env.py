@@ -160,7 +160,10 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self._last_lift_pos = torch.zeros((self.num_envs,), device=self.device)
         # S1.0L: milestones + early-stop buffers
         # S1.0M: 从 4 列扩展到 6 列（新增 fine_align + precise_align）
-        self._milestone_flags = torch.zeros((self.num_envs, 6), dtype=torch.bool, device=self.device)
+        # S1.0N: 从 6 列扩展到 7 列（新增 gate_align）
+        self._milestone_flags = torch.zeros((self.num_envs, 7), dtype=torch.bool, device=self.device)
+        # S1.0N: delta hold-align shaping 状态量
+        self._prev_phi_align = torch.zeros((self.num_envs,), device=self.device)
         self._fly_counter = torch.zeros((self.num_envs,), dtype=torch.int32, device=self.device)
         self._stall_counter = torch.zeros((self.num_envs,), dtype=torch.int32, device=self.device)
         self._early_stop_fly = torch.zeros((self.num_envs,), dtype=torch.bool, device=self.device)
@@ -681,8 +684,50 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
 
         return torch.stack([tip_x, tip_y, tip_z], dim=-1)
 
+    def _compute_phi_align(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
+        """计算对齐势函数 phi_align（与 _get_rewards 同源几何）。
+
+        用于 delta hold-align shaping 的状态缓存初始化（_reset_idx）和
+        每步 delta 计算（_get_rewards）。
+
+        Args:
+            env_ids: 如果提供，只计算这些 env 的值；否则计算全部。
+
+        Returns:
+            phi_align: (len(env_ids),) 或 (N,) — 对齐势函数值 [0, 1]
+        """
+        if env_ids is not None:
+            root_pos = self.robot.data.root_pos_w[env_ids]
+            robot_yaw = _quat_to_yaw(self.robot.data.root_quat_w[env_ids])
+            pallet_pos = self.pallet.data.root_pos_w[env_ids]
+            pallet_yaw = _quat_to_yaw(self.pallet.data.root_quat_w[env_ids])
+        else:
+            root_pos = self.robot.data.root_pos_w
+            robot_yaw = _quat_to_yaw(self.robot.data.root_quat_w)
+            pallet_pos = self.pallet.data.root_pos_w
+            pallet_yaw = _quat_to_yaw(self.pallet.data.root_quat_w)
+
+        cp = torch.cos(pallet_yaw)
+        sp = torch.sin(pallet_yaw)
+        v_lat = torch.stack([-sp, cp], dim=-1)
+
+        rel_robot = root_pos[:, :2] - pallet_pos[:, :2]
+        y_err = torch.abs(torch.sum(rel_robot * v_lat, dim=-1))
+
+        yaw_err = torch.atan2(
+            torch.sin(robot_yaw - pallet_yaw),
+            torch.cos(robot_yaw - pallet_yaw),
+        )
+        yaw_err_deg = torch.abs(yaw_err) * (180.0 / math.pi)
+
+        phi_align = (
+            torch.exp(-(y_err / self.cfg.hold_align_sigma_y) ** 2)
+            * torch.exp(-(yaw_err_deg / self.cfg.hold_align_sigma_yaw) ** 2)
+        )
+        return phi_align
+
     def _get_observations(self) -> dict[str, torch.Tensor]:
-        """构造观测向量（长度=13）。
+        """构造观测向量（长度=15，S1.0N: 13→15）。
 
         顺序如下：
         1) 机器人到托盘的相对位置（机器人坐标系）d_xy_r (2)
@@ -692,6 +737,8 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         5) lift 关节位置与速度 (2)
         6) 插入深度归一化 insert_norm (1)
         7) 当前动作 actions (3)
+        8) S1.0N: pallet center line frame 横向误差 y_err_obs (1, 带符号, clip [-1,1])
+        9) S1.0N: pallet center line frame 偏航误差 yaw_err_obs (1, 带符号, clip [-1,1])
         """
         # ---- 从 PhysX view 刷新关节数据 ----
         # robot.data.joint_pos 在 Fabric clone 失败时不更新（始终为 0），
@@ -761,6 +808,16 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         insert_depth = torch.clamp(tip[:, 0] - pallet_front_x, min=0.0)
         insert_norm = (insert_depth / (self.cfg.pallet_depth_m + 1e-6)).unsqueeze(-1)
 
+        # S1.0N: pallet center line frame 误差（与 _get_rewards 同源几何）
+        cp_obs = torch.cos(pallet_yaw)
+        sp_obs = torch.sin(pallet_yaw)
+        v_lat_obs = torch.stack([-sp_obs, cp_obs], dim=-1)
+        y_signed_obs = torch.sum((root_pos[:, :2] - pallet_pos[:, :2]) * v_lat_obs, dim=-1)
+        y_err_obs = torch.clamp(y_signed_obs / 0.5, -1.0, 1.0)  # 归一化 + 硬 clip
+
+        dyaw_signed_obs = torch.atan2(torch.sin(yaw - pallet_yaw), torch.cos(yaw - pallet_yaw))
+        yaw_err_obs = torch.clamp(dyaw_signed_obs / (15.0 * math.pi / 180.0), -1.0, 1.0)
+
         obs = torch.cat(
             [
                 d_xy_r,  # 2
@@ -770,6 +827,8 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
                 lift_pos, lift_vel,  # 2
                 insert_norm,  # 1
                 self.actions,  # 3
+                y_err_obs.unsqueeze(-1),    # 1 — S1.0N
+                yaw_err_obs.unsqueeze(-1),  # 1 — S1.0N
             ],
             dim=-1,
         )
@@ -932,6 +991,11 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         # ---- 里程碑奖励（一次性）----
         milestone_approach = dist_front <= 0.25
         milestone_coarse_align = (y_err <= 0.20) & (yaw_err_deg <= 10.0)
+        # S1.0N: gate_align 绑定 approach flag 防远处早触发
+        milestone_gate_align = (
+            (y_err <= 0.15) & (yaw_err_deg <= 8.0)
+            & self._milestone_flags[:, 0]  # 必须先触发过 approach
+        )
         milestone_insert10 = insert_norm >= 0.10
         milestone_insert30 = insert_norm >= 0.30
         # S1.0M: 新增对齐里程碑（使用与 aligned_enough 同源的 y_err/yaw_err_deg）
@@ -939,7 +1003,8 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         milestone_precise_align = (y_err <= 0.05) & (yaw_err_deg <= 3.0)
 
         milestone_hits = torch.stack(
-            [milestone_approach, milestone_coarse_align, milestone_insert10, milestone_insert30,
+            [milestone_approach, milestone_coarse_align, milestone_gate_align,
+             milestone_insert10, milestone_insert30,
              milestone_fine_align, milestone_precise_align], dim=-1
         )
         new_hits = milestone_hits & (~self._milestone_flags)
@@ -948,10 +1013,11 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         milestone_reward = (
             new_hits[:, 0].float() * self.cfg.rew_milestone_approach
             + new_hits[:, 1].float() * self.cfg.rew_milestone_coarse_align
-            + new_hits[:, 2].float() * self.cfg.rew_milestone_insert_10
-            + new_hits[:, 3].float() * self.cfg.rew_milestone_insert_30
-            + new_hits[:, 4].float() * self.cfg.rew_milestone_fine_align
-            + new_hits[:, 5].float() * self.cfg.rew_milestone_precise_align
+            + new_hits[:, 2].float() * self.cfg.rew_milestone_gate_align
+            + new_hits[:, 3].float() * self.cfg.rew_milestone_insert_10
+            + new_hits[:, 4].float() * self.cfg.rew_milestone_insert_30
+            + new_hits[:, 5].float() * self.cfg.rew_milestone_fine_align
+            + new_hits[:, 6].float() * self.cfg.rew_milestone_precise_align
         )
 
         # ---- 失败早停计数（惩罚在 reward，终止在 dones）----
@@ -971,18 +1037,42 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
             + self._early_stop_stall.float() * self.cfg.rew_early_stop_stall
         )
 
-        # ---- 成功判定与终局奖励 ----
-        inserted_enough = insert_depth >= self._insert_thresh
-        aligned_enough = (y_err <= self.cfg.max_lateral_err_m) & (
-            yaw_err_rad <= math.radians(self.cfg.max_yaw_err_deg)
-        )
-        lifted_enough = lift_height >= self.cfg.lift_delta_m
-        success_now = inserted_enough & aligned_enough & lifted_enough
+        # ---- S1.0N: 全维度 Schmitt trigger hold counter ----
+        # 对齐 entry/exit
+        align_entry = (y_err <= self.cfg.max_lateral_err_m) & (yaw_err_deg <= self.cfg.max_yaw_err_deg)
+        exit_y = self.cfg.max_lateral_err_m * self.cfg.hysteresis_ratio      # 0.18m
+        exit_yaw = self.cfg.max_yaw_err_deg * self.cfg.hysteresis_ratio      # 9.6°
+        align_exit_exceeded = (y_err > exit_y) | (yaw_err_deg > exit_yaw)
+
+        # 插入 entry/exit（带容差防微弹）
+        insert_entry = insert_depth >= self._insert_thresh
+        insert_exit_exceeded = insert_depth < (self._insert_thresh - self.cfg.insert_exit_epsilon)
+
+        # 举升 entry/exit（带容差防微降）
+        lift_entry = lift_height >= self.cfg.lift_delta_m
+        lift_exit_exceeded = lift_height < (self.cfg.lift_delta_m - self.cfg.lift_exit_epsilon)
+
+        # 三段式更新
+        still_ok = insert_entry & align_entry & lift_entry
+        any_exit_exceeded = align_exit_exceeded | insert_exit_exceeded | lift_exit_exceeded
+        grace_zone = (~still_ok) & (~any_exit_exceeded)
 
         self._hold_counter = torch.where(
-            success_now, self._hold_counter + 1, torch.zeros_like(self._hold_counter)
+            still_ok,
+            self._hold_counter + 1,
+            torch.where(
+                grace_zone,
+                self._hold_counter,                        # hold constant: 不加不减
+                torch.zeros_like(self._hold_counter),      # 真正跑飞: 归零
+            ),
         )
         success = self._hold_counter >= self._hold_steps
+
+        # 保留兼容变量（用于日志）
+        inserted_enough = insert_entry
+        aligned_enough = align_entry
+        lifted_enough = lift_entry
+        success_now = still_ok
 
         time_ratio = self.episode_length_buf.float() / (self.max_episode_length + 1e-6)
         time_bonus = self.cfg.rew_success_time * (1.0 - time_ratio)
@@ -1000,8 +1090,17 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
             r_terminal,
         )
 
+        # ---- S1.0N: delta hold-align shaping ----
+        phi_align = (
+            torch.exp(-(y_err / self.cfg.hold_align_sigma_y) ** 2)
+            * torch.exp(-(yaw_err_deg / self.cfg.hold_align_sigma_yaw) ** 2)
+        )
+        r_hold_align = self.cfg.k_hold_align * (phi_align - self._prev_phi_align)
+        r_hold_align = torch.where(self._is_first_step, torch.zeros_like(r_hold_align), r_hold_align)
+        self._prev_phi_align = phi_align.detach()
+
         # ---- 总奖励 ----
-        rew = r_pot + pen_premature + pen_dense + r_terminal + milestone_reward + early_stop_penalty
+        rew = r_pot + pen_premature + pen_dense + r_terminal + milestone_reward + r_hold_align + early_stop_penalty
 
         # 清除首步标记
         self._is_first_step[:] = False
@@ -1025,6 +1124,7 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self.extras["log"]["s0/pen_dense"] = pen_dense.mean()
         self.extras["log"]["s0/r_terminal"] = r_terminal.mean()
         self.extras["log"]["s0/r_milestone"] = milestone_reward.mean()
+        self.extras["log"]["s0/r_hold_align"] = r_hold_align.mean()
         self.extras["log"]["s0/pen_early_stop"] = early_stop_penalty.mean()
 
         # 门控权重
@@ -1053,13 +1153,18 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self.extras["log"]["phase/frac_success_now"] = success_now.float().mean()
         self.extras["log"]["phase/frac_success"] = success.float().mean()
         self.extras["log"]["phase/hold_counter_max"] = self._hold_counter.float().max()
+        # S1.0N: hold counter 均值 + grace zone 比例
+        self.extras["log"]["phase/hold_counter_mean"] = self._hold_counter.float().mean()
+        self.extras["log"]["phase/grace_zone_frac"] = grace_zone.float().mean()
         self.extras["log"]["milestone/hit_approach"] = new_hits[:, 0].float().mean()
         self.extras["log"]["milestone/hit_align"] = new_hits[:, 1].float().mean()
-        self.extras["log"]["milestone/hit_insert10"] = new_hits[:, 2].float().mean()
-        self.extras["log"]["milestone/hit_insert30"] = new_hits[:, 3].float().mean()
+        # S1.0N: gate_align 里程碑日志
+        self.extras["log"]["milestone/hit_gate_align"] = new_hits[:, 2].float().mean()
+        self.extras["log"]["milestone/hit_insert10"] = new_hits[:, 3].float().mean()
+        self.extras["log"]["milestone/hit_insert30"] = new_hits[:, 4].float().mean()
         # S1.0M: 对齐里程碑日志
-        self.extras["log"]["milestone/hit_fine_align"] = new_hits[:, 4].float().mean()
-        self.extras["log"]["milestone/hit_precise_align"] = new_hits[:, 5].float().mean()
+        self.extras["log"]["milestone/hit_fine_align"] = new_hits[:, 5].float().mean()
+        self.extras["log"]["milestone/hit_precise_align"] = new_hits[:, 6].float().mean()
 
         # 终止原因
         q = self.robot.data.root_quat_w
@@ -1132,6 +1237,8 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self._stall_counter[env_ids] = 0
         self._early_stop_fly[env_ids] = False
         self._early_stop_stall[env_ids] = False
+        # S1.0N: _prev_phi_align 暂时清零，在位姿写入后再初始化为当前 phi_align
+        self._prev_phi_align[env_ids] = 0.0
 
         # ---- 托盘固定位姿（可选：后续可加随机化） ----
         pallet_pos = torch.tensor(self.cfg.pallet_cfg.init_state.pos, device=self.device).repeat(len(env_ids), 1)
@@ -1228,6 +1335,15 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
 
         # 举升增量缓存
         self._last_lift_pos[env_ids] = 0.0
+
+        # S1.0N: 初始化 _prev_phi_align 为当前位姿的 phi_align，防"开局白嫖"
+        # 注意：此时 robot 位姿已写入但 PhysX 尚未 step，
+        # 使用 reset 时已知的 y_err/yaw_err 直接计算（避免依赖 PhysX view）
+        phi_align_init = (
+            torch.exp(-(y_err_reset / self.cfg.hold_align_sigma_y) ** 2)
+            * torch.exp(-(yaw_err_deg_reset / self.cfg.hold_align_sigma_yaw) ** 2)
+        )
+        self._prev_phi_align[env_ids] = phi_align_init.detach()
 
         # 注：不再额外调用 self.robot.reset(env_ids)，
         # super()._reset_idx() 已通过 scene.reset(env_ids) 调用过一次。

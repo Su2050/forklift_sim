@@ -46,7 +46,8 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     action_space = 3
 
     # observations: 向量观测，具体构成见 env._get_observations()
-    observation_space = 13
+    # S1.0N: 13→15（新增 y_err_obs / yaw_err_obs）
+    observation_space = 15
 
     # no separate privileged state in this minimal patch（不使用特权观测）
     state_space = 0
@@ -87,6 +88,10 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     # 先让 success 出现，后续逐步收紧。
     max_lateral_err_m: float = 0.15
     max_yaw_err_deg: float = 8.0
+    # S1.0N: hold counter 全维度 Schmitt trigger（抗物理抖动）
+    hysteresis_ratio: float = 1.2       # 对齐 exit 阈值 = entry × 1.2
+    insert_exit_epsilon: float = 0.02   # 插入深度 exit 容差（与 insert_depth 同单位）
+    lift_exit_epsilon: float = 0.01     # 举升高度 exit 容差 (m)
 
     # ===== 动作范围（[-1, 1] 的归一化动作会乘以下列缩放）=====
     wheel_speed_rad_s: float = 20.0
@@ -159,6 +164,13 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     # S1.0M: 新增对齐里程碑，给对齐一条"强奖励通路"
     rew_milestone_fine_align: float = 5.0      # y<0.10m & yaw<5°
     rew_milestone_precise_align: float = 8.0   # y<0.05m & yaw<3°
+    # S1.0N: gate_align 里程碑（entry 条件本身，绑定 approach flag 防早触发）
+    rew_milestone_gate_align: float = 2.5      # y<0.15m & yaw<8° & approach 已触发
+
+    # S1.0N: delta hold-align shaping（对齐势函数进步奖励，防刷分）
+    k_hold_align: float = 0.1          # delta shaping 权重
+    hold_align_sigma_y: float = 0.15   # 横向尺度 (m)
+    hold_align_sigma_yaw: float = 8.0  # 偏航尺度 (deg)
 
     # 失败早停
     early_stop_d_xy_max: float = 3.0

@@ -29,8 +29,10 @@ class ForkliftInsertLiftPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     experiment_name = "forklift_pallet_insert_lift"  # 训练实验名称（用于日志目录）
 
     # policy network：Actor-Critic 网络结构与归一化
+    # S1.0N: 使用 ClampedActorCritic 子类，clamp log_std >= ln(0.05) 防止 std 塌缩
     policy = RslRlPpoActorCriticCfg(
-        init_noise_std=0.5,  # S1.0M: 1.0→0.5，降低初始噪声让精细转向不被淹没
+        class_name="rsl_rl.modules.ClampedActorCritic",
+        init_noise_std=0.5,  # S1.0M: 1.0→0.5，保持不变（有 std_min 兜底）
         noise_std_type="log",  # S1.0k: scalar→log，log 空间梯度更新为乘法式，防止 std 线性膨胀
         actor_obs_normalization=True,  # Actor 观测归一化
         critic_obs_normalization=True,  # Critic 观测归一化
@@ -47,7 +49,7 @@ class ForkliftInsertLiftPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         schedule="adaptive",  # 学习率调度策略
         gamma=0.99,  # 折扣因子
         lam=0.95,  # GAE 参数
-        entropy_coef=0.0005,  # S1.0M: 0.001→0.0005，进一步降低推高 std 的梯度压力
+        entropy_coef=0.0015,  # S1.0N: 0.0005→0.0015，保温探索压力，防止 std 再次一路冷却到底
         desired_kl=0.01,  # KL 目标，用于自适应调整
         max_grad_norm=1.0,  # 梯度裁剪阈值
         value_loss_coef=1.0,  # 价值函数损失权重
