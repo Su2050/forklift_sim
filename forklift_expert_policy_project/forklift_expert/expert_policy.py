@@ -82,10 +82,10 @@ class ExpertConfig:
     retreat_lat_thresh: float = 0.35    # |lat| >= this triggers retreat (metres)
     retreat_yaw_thresh: float = math.radians(20.0)  # |yaw| >= this also triggers
     retreat_dist_thresh: float = 2.5    # only retreat when dist_front < this (m)
-    retreat_target_dist: float = 3.5    # back up until dist_front >= this (m)
-    retreat_drive: float = -0.6         # backward speed command (normalised)
+    retreat_target_dist: float = 2.8    # back up until dist_front >= this (lowered: heavy forklift is slow)
+    retreat_drive: float = -1.0         # full backward speed (heavy forklift needs max effort)
     retreat_steer_gain: float = 0.8     # counter-steer intensity while retreating
-    max_retreat_steps: int = 150        # safety cap per retreat episode
+    max_retreat_steps: int = 300        # raised: slow physics needs more steps to retreat enough
 
     # ---- Insertion ----
     ins_v_max: float = 0.35
