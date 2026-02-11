@@ -162,8 +162,9 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         # S1.0M: 从 4 列扩展到 6 列（新增 fine_align + precise_align）
         # S1.0N: 从 6 列扩展到 7 列（新增 gate_align）
         self._milestone_flags = torch.zeros((self.num_envs, 7), dtype=torch.bool, device=self.device)
-        # S1.0N: delta hold-align shaping 状态量
-        self._prev_phi_align = torch.zeros((self.num_envs,), device=self.device)
+        # S1.0O-B2: 粗+细双势函数缓存
+        self._prev_phi_coarse = torch.zeros((self.num_envs,), device=self.device)
+        self._prev_phi_fine = torch.zeros((self.num_envs,), device=self.device)
         self._fly_counter = torch.zeros((self.num_envs,), dtype=torch.int32, device=self.device)
         self._stall_counter = torch.zeros((self.num_envs,), dtype=torch.int32, device=self.device)
         self._early_stop_fly = torch.zeros((self.num_envs,), dtype=torch.bool, device=self.device)
@@ -1090,14 +1091,27 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
             r_terminal,
         )
 
-        # ---- S1.0N: delta hold-align shaping ----
-        phi_align = (
-            torch.exp(-(y_err / self.cfg.hold_align_sigma_y) ** 2)
-            * torch.exp(-(yaw_err_deg / self.cfg.hold_align_sigma_yaw) ** 2)
+        # ---- S1.0O-B2: 粗+细双势函数 hold-align shaping ----
+        phi_coarse = (
+            torch.exp(-(y_err / self.cfg.sigma_y_coarse) ** 2)
+            * torch.exp(-(yaw_err_deg / self.cfg.sigma_yaw_coarse) ** 2)
         )
-        r_hold_align = self.cfg.k_hold_align * (phi_align - self._prev_phi_align)
+        phi_fine = (
+            torch.exp(-(y_err / self.cfg.sigma_y_fine) ** 2)
+            * torch.exp(-(yaw_err_deg / self.cfg.sigma_yaw_fine) ** 2)
+        )
+        delta_coarse = phi_coarse - self._prev_phi_coarse
+        delta_fine = phi_fine - self._prev_phi_fine
+        if self.cfg.hold_align_clamp_negative:
+            delta_coarse = torch.clamp(delta_coarse, min=0.0)
+            delta_fine = torch.clamp(delta_fine, min=0.0)
+        r_hold_align = (
+            self.cfg.k_hold_align_coarse * delta_coarse
+            + self.cfg.k_hold_align_fine * delta_fine
+        )
         r_hold_align = torch.where(self._is_first_step, torch.zeros_like(r_hold_align), r_hold_align)
-        self._prev_phi_align = phi_align.detach()
+        self._prev_phi_coarse = phi_coarse.detach()
+        self._prev_phi_fine = phi_fine.detach()
 
         # ---- 总奖励 ----
         rew = r_pot + pen_premature + pen_dense + r_terminal + milestone_reward + r_hold_align + early_stop_penalty
@@ -1237,8 +1251,9 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self._stall_counter[env_ids] = 0
         self._early_stop_fly[env_ids] = False
         self._early_stop_stall[env_ids] = False
-        # S1.0N: _prev_phi_align 暂时清零，在位姿写入后再初始化为当前 phi_align
-        self._prev_phi_align[env_ids] = 0.0
+        # S1.0O-B2: 粗+细势函数缓存清零
+        self._prev_phi_coarse[env_ids] = 0.0
+        self._prev_phi_fine[env_ids] = 0.0
 
         # ---- 托盘固定位姿（可选：后续可加随机化） ----
         pallet_pos = torch.tensor(self.cfg.pallet_cfg.init_state.pos, device=self.device).repeat(len(env_ids), 1)
