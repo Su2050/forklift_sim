@@ -140,7 +140,8 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     # 原 0.60 永远不可达 → w_lift_base 恒为 0，phi_lift 恒为 0，
     # pen_premature 惩罚一切举升 → success 永远不可能。
     insert_gate_norm: float = 0.35  # 允许举升的插入深度门槛
-    insert_ramp_norm: float = 0.08  # 举升门控缓坡（0.35~0.43 打开）
+    # S1.0O-A2: 拉长 ramp，lift 权重从"开关式"变"缓坡式"（S1.0N: 0.08）
+    insert_ramp_norm: float = 0.20  # 举升门控缓坡（0.35~0.55 缓慢打开）
     k_lift: float = 20.0     # 举升势函数强度
     k_pre: float = 5.0       # S1.0M: 10→5，降低空举惩罚避免打爆探索
 
