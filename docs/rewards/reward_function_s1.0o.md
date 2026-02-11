@@ -220,7 +220,7 @@ hold_counter_decay: float = 0.8        # [新增] 越界时 counter *= 0.8
 
 ---
 
-## 七、A3B1C2_v2 变体
+## 七、A3B1C2_v2 变体（已淘汰）
 
 在 A3B1C2 全组合基础上，将 **`hold_align_sigma_yaw`** 从 12° 改回 8°，其余参数不变。
 
@@ -228,4 +228,52 @@ hold_counter_decay: float = 0.8        # [新增] 越界时 counter *= 0.8
 |------|--------|-----------|
 | `hold_align_sigma_yaw` | 12.0° | **8.0°** |
 
-**目标**：收紧 yaw 梯度，验证 sigma_yaw 对组合效果的影响；日志保存为 `*_train_s1.0o_A3B1C2_v2_s42.log`。
+**结论**：从头用 sigma_yaw=8 训练不如二阶段策略（先 12 站稳再微调到 8），已改为二阶段方案。
+
+---
+
+## 八、二阶段训练策略
+
+### 设计思路
+
+直接将 sigma_yaw 从 12 改为 8 从头训练（A3B1C2_v2），等于要求策略同时学会"大致对齐"和"精确 yaw 控制"，增加了早期学习难度。更好的做法是：
+
+1. **Stage A**：sigma_yaw=12（宽松），让策略先学会"进入 hold、出 success"
+2. **Stage B**：从 Stage A 最佳 checkpoint 恢复，收紧 sigma_yaw 到 8，同时降低探索噪声，做"磨角度"
+
+这类似于课程学习（curriculum learning）：先学大动作，再精修细节。
+
+### Stage A：sigma_yaw=12 主线续训
+
+- **分支**：`exp/DO-O-A3B1C2`（不改参数，从原始 1000 iter 结果继续）
+- **Resume 来源**：`2026-02-11_22-50-21/model_999.pt`
+- **续训**：1000 iter（迭代 999→1999）
+- **验收**：success_now >= 0.02 且持续 100+ iter
+
+### Stage B：sigma_yaw=8 精修微调
+
+- **分支**：`exp/DO-O-A3B1C2_stageB`
+- **Resume 来源**：Stage A 产出的最佳 checkpoint
+
+**参数变更**（相对 A3B1C2）：
+
+| 参数 | Stage A (A3B1C2) | Stage B |
+|------|-------------------|---------|
+| `hold_align_sigma_yaw` | 12.0° | **8.0°** |
+| `entropy_coef` | 0.0015 | **0.0005** |
+| `desired_kl` | 0.01 | **0.008** |
+
+**设计依据**：
+- `sigma_yaw` 12→8：收紧 yaw 梯度，让策略在已掌握大致对齐的基础上精修角度
+- `entropy_coef` 0.0015→0.0005：策略已学会正确行为，降低探索压力
+- `desired_kl` 0.01→0.008：更保守的策略更新步幅，防止微调时跳出好区域
+- `ClampedActorCritic` 的 `LOG_STD_MIN = log(0.05)` 保持不变（仍需最低探索）
+
+**验收**：
+- yaw_deg_mean 从 ~6° 降到 <4°
+- success/success_now 转化率 >= 40%
+- lateral_mean 不退化（保持 <0.22m）
+
+### 可选 Stage C：sigma_yaw=6
+
+如果 Stage B 效果好，可从 Stage B 最佳 checkpoint 继续微调 sigma_yaw 到 6，用同样的 resume + 分支策略。
