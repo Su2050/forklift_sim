@@ -721,9 +721,10 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         )
         yaw_err_deg = torch.abs(yaw_err) * (180.0 / math.pi)
 
+        # S1.0O-B2: 使用 coarse sigma（此函数仅用于日志/诊断，用 coarse 即可）
         phi_align = (
-            torch.exp(-(y_err / self.cfg.hold_align_sigma_y) ** 2)
-            * torch.exp(-(yaw_err_deg / self.cfg.hold_align_sigma_yaw) ** 2)
+            torch.exp(-(y_err / self.cfg.sigma_y_coarse) ** 2)
+            * torch.exp(-(yaw_err_deg / self.cfg.sigma_yaw_coarse) ** 2)
         )
         return phi_align
 
@@ -1351,14 +1352,19 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         # 举升增量缓存
         self._last_lift_pos[env_ids] = 0.0
 
-        # S1.0N: 初始化 _prev_phi_align 为当前位姿的 phi_align，防"开局白嫖"
+        # S1.0O-B2: 初始化粗+细势函数缓存，防"开局白嫖"
         # 注意：此时 robot 位姿已写入但 PhysX 尚未 step，
         # 使用 reset 时已知的 y_err/yaw_err 直接计算（避免依赖 PhysX view）
-        phi_align_init = (
-            torch.exp(-(y_err_reset / self.cfg.hold_align_sigma_y) ** 2)
-            * torch.exp(-(yaw_err_deg_reset / self.cfg.hold_align_sigma_yaw) ** 2)
+        phi_coarse_init = (
+            torch.exp(-(y_err_reset / self.cfg.sigma_y_coarse) ** 2)
+            * torch.exp(-(yaw_err_deg_reset / self.cfg.sigma_yaw_coarse) ** 2)
         )
-        self._prev_phi_align[env_ids] = phi_align_init.detach()
+        phi_fine_init = (
+            torch.exp(-(y_err_reset / self.cfg.sigma_y_fine) ** 2)
+            * torch.exp(-(yaw_err_deg_reset / self.cfg.sigma_yaw_fine) ** 2)
+        )
+        self._prev_phi_coarse[env_ids] = phi_coarse_init.detach()
+        self._prev_phi_fine[env_ids] = phi_fine_init.detach()
 
         # 注：不再额外调用 self.robot.reset(env_ids)，
         # super()._reset_idx() 已通过 scene.reset(env_ids) 调用过一次。
