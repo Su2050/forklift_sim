@@ -21,14 +21,64 @@ Output
 """
 from __future__ import annotations
 
+# ===========================================================================
+# Step 1: Parse arguments and launch AppLauncher BEFORE any IsaacLab imports
+# ===========================================================================
 import argparse
 import os
+import sys
+
+parser = argparse.ArgumentParser(description="Play expert policy with optional video recording")
+parser.add_argument("--task", type=str, default="Isaac-Forklift-PalletInsertLift-Direct-v0")
+parser.add_argument("--num_envs", type=int, default=1,
+                    help="Number of parallel envs (1 recommended for video)")
+parser.add_argument("--episodes", type=int, default=3,
+                    help="Number of episodes to run")
+parser.add_argument("--seed", type=int, default=0)
+
+# Video
+parser.add_argument("--video", action="store_true",
+                    help="Record video (works in headless mode)")
+parser.add_argument("--video_length", type=int, default=600,
+                    help="Maximum steps to record per video")
+parser.add_argument("--video_dir", type=str, default="data/videos/expert_play",
+                    help="Directory to save video files")
+
+# Obs / action spec paths
+parser.add_argument("--obs_spec", type=str,
+                    default=os.path.join(
+                        os.path.dirname(__file__), "..",
+                        "forklift_expert", "obs_spec.json"))
+parser.add_argument("--action_spec", type=str,
+                    default=os.path.join(
+                        os.path.dirname(__file__), "..",
+                        "forklift_expert", "action_spec.json"))
+
+# AppLauncher adds --headless, --enable_cameras, etc.
+from isaaclab.app import AppLauncher
+AppLauncher.add_app_launcher_args(parser)
+args = parser.parse_args()
+
+# If video is requested, force enable_cameras (needed for offscreen render)
+if args.video:
+    args.enable_cameras = True
+
+# Launch the simulation application
+app_launcher = AppLauncher(args)
+simulation_app = app_launcher.app
+
+# ===========================================================================
+# Step 2: Now safe to import IsaacLab / gymnasium / custom modules
+# ===========================================================================
 import time
 from typing import Any, Dict, List
 
 import numpy as np
 import torch
 import gymnasium as gym
+
+import isaaclab_tasks  # noqa: F401 -- triggers gym.register()
+from isaaclab_tasks.utils import parse_env_cfg
 
 from forklift_expert import ForkliftExpertPolicy, ExpertConfig
 
@@ -56,41 +106,6 @@ def _to_action_tensor(act_np: np.ndarray, device: torch.device) -> torch.Tensor:
 # Main
 # ---------------------------------------------------------------------------
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Play expert policy with optional video recording")
-    ap.add_argument("--task", type=str, default="Isaac-Forklift-PalletInsertLift-Direct-v0")
-    ap.add_argument("--num_envs", type=int, default=1,
-                    help="Number of parallel envs (1 recommended for video)")
-    ap.add_argument("--episodes", type=int, default=3,
-                    help="Number of episodes to run")
-    ap.add_argument("--headless", action="store_true")
-    ap.add_argument("--seed", type=int, default=0)
-
-    # Video
-    ap.add_argument("--video", action="store_true",
-                    help="Record video (works in headless mode)")
-    ap.add_argument("--video_length", type=int, default=600,
-                    help="Maximum steps to record per video")
-    ap.add_argument("--video_dir", type=str, default="data/videos/expert_play",
-                    help="Directory to save video files")
-
-    # Obs / action spec paths
-    ap.add_argument("--obs_spec", type=str,
-                    default=os.path.join(
-                        os.path.dirname(__file__), "..",
-                        "forklift_expert", "obs_spec.json"))
-    ap.add_argument("--action_spec", type=str,
-                    default=os.path.join(
-                        os.path.dirname(__file__), "..",
-                        "forklift_expert", "action_spec.json"))
-
-    # Enable cameras flag (for IsaacLab AppLauncher)
-    ap.add_argument("--enable_cameras", action="store_true")
-    args = ap.parse_args()
-
-    # If video is requested, force enable_cameras (needed for offscreen render)
-    if args.video:
-        args.enable_cameras = True
-
     # ---- Load expert ----
     obs_spec = ForkliftExpertPolicy.load_json(args.obs_spec)
     action_spec = ForkliftExpertPolicy.load_json(args.action_spec)
@@ -100,21 +115,11 @@ def main() -> None:
         obs_spec=obs_spec, action_spec=action_spec, cfg=ExpertConfig()
     )
 
-    # ---- Create env ----
-    env_kwargs: Dict[str, Any] = {
-        "headless": bool(args.headless),
-        "num_envs": int(args.num_envs),
-    }
+    # ---- Create env via IsaacLab cfg ----
+    env_cfg = parse_env_cfg(args.task, num_envs=args.num_envs, use_fabric=True)
     render_mode = "rgb_array" if args.video else None
 
-    try:
-        env = gym.make(args.task, render_mode=render_mode, **env_kwargs)
-    except TypeError:
-        # Fallback if env doesn't accept render_mode / kwargs
-        try:
-            env = gym.make(args.task, **env_kwargs)
-        except TypeError:
-            env = gym.make(args.task)
+    env = gym.make(args.task, cfg=env_cfg, render_mode=render_mode)
 
     # ---- Wrap for video recording ----
     if args.video:
@@ -204,6 +209,7 @@ def main() -> None:
         print(f"[play_expert] video saved to: {args.video_dir}/")
 
     env.close()
+    simulation_app.close()
 
 
 if __name__ == "__main__":

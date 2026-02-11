@@ -1,5 +1,5 @@
 """
-Rule-based expert policy for forklift pallet-insertion task (路线 A).
+Rule-based expert policy for forklift pallet-insertion task.
 
 Adapted for the **actual 15-D observation vector** produced by
 ``env._get_observations()`` in the IsaacLab forklift environment:
@@ -43,7 +43,7 @@ def _wrap_pi(angle: float) -> float:
 # ---------------------------------------------------------------------------
 @dataclass
 class ExpertConfig:
-    """Tunable knobs — calibrated for the 15-D obs produced by the IsaacLab
+    """Tunable knobs -- calibrated for the 15-D obs produced by the IsaacLab
     forklift environment.
 
     Key units
@@ -61,25 +61,46 @@ class ExpertConfig:
     pallet_half_depth: float = 1.08
 
     # ---- Docking (approach + align) ----
-    k_lat: float = 2.0          # steering gain for lateral error (m → normalised)
-    k_yaw: float = 1.2          # steering gain for yaw error   (rad → normalised)
-    k_dist: float = 0.5         # throttle gain for distance     (m → normalised)
+    k_lat: float = 1.5          # steering gain for lateral error (m -> normalised)
+    k_yaw: float = 1.2          # steering gain for yaw error   (rad -> normalised)
+    k_dist: float = 0.5         # throttle gain for distance     (m -> normalised)
     v_max: float = 0.80         # max forward command (normalised action)
-    v_min: float = 0.08         # min forward command when moving forward
+    v_min: float = 0.50         # min forward command -- must be high enough for
+                                # Ackermann steering to take effect on heavy forklift
     slow_dist: float = 1.5      # start slowing when closer than this (m, to pallet center)
     stop_dist: float = 0.5      # docking "arrived" gate (m, to pallet center)
 
-    # alignment thresholds  (used to decide "advance vs. adjust")
-    lat_ok: float = 0.06        # 6 cm  — acceptable lateral error for docking
-    yaw_ok: float = math.radians(5.0)  # 5 deg
+    # alignment thresholds  (used to compute misalign ratio for speed scaling)
+    lat_ok: float = 0.15        # 15 cm -- relaxed so misalign ratio stays moderate
+    yaw_ok: float = math.radians(12.0)  # 12 deg
+
+    # ---- Retreat (後退重対齐) ----
+    # When the forklift starts close to the pallet but with large lateral
+    # offset, forward Ackermann arcing cannot correct in the available
+    # distance.  The robot must back up first to gain room for a fresh
+    # approach arc.
+    retreat_lat_thresh: float = 0.35    # |lat| >= this triggers retreat (metres)
+    retreat_yaw_thresh: float = math.radians(20.0)  # |yaw| >= this also triggers
+    retreat_dist_thresh: float = 2.5    # only retreat when dist_front < this (m)
+    retreat_target_dist: float = 3.5    # back up until dist_front >= this (m)
+    retreat_drive: float = -0.6         # backward speed command (normalised)
+    retreat_steer_gain: float = 0.8     # counter-steer intensity while retreating
+    max_retreat_steps: int = 150        # safety cap per retreat episode
 
     # ---- Insertion ----
     ins_v_max: float = 0.35
     ins_v_min: float = 0.05
-    ins_lat_ok: float = 0.03    # 3 cm  — must be tighter than docking
-    ins_yaw_ok: float = math.radians(3.0)  # 3 deg
+    ins_lat_ok: float = 0.08    # 8 cm -- relaxed to avoid stall at large offsets
+    ins_yaw_ok: float = math.radians(6.0)  # 6 deg
 
-    # Contact / slip backoff — **disabled** by default because the 15-D obs
+    # Alignment gate: insertion stage is only entered when BOTH insert_norm
+    # exceeds the threshold AND alignment is within these gates.  Prevents
+    # the fork grazing the pallet side from triggering a premature insertion
+    # stage that stalls.
+    ins_stage_lat_gate: float = 0.30    # |lat| must be < 0.3 m to enter insertion
+    ins_stage_yaw_gate: float = math.radians(15.0)  # |yaw| must be < 15 deg
+
+    # Contact / slip backoff -- **disabled** by default because the 15-D obs
     # does NOT include contact_flag or slip_flag.
     backoff_on_contact: bool = False
     backoff_throttle: float = -0.20
@@ -90,8 +111,8 @@ class ExpertConfig:
     lift_cmd: float = 0.60
 
     # ---- Safety / smoothness ----
-    steer_rate_limit: float = 0.20     # max delta-steer per step
-    throttle_rate_limit: float = 0.25  # max delta-throttle per step
+    steer_rate_limit: float = 0.30     # max delta-steer per step (relaxed for faster response)
+    throttle_rate_limit: float = 0.40  # max delta-throttle per step (relaxed to reach target faster)
     deadband_steer: float = 0.02
 
     # ---- Stage heuristic ----
@@ -104,16 +125,17 @@ class ExpertConfig:
 # ---------------------------------------------------------------------------
 class ForkliftExpertPolicy:
     """
-    A rule-based expert policy (路线 A).
+    A rule-based expert policy.
 
     It consumes the 15-D obs vector from the IsaacLab forklift env and emits
     a 3-D action vector ``[drive, steer, lift]``.
 
     Stages
     ------
-    * **Docking** : align + approach to the pallet front
+    * **Retreat**   : back up when too close + severely misaligned
+    * **Docking**   : align + approach to the pallet front
     * **Insertion** : low-speed insertion with stricter alignment gates
-    * **Lift** : lift after sufficient insertion depth
+    * **Lift**      : lift after sufficient insertion depth
     """
 
     def __init__(
@@ -129,6 +151,10 @@ class ForkliftExpertPolicy:
         self._prev_steer: float = 0.0
         self._prev_throttle: float = 0.0
         self._backoff_countdown: int = 0
+
+        # Retreat state
+        self._in_retreat: bool = False
+        self._retreat_steps: int = 0
 
         # Validate specs
         assert "fields" in self.obs_spec, "obs_spec missing 'fields'"
@@ -160,6 +186,8 @@ class ForkliftExpertPolicy:
         self._prev_steer = 0.0
         self._prev_throttle = 0.0
         self._backoff_countdown = 0
+        self._in_retreat = False
+        self._retreat_steps = 0
 
     # -------------------------------------------------------------- helpers
     @staticmethod
@@ -197,7 +225,7 @@ class ForkliftExpertPolicy:
 
         # --- Lateral error (metres, from pallet center-line frame) ---------
         # y_err_obs is normalised by 0.5 m and clipped to [-1, 1].
-        # Denormalise to get approximate raw metres (capped at ±0.5 m).
+        # Denormalise to get approximate raw metres (capped at +/-0.5 m).
         y_err_norm = _r(obs, self._idx_y_err_obs, default=0.0)
         lateral_err = y_err_norm * 0.5  # metres
 
@@ -207,7 +235,7 @@ class ForkliftExpertPolicy:
         yaw_rate    = _r(obs, self._idx_yaw_rate, default=0.0)
         lift_pos    = _r(obs, self._idx_lift_pos, default=0.0)
 
-        # contact / slip are NOT present in the 15-D obs — always 0
+        # contact / slip are NOT present in the 15-D obs -- always 0
         contact_flag = 0.0
         slip_flag    = 0.0
 
@@ -274,10 +302,22 @@ class ForkliftExpertPolicy:
         contact_flag = s["contact_flag"]
         slip_flag    = s["slip_flag"]
 
-        # ---- Stage decision ----
+        # Unsaturated lateral signal from robot-frame d_y.
+        # y_err_obs clips at +/-0.5 m but d_xy_r_y is unbounded, giving a
+        # better picture of the true offset for retreat decisions.
+        lat_unsaturated = abs(s["d_y"])
+
+        # ---- Stage decision (insertion) ----
+        # Insertion requires BOTH sufficient insert_norm AND reasonable
+        # alignment.  This prevents a fork grazing the pallet side from
+        # triggering a premature insertion stage that stalls.
         in_insertion = False
         if cfg.use_insert_norm_for_stage:
-            in_insertion = insert_norm >= cfg.insert_enter_stage
+            in_insertion = (
+                insert_norm >= cfg.insert_enter_stage
+                and abs(lat) < cfg.ins_stage_lat_gate
+                and abs(yaw) < cfg.ins_stage_yaw_gate
+            )
         else:
             in_insertion = (
                 dist <= cfg.stop_dist + 0.05
@@ -292,13 +332,25 @@ class ForkliftExpertPolicy:
                     self._backoff_countdown, cfg.backoff_steps
                 )
 
-        # ---- Compute steer (shared across stages) ----
+        # ---- Retreat trigger ----
+        # Conditions: large lateral/yaw offset + close to pallet + not
+        # already in insertion or lift.
+        need_retreat = (
+            not in_insertion
+            and insert_norm < cfg.lift_on_insert_norm
+            and dist < cfg.retreat_dist_thresh
+            and (abs(lat) >= cfg.retreat_lat_thresh
+                 or abs(yaw) >= cfg.retreat_yaw_thresh
+                 or lat_unsaturated >= cfg.retreat_lat_thresh * 1.2)
+        )
+
+        # ---- Compute steer (shared across non-retreat stages) ----
         raw_steer = cfg.k_lat * lat + cfg.k_yaw * yaw
         if abs(raw_steer) < cfg.deadband_steer:
             raw_steer = 0.0
         raw_steer = _clip(raw_steer, -1.0, 1.0)
 
-        # ---- Compute drive + lift by stage ----
+        # ---- Compute drive + lift + steer by stage ----
         drive = 0.0
         lift = 0.0
         stage = "docking"
@@ -309,47 +361,83 @@ class ForkliftExpertPolicy:
             drive = 0.0
             lift = cfg.lift_cmd
 
-        elif in_insertion:
-            # -------- Insertion stage --------
-            stage = "insertion"
+        elif self._in_retreat or need_retreat:
+            # -------- Retreat stage --------
+            if not self._in_retreat:
+                # Fresh entry into retreat
+                self._in_retreat = True
+                self._retreat_steps = 0
 
-            if self._backoff_countdown > 0:
-                drive = cfg.backoff_throttle
-                self._backoff_countdown -= 1
-            else:
-                aligned = (
-                    abs(lat) <= cfg.ins_lat_ok
-                    and abs(yaw) <= cfg.ins_yaw_ok
-                )
-                if aligned:
-                    base = cfg.ins_v_max
-                    slow = 1.0
-                    if dist <= cfg.slow_dist:
-                        slow = _clip(
-                            dist / max(cfg.slow_dist, 1e-3), 0.2, 1.0
-                        )
-                    drive = _clip(base * slow, cfg.ins_v_min, cfg.ins_v_max)
-                else:
-                    # not aligned → stop forward, only steer
-                    drive = 0.0
-
-        else:
-            # -------- Docking stage --------
-            stage = "docking"
-
-            # Speed profile: proportional to distance, with slow-down zone
-            v = _clip(cfg.k_dist * dist, cfg.v_min, cfg.v_max)
-            if dist <= cfg.slow_dist:
-                v *= _clip(dist / max(cfg.slow_dist, 1e-3), 0.15, 1.0)
-
-            # Reduce speed when misaligned to leave room for steering
-            misalign = max(
-                abs(lat) / max(cfg.lat_ok, 1e-6),
-                abs(yaw) / max(cfg.yaw_ok, 1e-6),
+            retreat_done = (
+                dist >= cfg.retreat_target_dist
+                or self._retreat_steps >= cfg.max_retreat_steps
             )
-            misalign = _clip(misalign, 0.0, 3.0)
-            speed_scale = 1.0 / (1.0 + 0.7 * misalign)
-            drive = v * speed_scale
+
+            if retreat_done:
+                # Exit retreat -> fall through to docking this step
+                self._in_retreat = False
+                self._retreat_steps = 0
+                # Docking logic below will execute
+            else:
+                stage = "retreat"
+                drive = cfg.retreat_drive
+                # Counter-steer while backing up: steer opposite to lateral
+                # error so the backward arc brings the forklift closer to
+                # the pallet center-line.
+                retreat_steer = -math.copysign(1.0, lat) * cfg.retreat_steer_gain
+                raw_steer = _clip(retreat_steer, -1.0, 1.0)
+                self._retreat_steps += 1
+
+        if stage not in ("lift", "retreat"):
+            if in_insertion:
+                # -------- Insertion stage --------
+                stage = "insertion"
+
+                if self._backoff_countdown > 0:
+                    drive = cfg.backoff_throttle
+                    self._backoff_countdown -= 1
+                else:
+                    aligned = (
+                        abs(lat) <= cfg.ins_lat_ok
+                        and abs(yaw) <= cfg.ins_yaw_ok
+                    )
+                    if aligned:
+                        base = cfg.ins_v_max
+                        slow = 1.0
+                        if dist <= cfg.slow_dist:
+                            slow = _clip(
+                                dist / max(cfg.slow_dist, 1e-3), 0.2, 1.0
+                            )
+                        drive = _clip(base * slow, cfg.ins_v_min, cfg.ins_v_max)
+                    else:
+                        # Not aligned -- keep a small creep speed so that
+                        # Ackermann steering can still correct the heading.
+                        # A pure drive=0 creates an irrecoverable stall.
+                        drive = 0.03
+
+            else:
+                # -------- Docking stage --------
+                stage = "docking"
+
+                # Speed profile: proportional to distance, with slow-down zone
+                v = _clip(cfg.k_dist * dist, cfg.v_min, cfg.v_max)
+                if dist <= cfg.slow_dist:
+                    v *= _clip(dist / max(cfg.slow_dist, 1e-3), 0.15, 1.0)
+
+                # Reduce speed when misaligned to leave room for steering.
+                # NOTE: The scaling must NOT be too aggressive -- Ackermann
+                # steering requires forward velocity to change lateral
+                # position.  We use a soft coefficient (0.2) and enforce a
+                # floor of 0.55 so the forklift always has enough forward
+                # thrust for steering to take effect.
+                misalign = max(
+                    abs(lat) / max(cfg.lat_ok, 1e-6),
+                    abs(yaw) / max(cfg.yaw_ok, 1e-6),
+                )
+                misalign = _clip(misalign, 0.0, 3.0)
+                speed_scale = 1.0 / (1.0 + 0.2 * misalign)
+                speed_scale = max(speed_scale, 0.55)
+                drive = v * speed_scale
 
         # ---- Rate-limit for smoothness ----
         steer = self._rate_limit(
@@ -381,5 +469,7 @@ class ForkliftExpertPolicy:
             "drive": drive,
             "lift": lift,
             "backoff_countdown": self._backoff_countdown,
+            "in_retreat": self._in_retreat,
+            "retreat_steps": self._retreat_steps,
         }
         return action, info
