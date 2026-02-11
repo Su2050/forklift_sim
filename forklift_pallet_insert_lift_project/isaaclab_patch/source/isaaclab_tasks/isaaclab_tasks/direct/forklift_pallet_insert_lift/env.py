@@ -151,7 +151,8 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self.actions = torch.zeros((self.num_envs, self.cfg.action_space), device=self.device)
         self._last_insert_depth = torch.zeros((self.num_envs,), device=self.device)
         self._fork_tip_z0 = torch.zeros((self.num_envs,), device=self.device)
-        self._hold_counter = torch.zeros((self.num_envs,), dtype=torch.int32, device=self.device)
+        # S1.0O-C2: 使用 float 以支持衰减（原 S1.0N 为 int32）
+        self._hold_counter = torch.zeros((self.num_envs,), dtype=torch.float32, device=self.device)
         self._lift_pos_target = torch.zeros((self.num_envs,), device=self.device)
 
         # ---- S1.0k: 势函数 shaping 缓存 ----
@@ -164,6 +165,8 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self._milestone_flags = torch.zeros((self.num_envs, 7), dtype=torch.bool, device=self.device)
         # S1.0N: delta hold-align shaping 状态量
         self._prev_phi_align = torch.zeros((self.num_envs,), device=self.device)
+        # S1.0O-A3: lift 进度 delta 势函数缓存
+        self._prev_phi_lift_progress = torch.zeros((self.num_envs,), device=self.device)
         self._fly_counter = torch.zeros((self.num_envs,), dtype=torch.int32, device=self.device)
         self._stall_counter = torch.zeros((self.num_envs,), dtype=torch.int32, device=self.device)
         self._early_stop_fly = torch.zeros((self.num_envs,), dtype=torch.bool, device=self.device)
@@ -965,7 +968,13 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         w_lift = w_lift_base * w_align3
         phi_lift = self.cfg.k_lift * w_lift * lift_height
 
-        pen_premature = -self.cfg.k_pre * (1.0 - w_lift_base) * torch.clamp(delta_lift, min=0.0)
+        # S1.0O-A3: premature lift 惩罚分段温和化
+        # insert_norm < hard_thresh 时全额惩罚，soft_thresh 以上惩罚 → 0
+        premature_fade = smoothstep(
+            (insert_norm - self.cfg.premature_hard_thresh)
+            / (self.cfg.premature_soft_thresh - self.cfg.premature_hard_thresh + 1e-6)
+        )
+        pen_premature = -self.cfg.k_pre * (1.0 - premature_fade) * torch.clamp(delta_lift, min=0.0)
         pen_premature = torch.where(self._is_first_step, torch.zeros_like(pen_premature), pen_premature)
 
         # ---- 总势函数 & shaping ----
@@ -1052,10 +1061,13 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         lift_entry = lift_height >= self.cfg.lift_delta_m
         lift_exit_exceeded = lift_height < (self.cfg.lift_delta_m - self.cfg.lift_exit_epsilon)
 
-        # 三段式更新
+        # 三段式更新 + S1.0O-C2 越界衰减
         still_ok = insert_entry & align_entry & lift_entry
         any_exit_exceeded = align_exit_exceeded | insert_exit_exceeded | lift_exit_exceeded
         grace_zone = (~still_ok) & (~any_exit_exceeded)
+
+        # S1.0O-C2: 越界时衰减而非清零（float counter）
+        decayed = self._hold_counter * self.cfg.hold_counter_decay
 
         self._hold_counter = torch.where(
             still_ok,
@@ -1063,7 +1075,7 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
             torch.where(
                 grace_zone,
                 self._hold_counter,                        # hold constant: 不加不减
-                torch.zeros_like(self._hold_counter),      # 真正跑飞: 归零
+                decayed,                                   # S1.0O-C2: 越界衰减而非归零
             ),
         )
         success = self._hold_counter >= self._hold_steps
@@ -1099,8 +1111,16 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         r_hold_align = torch.where(self._is_first_step, torch.zeros_like(r_hold_align), r_hold_align)
         self._prev_phi_align = phi_align.detach()
 
+        # ---- S1.0O-A3: lift 进度 delta shaping ----
+        lift_target = self.cfg.lift_delta_m   # 0.12m
+        lift_err = torch.abs(lift_height - lift_target)
+        phi_lift_progress = torch.exp(-(lift_err / self.cfg.sigma_lift) ** 2)
+        r_lift_progress = self.cfg.k_lift_progress * (phi_lift_progress - self._prev_phi_lift_progress)
+        r_lift_progress = torch.where(self._is_first_step, torch.zeros_like(r_lift_progress), r_lift_progress)
+        self._prev_phi_lift_progress = phi_lift_progress.detach()
+
         # ---- 总奖励 ----
-        rew = r_pot + pen_premature + pen_dense + r_terminal + milestone_reward + r_hold_align + early_stop_penalty
+        rew = r_pot + pen_premature + pen_dense + r_terminal + milestone_reward + r_hold_align + r_lift_progress + early_stop_penalty
 
         # 清除首步标记
         self._is_first_step[:] = False
@@ -1125,6 +1145,7 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self.extras["log"]["s0/r_terminal"] = r_terminal.mean()
         self.extras["log"]["s0/r_milestone"] = milestone_reward.mean()
         self.extras["log"]["s0/r_hold_align"] = r_hold_align.mean()
+        self.extras["log"]["s0/r_lift_progress"] = r_lift_progress.mean()
         self.extras["log"]["s0/pen_early_stop"] = early_stop_penalty.mean()
 
         # 门控权重
@@ -1239,6 +1260,8 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self._early_stop_stall[env_ids] = False
         # S1.0N: _prev_phi_align 暂时清零，在位姿写入后再初始化为当前 phi_align
         self._prev_phi_align[env_ids] = 0.0
+        # S1.0O-A3: lift 进度势函数缓存清零
+        self._prev_phi_lift_progress[env_ids] = 0.0
 
         # ---- 托盘固定位姿（可选：后续可加随机化） ----
         pallet_pos = torch.tensor(self.cfg.pallet_cfg.init_state.pos, device=self.device).repeat(len(env_ids), 1)

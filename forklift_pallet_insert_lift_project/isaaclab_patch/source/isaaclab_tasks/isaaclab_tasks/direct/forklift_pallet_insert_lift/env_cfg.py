@@ -92,6 +92,8 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     hysteresis_ratio: float = 1.2       # 对齐 exit 阈值 = entry × 1.2
     insert_exit_epsilon: float = 0.02   # 插入深度 exit 容差（与 insert_depth 同单位）
     lift_exit_epsilon: float = 0.01     # 举升高度 exit 容差 (m)
+    # S1.0O-C2: hold counter 衰减（越界不清零，改为 *= decay）
+    hold_counter_decay: float = 0.8
 
     # ===== 动作范围（[-1, 1] 的归一化动作会乘以下列缩放）=====
     wheel_speed_rad_s: float = 20.0
@@ -143,6 +145,12 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     insert_ramp_norm: float = 0.08  # 举升门控缓坡（0.35~0.43 打开）
     k_lift: float = 20.0     # 举升势函数强度
     k_pre: float = 5.0       # S1.0M: 10→5，降低空举惩罚避免打爆探索
+    # S1.0O-A3: premature lift 惩罚分段温和化
+    premature_hard_thresh: float = 0.05    # insert_norm < 此值时全额惩罚
+    premature_soft_thresh: float = 0.20    # insert_norm >= 此值时惩罚 → 0
+    # S1.0O-A3: lift 进度 delta 势函数
+    k_lift_progress: float = 0.4           # lift delta shaping 权重
+    sigma_lift: float = 0.08               # lift 误差尺度 (m)
 
     # 常驻惩罚
     rew_action_l2: float = -0.01
@@ -167,10 +175,10 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     # S1.0N: gate_align 里程碑（entry 条件本身，绑定 approach flag 防早触发）
     rew_milestone_gate_align: float = 2.5      # y<0.15m & yaw<8° & approach 已触发
 
-    # S1.0N: delta hold-align shaping（对齐势函数进步奖励，防刷分）
-    k_hold_align: float = 0.1          # delta shaping 权重
-    hold_align_sigma_y: float = 0.15   # 横向尺度 (m)
-    hold_align_sigma_yaw: float = 8.0  # 偏航尺度 (deg)
+    # S1.0O-B1: 增大 sigma + k，让 lateral 0.2~0.4m 区间梯度更强（S1.0N: 0.1/0.15/8.0）
+    k_hold_align: float = 0.3          # delta shaping 权重
+    hold_align_sigma_y: float = 0.25   # 横向尺度 (m)
+    hold_align_sigma_yaw: float = 8.0  # 偏航尺度 (deg) — A3B1C2_v2: 12→8 收紧 yaw 梯度
 
     # 失败早停
     early_stop_d_xy_max: float = 3.0

@@ -1,0 +1,31 @@
+{
+  "obs_dim": 15,
+  "fields": {
+    "d_xy_r_x": 0,
+    "d_xy_r_y": 1,
+    "cos_dyaw": 2,
+    "sin_dyaw": 3,
+    "v_forward": 4,
+    "v_lateral": 5,
+    "yaw_rate": 6,
+    "lift_pos": 7,
+    "lift_vel": 8,
+    "insert_norm": 9,
+    "prev_drive": 10,
+    "prev_steer": 11,
+    "prev_lift": 12,
+    "y_err_obs": 13,
+    "yaw_err_obs": 14
+  },
+  "derived": {
+    "dist_front": "d_xy_r_x  (robot-frame forward distance to pallet center; subtract ~pallet_depth/2 to get distance to pallet front)",
+    "lateral_err": "y_err_obs * 0.5  (denormalize to meters; obs is clipped to [-1,1] => [-0.5m, +0.5m])",
+    "yaw_err": "atan2(sin_dyaw, cos_dyaw)  (full-range radians from cos/sin encoding)"
+  },
+  "normalization_notes": {
+    "y_err_obs": "raw_lateral_m / 0.5, clipped [-1, 1].  pallet center-line frame lateral error.",
+    "yaw_err_obs": "raw_yaw_rad / (15 * pi / 180), clipped [-1, 1].  pallet center-line frame yaw error.",
+    "insert_norm": "insert_depth / pallet_depth, range [0, 1]."
+  },
+  "coordinate_frame_notes": "d_xy_r is in **robot frame** (x=forward, y=left). y_err_obs/yaw_err_obs are in **pallet center-line frame**."
+}
