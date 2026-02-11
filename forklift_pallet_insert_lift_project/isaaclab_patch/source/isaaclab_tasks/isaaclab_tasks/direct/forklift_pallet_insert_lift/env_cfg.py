@@ -143,6 +143,12 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     insert_ramp_norm: float = 0.08  # 举升门控缓坡（0.35~0.43 打开）
     k_lift: float = 20.0     # 举升势函数强度
     k_pre: float = 5.0       # S1.0M: 10→5，降低空举惩罚避免打爆探索
+    # S1.0O-A3: premature lift 惩罚分段温和化
+    premature_hard_thresh: float = 0.05    # insert_norm < 此值时全额惩罚
+    premature_soft_thresh: float = 0.20    # insert_norm >= 此值时惩罚 → 0
+    # S1.0O-A3: lift 进度 delta 势函数
+    k_lift_progress: float = 0.4           # lift delta shaping 权重
+    sigma_lift: float = 0.08               # lift 误差尺度 (m)
 
     # 常驻惩罚
     rew_action_l2: float = -0.01
