@@ -217,3 +217,15 @@ hold_align_sigma_yaw: float = 12.0     # [改] 8.0 → 12.0
 hold_counter_decay: float = 0.8        # [新增] 越界时 counter *= 0.8
 # _hold_counter dtype: int32 → float32  # [改] 支持浮点衰减
 ```
+
+---
+
+## 七、A3B1C2_v2 变体
+
+在 A3B1C2 全组合基础上，将 **`hold_align_sigma_yaw`** 从 12° 改回 8°，其余参数不变。
+
+| 参数 | A3B1C2 | A3B1C2_v2 |
+|------|--------|-----------|
+| `hold_align_sigma_yaw` | 12.0° | **8.0°** |
+
+**目标**：收紧 yaw 梯度，验证 sigma_yaw 对组合效果的影响；日志保存为 `*_train_s1.0o_A3B1C2_v2_s42.log`。
