@@ -173,10 +173,10 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     # S1.0N: gate_align 里程碑（entry 条件本身，绑定 approach flag 防早触发）
     rew_milestone_gate_align: float = 2.5      # y<0.15m & yaw<8° & approach 已触发
 
-    # S1.0N: delta hold-align shaping（对齐势函数进步奖励，防刷分）
-    k_hold_align: float = 0.1          # delta shaping 权重
-    hold_align_sigma_y: float = 0.15   # 横向尺度 (m)
-    hold_align_sigma_yaw: float = 8.0  # 偏航尺度 (deg)
+    # S1.0O-B1: 增大 sigma + k，让 lateral 0.2~0.4m 区间梯度更强（S1.0N: 0.1/0.15/8.0）
+    k_hold_align: float = 0.3          # delta shaping 权重
+    hold_align_sigma_y: float = 0.25   # 横向尺度 (m)
+    hold_align_sigma_yaw: float = 12.0 # 偏航尺度 (deg)
 
     # 失败早停
     early_stop_d_xy_max: float = 3.0
