@@ -139,7 +139,8 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     # 物理最大 insert_norm ≈ 0.477（convexDecomposition 碰撞限制），
     # 原 0.60 永远不可达 → w_lift_base 恒为 0，phi_lift 恒为 0，
     # pen_premature 惩罚一切举升 → success 永远不可能。
-    insert_gate_norm: float = 0.35  # 允许举升的插入深度门槛
+    # S1.0O-A1: 降低 gate，让 lift 信号更早出现（S1.0N: 0.35）
+    insert_gate_norm: float = 0.20  # 允许举升的插入深度门槛
     insert_ramp_norm: float = 0.08  # 举升门控缓坡（0.35~0.43 打开）
     k_lift: float = 20.0     # 举升势函数强度
     k_pre: float = 5.0       # S1.0M: 10→5，降低空举惩罚避免打爆探索
