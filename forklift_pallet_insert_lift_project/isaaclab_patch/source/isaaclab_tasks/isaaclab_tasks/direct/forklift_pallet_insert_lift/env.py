@@ -151,7 +151,8 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self.actions = torch.zeros((self.num_envs, self.cfg.action_space), device=self.device)
         self._last_insert_depth = torch.zeros((self.num_envs,), device=self.device)
         self._fork_tip_z0 = torch.zeros((self.num_envs,), device=self.device)
-        self._hold_counter = torch.zeros((self.num_envs,), dtype=torch.int32, device=self.device)
+        # S1.0O-C2: 使用 float 以支持衰减（原 S1.0N 为 int32）
+        self._hold_counter = torch.zeros((self.num_envs,), dtype=torch.float32, device=self.device)
         self._lift_pos_target = torch.zeros((self.num_envs,), device=self.device)
 
         # ---- S1.0k: 势函数 shaping 缓存 ----
@@ -1060,10 +1061,13 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         lift_entry = lift_height >= self.cfg.lift_delta_m
         lift_exit_exceeded = lift_height < (self.cfg.lift_delta_m - self.cfg.lift_exit_epsilon)
 
-        # 三段式更新
+        # 三段式更新 + S1.0O-C2 越界衰减
         still_ok = insert_entry & align_entry & lift_entry
         any_exit_exceeded = align_exit_exceeded | insert_exit_exceeded | lift_exit_exceeded
         grace_zone = (~still_ok) & (~any_exit_exceeded)
+
+        # S1.0O-C2: 越界时衰减而非清零（float counter）
+        decayed = self._hold_counter * self.cfg.hold_counter_decay
 
         self._hold_counter = torch.where(
             still_ok,
@@ -1071,7 +1075,7 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
             torch.where(
                 grace_zone,
                 self._hold_counter,                        # hold constant: 不加不减
-                torch.zeros_like(self._hold_counter),      # 真正跑飞: 归零
+                decayed,                                   # S1.0O-C2: 越界衰减而非归零
             ),
         )
         success = self._hold_counter >= self._hold_steps
