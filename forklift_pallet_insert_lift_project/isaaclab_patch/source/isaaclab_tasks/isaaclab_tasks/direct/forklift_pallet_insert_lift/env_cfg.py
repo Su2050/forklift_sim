@@ -87,7 +87,7 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     # 当前 lateral≈0.25m（需 ≤0.03m，差 8 倍），yaw≈7.5°（需 ≤3.0°，差 2.5 倍）。
     # 先让 success 出现，后续逐步收紧。
     max_lateral_err_m: float = 0.15
-    max_yaw_err_deg: float = 8.0
+    max_yaw_err_deg: float = 6.0  # Stage B2: 8→6 课程式收紧 yaw 成功判据
     # S1.0N: hold counter 全维度 Schmitt trigger（抗物理抖动）
     hysteresis_ratio: float = 1.2       # 对齐 exit 阈值 = entry × 1.2
     insert_exit_epsilon: float = 0.02   # 插入深度 exit 容差（与 insert_depth 同单位）
