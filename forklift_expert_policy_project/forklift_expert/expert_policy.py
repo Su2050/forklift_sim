@@ -64,9 +64,9 @@ class ExpertConfig:
     k_lat: float = 1.5          # steering gain for lateral error (m -> normalised)
     k_yaw: float = 1.2          # steering gain for yaw error   (rad -> normalised)
     k_dist: float = 0.5         # throttle gain for distance     (m -> normalised)
-    v_max: float = 0.80         # max forward command (normalised action)
-    v_min: float = 0.50         # min forward command -- must be high enough for
-                                # Ackermann steering to take effect on heavy forklift
+    v_max: float = 0.85         # max forward command (normalised action)
+    v_min: float = 0.70         # raised: need strong drive to prevent stall at high steer
+    max_steer: float = 0.65     # cap steer output — physical angle 0.65*0.6=22° avoids wheel scrub
     slow_dist: float = 1.5      # start slowing when closer than this (m, to pallet center)
     stop_dist: float = 0.5      # docking "arrived" gate (m, to pallet center)
 
@@ -81,8 +81,8 @@ class ExpertConfig:
     # approach arc.
     retreat_lat_thresh: float = 0.35    # |lat| >= this triggers retreat (metres)
     retreat_yaw_thresh: float = math.radians(20.0)  # |yaw| >= this also triggers
-    retreat_dist_thresh: float = 2.5    # only retreat when dist_front < this (m)
-    retreat_target_dist: float = 2.8    # back up until dist_front >= this (lowered: heavy forklift is slow)
+    retreat_dist_thresh: float = 3.0    # retreat when dist_front < this (raised: earlier retreat = more runway)
+    retreat_target_dist: float = 4.0    # back up until dist_front >= this (raised: 1m docking runway per cycle)
     retreat_drive: float = -1.0         # full backward speed (heavy forklift needs max effort)
     retreat_steer_gain: float = 0.0     # zero steer during retreat: straight back maximises backward speed
     max_retreat_steps: int = 300        # raised: slow physics needs more steps to retreat enough
@@ -348,7 +348,7 @@ class ForkliftExpertPolicy:
         raw_steer = cfg.k_lat * lat + cfg.k_yaw * yaw
         if abs(raw_steer) < cfg.deadband_steer:
             raw_steer = 0.0
-        raw_steer = _clip(raw_steer, -1.0, 1.0)
+        raw_steer = _clip(raw_steer, -cfg.max_steer, cfg.max_steer)
 
         # ---- Compute drive + lift + steer by stage ----
         drive = 0.0
@@ -424,19 +424,18 @@ class ForkliftExpertPolicy:
                 if dist <= cfg.slow_dist:
                     v *= _clip(dist / max(cfg.slow_dist, 1e-3), 0.15, 1.0)
 
-                # Reduce speed when misaligned to leave room for steering.
-                # NOTE: The scaling must NOT be too aggressive -- Ackermann
-                # steering requires forward velocity to change lateral
-                # position.  We use a soft coefficient (0.2) and enforce a
-                # floor of 0.55 so the forklift always has enough forward
-                # thrust for steering to take effect.
+                # Ackermann steering REQUIRES forward velocity to correct
+                # lateral offset.  High misalignment actually needs MORE
+                # speed, not less.  We keep a very mild slow-down and
+                # enforce a high floor (0.85) so the forklift never stalls
+                # from insufficient forward thrust at moderate steer angles.
                 misalign = max(
                     abs(lat) / max(cfg.lat_ok, 1e-6),
                     abs(yaw) / max(cfg.yaw_ok, 1e-6),
                 )
                 misalign = _clip(misalign, 0.0, 3.0)
-                speed_scale = 1.0 / (1.0 + 0.2 * misalign)
-                speed_scale = max(speed_scale, 0.55)
+                speed_scale = 1.0 / (1.0 + 0.1 * misalign)
+                speed_scale = max(speed_scale, 0.85)
                 drive = v * speed_scale
 
         # ---- Rate-limit for smoothness ----
