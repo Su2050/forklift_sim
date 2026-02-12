@@ -185,7 +185,7 @@ def main() -> None:
                 f"dist={d['dist_front']:.3f}  lat={d['lat']:.4f}  "
                 f"yaw={d['yaw']:.4f}  ins={d['insert_norm']:.3f}  "
                 f"drv={d['drive']:.3f}  str={d['steer']:.3f}  "
-                f"lft={d['lift']:.3f}"
+                f"lft={d['lift']:.3f}  vf={d['v_forward']:.3f}"
                 + ("  *** DONE ***" if done_np[0] else "")
             )
 
