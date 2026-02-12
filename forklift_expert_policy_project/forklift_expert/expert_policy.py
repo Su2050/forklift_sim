@@ -68,7 +68,9 @@ class ExpertConfig:
     k_dist: float = 0.6         # throttle gain for distance
     v_max: float = 0.95         # max forward command — near full speed
     v_min: float = 0.80         # strong forward drive is critical for Ackermann steering
-    max_steer: float = 0.55     # cap steer output — reduced from 0.65 to limit overshoot
+    max_steer: float = 0.55     # (legacy, used only as fallback)
+    max_steer_far: float = 0.65  # steer limit when dist > 2.0m (room to correct)
+    max_steer_near: float = 0.40 # steer limit when dist < 0.8m (prevent overshoot)
     slow_dist: float = 0.5      # only slow very close to pallet front
     stop_dist: float = 0.3      # docking "arrived" gate (m, to pallet front)
 
@@ -84,11 +86,12 @@ class ExpertConfig:
     retreat_lat_thresh: float = 0.48    # near-saturated lat (metres)
     retreat_yaw_thresh: float = math.radians(35.0)  # large yaw
     retreat_dist_thresh: float = 1.0    # only retreat when < 1m to pallet front
-    retreat_target_dist: float = 2.5    # d_xy=sqrt(2.5^2+0.6^2)=2.57 < 3.0 safe
+    retreat_target_dist: float = 1.8    # was 2.5 → 1.5 too short → 1.8 compromise
     retreat_drive: float = -1.0         # full backward speed
-    retreat_steer_gain: float = 0.15    # small corrective steer during retreat
-    max_retreat_steps: int = 80         # reduced to save step budget
-    retreat_cooldown: int = 80          # after retreat, give docking 80 steps uninterrupted
+    retreat_steer_gain: float = 0.50    # was 0.15 — strong proportional correction during retreat
+    retreat_k_yaw: float = 0.30        # NEW: yaw correction gain during retreat
+    max_retreat_steps: int = 80         # hard cap per single retreat
+    retreat_cooldown: int = 150         # was 80 — give docking more time to self-correct
 
     # ---- Insertion ----
     # Stress-test showed max_ins ≈ 0.43-0.48 even after 300+ insertion steps
@@ -160,6 +163,7 @@ class ForkliftExpertPolicy:
         self._in_retreat: bool = False
         self._retreat_steps: int = 0
         self._retreat_cooldown_remaining: int = 0
+        self._retreat_entry_lat: float = 0.0  # |lat| when retreat started
 
         # Validate specs
         assert "fields" in self.obs_spec, "obs_spec missing 'fields'"
@@ -194,6 +198,7 @@ class ForkliftExpertPolicy:
         self._in_retreat = False
         self._retreat_steps = 0
         self._retreat_cooldown_remaining = 0
+        self._retreat_entry_lat = 0.0
 
     # -------------------------------------------------------------- helpers
     @staticmethod
@@ -327,8 +332,8 @@ class ForkliftExpertPolicy:
             and dist < cfg.retreat_dist_thresh
             and self._retreat_cooldown_remaining <= 0
             and (abs(lat) >= cfg.retreat_lat_thresh
-                 or abs(yaw) >= cfg.retreat_yaw_thresh
-                 or lat_unsaturated >= cfg.retreat_lat_thresh * 1.2)
+                 or abs(yaw) >= cfg.retreat_yaw_thresh)
+            # Removed: lat_unsaturated false-positive (d_y != true lateral error when yaw != 0)
         )
 
         # ---- Compute steer (shared across non-retreat stages) ----
@@ -336,9 +341,24 @@ class ForkliftExpertPolicy:
         # PD controller: proportional on lat+yaw, derivative (damping) on yaw_rate
         yaw_rate = s["yaw_rate"]
         raw_steer = -(cfg.k_lat * lat + cfg.k_yaw * yaw + cfg.k_damp * yaw_rate)
+
+        # Fix C: near-distance gain decay to prevent overshoot
+        if dist < 1.0:
+            gain_scale = max(0.4, dist / 1.0)
+            raw_steer *= gain_scale
+
         if abs(raw_steer) < cfg.deadband_steer:
             raw_steer = 0.0
-        raw_steer = _clip(raw_steer, -cfg.max_steer, cfg.max_steer)
+
+        # Fix B: distance-adaptive steer limit (aggressive far, gentle near)
+        if dist > 2.0:
+            eff_max_steer = cfg.max_steer_far
+        elif dist < 0.8:
+            eff_max_steer = cfg.max_steer_near
+        else:
+            t = (dist - 0.8) / 1.2
+            eff_max_steer = cfg.max_steer_near + t * (cfg.max_steer_far - cfg.max_steer_near)
+        raw_steer = _clip(raw_steer, -eff_max_steer, eff_max_steer)
 
         # ---- Compute drive + lift + steer by stage ----
         drive = 0.0
@@ -356,9 +376,17 @@ class ForkliftExpertPolicy:
             if not self._in_retreat:
                 self._in_retreat = True
                 self._retreat_steps = 0
+                self._retreat_entry_lat = abs(lat)
 
+            # Exit conditions: alignment improved OR distance/step budget reached
+            alignment_improved = (
+                abs(lat) < self._retreat_entry_lat * 0.6   # lat improved 40%+
+                and abs(lat) < 0.30                        # absolute lat in reasonable range (tighter)
+                and dist > 1.2                             # enough room to re-approach (was 1.0)
+            )
             retreat_done = (
-                dist >= cfg.retreat_target_dist
+                alignment_improved
+                or dist >= cfg.retreat_target_dist
                 or self._retreat_steps >= cfg.max_retreat_steps
             )
 
@@ -369,11 +397,15 @@ class ForkliftExpertPolicy:
             else:
                 stage = "retreat"
                 drive = cfg.retreat_drive
+                # Proportional correction: stronger steer for larger lat error.
                 # In reverse with Ackermann: positive steer (wheels right)
                 # + backward drive causes rear to swing left.
-                # When lat > 0 (right of center), we want to shift left.
-                retreat_steer = math.copysign(1.0, lat) * cfg.retreat_steer_gain
-                raw_steer = _clip(retreat_steer, -1.0, 1.0)
+                # When lat > 0, we want rear to swing left → steer positive.
+                retreat_steer = (
+                    math.copysign(min(abs(lat) * 2.0, 1.0), lat) * cfg.retreat_steer_gain
+                    + yaw * cfg.retreat_k_yaw
+                )
+                raw_steer = _clip(retreat_steer, -0.8, 0.8)
                 self._retreat_steps += 1
 
         if stage not in ("lift", "retreat"):

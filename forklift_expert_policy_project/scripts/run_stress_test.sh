@@ -5,10 +5,10 @@
 # 使用方式:
 #   cd /home/uniubi/projects/forklift_sim
 #   nohup bash forklift_expert_policy_project/scripts/run_stress_test.sh \
-#       > logs/stress_test/large_v3/runner.log 2>&1 &
+#       > logs/stress_test/large_v4/runner.log 2>&1 &
 #
 # 脚本会自动:
-#   1. 检查分支为 master
+#   1. 检查分支为 master 且工作区干净
 #   2. 清除 __pycache__
 #   3. 运行 20 seed x 20 episode 压测
 #   4. 生成汇总分析报告
@@ -20,7 +20,7 @@ PROJECT_ROOT="/home/uniubi/projects/forklift_sim"
 ISAACLAB_DIR="${PROJECT_ROOT}/IsaacLab"
 EXPERT_PROJECT="${PROJECT_ROOT}/forklift_expert_policy_project"
 PLAY_SCRIPT="${EXPERT_PROJECT}/scripts/play_expert.py"
-OUTPUT_DIR="${PROJECT_ROOT}/logs/stress_test/large_v3"
+OUTPUT_DIR="${PROJECT_ROOT}/logs/stress_test/large_v4"
 ANALYZE_SCRIPT="${OUTPUT_DIR}/analyze_all.py"
 
 # ---- 测试参数 ----
@@ -39,7 +39,7 @@ unset CONDA_DEFAULT_ENV 2>/dev/null || true
 conda deactivate 2>/dev/null || true
 
 echo "============================================================"
-echo "  Expert Policy Stress Test — large_v3"
+echo "  Expert Policy Stress Test — large_v4"
 echo "  Seeds: ${#SEEDS[@]}  Episodes/seed: ${EPISODES}"
 echo "  Total: $(( ${#SEEDS[@]} * EPISODES )) episodes"
 echo "  Output: ${OUTPUT_DIR}"
@@ -55,6 +55,16 @@ if [[ "${BRANCH}" != "master" ]]; then
     exit 1
 fi
 echo "[OK] Branch: master"
+
+# 检查工作区是否干净（忽略 untracked 文件）
+DIRTY=$(git diff --name-only HEAD 2>/dev/null || true)
+if [[ -n "${DIRTY}" ]]; then
+    echo "[ERROR] Working directory has uncommitted changes. Aborting."
+    echo "  Modified files:"
+    echo "${DIRTY}" | sed 's/^/    /'
+    exit 1
+fi
+echo "[OK] Working directory clean"
 
 # 清除 __pycache__
 find "${EXPERT_PROJECT}" -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
