@@ -81,11 +81,11 @@ class ExpertConfig:
     # approach arc.
     retreat_lat_thresh: float = 0.35    # |lat| >= this triggers retreat (metres)
     retreat_yaw_thresh: float = math.radians(20.0)  # |yaw| >= this also triggers
-    retreat_dist_thresh: float = 3.0    # retreat when dist_front < this (raised: earlier retreat = more runway)
-    retreat_target_dist: float = 4.0    # back up until dist_front >= this (raised: 1m docking runway per cycle)
+    retreat_dist_thresh: float = 2.3    # env kills at d_xy>3.0; keep dist_front modest
+    retreat_target_dist: float = 2.6    # sqrt(2.6^2 + 1.0^2)=2.79 < 3.0 safe margin
     retreat_drive: float = -1.0         # full backward speed (heavy forklift needs max effort)
     retreat_steer_gain: float = 0.0     # zero steer during retreat: straight back maximises backward speed
-    max_retreat_steps: int = 300        # raised: slow physics needs more steps to retreat enough
+    max_retreat_steps: int = 100        # ~30 steps to retreat 0.3m at 0.275 m/s
 
     # ---- Insertion ----
     ins_v_max: float = 0.35
@@ -345,7 +345,9 @@ class ForkliftExpertPolicy:
         )
 
         # ---- Compute steer (shared across non-retreat stages) ----
-        raw_steer = cfg.k_lat * lat + cfg.k_yaw * yaw
+        # SIGN: positive lat (right offset) needs NEGATIVE steer (turn left)
+        #        to correct back toward center-line.  Same for yaw.
+        raw_steer = -(cfg.k_lat * lat + cfg.k_yaw * yaw)
         if abs(raw_steer) < cfg.deadband_steer:
             raw_steer = 0.0
         raw_steer = _clip(raw_steer, -cfg.max_steer, cfg.max_steer)
