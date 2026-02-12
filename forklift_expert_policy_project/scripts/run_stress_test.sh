@@ -32,7 +32,10 @@ TASK="Isaac-Forklift-PalletInsertLift-Direct-v0"
 export TERM=xterm
 export PYTHONPATH="${EXPERT_PROJECT}:${PYTHONPATH:-}"
 
-# 退出 conda（如果激活了的话）
+# 退出 conda — nohup 下 conda deactivate 不起作用,
+# 必须 unset CONDA_PREFIX 否则 isaaclab.sh 会用 conda python
+unset CONDA_PREFIX 2>/dev/null || true
+unset CONDA_DEFAULT_ENV 2>/dev/null || true
 conda deactivate 2>/dev/null || true
 
 echo "============================================================"
