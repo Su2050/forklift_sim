@@ -40,7 +40,7 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
 
     # ===== 环境基础参数 =====
     decimation = 4
-    episode_length_s = 12.0
+    episode_length_s = 36.0  # was 12.0; ~1080 steps for expert to complete insertion+lift
 
     # actions: [drive, steer, lift]（驾驶、转向、举升）
     action_space = 3

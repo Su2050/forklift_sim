@@ -61,18 +61,20 @@ class ExpertConfig:
     pallet_half_depth: float = 1.08
 
     # ---- Docking (approach + align) ----
-    k_lat: float = 1.5          # steering gain for lateral error (m -> normalised)
-    k_yaw: float = 1.2          # steering gain for yaw error   (rad -> normalised)
-    k_dist: float = 0.6         # throttle gain for distance — raised for faster approach
+    k_lat: float = 1.1          # steering gain for lateral error — reduced from 1.5
+                                # to prevent lateral overshoot (stress-test: 26% drift pattern)
+    k_yaw: float = 0.9          # steering gain for yaw error   — reduced from 1.2
+    k_damp: float = 0.20        # NEW: yaw-rate damping to suppress oscillation
+    k_dist: float = 0.6         # throttle gain for distance
     v_max: float = 0.95         # max forward command — near full speed
     v_min: float = 0.80         # strong forward drive is critical for Ackermann steering
-    max_steer: float = 0.65     # cap steer output — physical angle 0.65*0.6=22 deg avoids wheel scrub
-    slow_dist: float = 0.5      # only slow very close to pallet front (was 1.5)
+    max_steer: float = 0.55     # cap steer output — reduced from 0.65 to limit overshoot
+    slow_dist: float = 0.5      # only slow very close to pallet front
     stop_dist: float = 0.3      # docking "arrived" gate (m, to pallet front)
 
     # alignment thresholds  (used to compute misalign ratio for speed scaling)
-    lat_ok: float = 0.20        # 20 cm -- relaxed to reduce speed penalty
-    yaw_ok: float = math.radians(15.0)  # 15 deg -- relaxed
+    lat_ok: float = 0.20        # 20 cm
+    yaw_ok: float = math.radians(15.0)  # 15 deg
 
     # ---- Retreat ----
     # Only trigger retreat when VERY close AND severely misaligned.
@@ -89,15 +91,18 @@ class ExpertConfig:
     retreat_cooldown: int = 80          # after retreat, give docking 80 steps uninterrupted
 
     # ---- Insertion ----
-    ins_v_max: float = 0.40         # raised for faster insertion progress
-    ins_v_min: float = 0.08         # raised from 0.05 to prevent stall
-    ins_lat_ok: float = 0.10        # 10 cm (was 8) -- relaxed to reduce stalling
-    ins_yaw_ok: float = math.radians(8.0)  # 8 deg (was 6) -- relaxed
+    # Stress-test showed max_ins ≈ 0.43-0.48 even after 300+ insertion steps
+    # with vf0 ≈ 60%. The forklift stalls inside the pallet due to friction.
+    # Solution: much higher insertion drive to overcome pallet resistance.
+    ins_v_max: float = 0.80         # was 0.40 — doubled for faster insertion progress
+    ins_v_min: float = 0.20         # was 0.08 — strong minimum to prevent stalling
+    ins_lat_ok: float = 0.15        # 15 cm (was 10) -- more forgiving
+    ins_yaw_ok: float = math.radians(12.0)  # 12 deg (was 8) -- more forgiving
 
     # Alignment gate: insertion stage is only entered when BOTH insert_norm
     # exceeds the threshold AND alignment is within these gates.
-    ins_stage_lat_gate: float = 0.35    # |lat| < 0.35 m to enter insertion (was 0.30)
-    ins_stage_yaw_gate: float = math.radians(20.0)  # |yaw| < 20 deg (was 15)
+    ins_stage_lat_gate: float = 0.25    # tightened to 25cm (longer episode allows better alignment)
+    ins_stage_yaw_gate: float = math.radians(15.0)  # tightened to 15 deg
 
     # Contact / slip backoff -- **disabled** by default because the 15-D obs
     # does NOT include contact_flag or slip_flag.
@@ -116,7 +121,7 @@ class ExpertConfig:
 
     # ---- Stage heuristic ----
     use_insert_norm_for_stage: bool = True
-    insert_enter_stage: float = 0.15   # insert_norm threshold to enter insertion stage
+    insert_enter_stage: float = 0.15   # reverted from 0.05; premature entry caused pushing against pallet side
 
 
 # ---------------------------------------------------------------------------
@@ -328,7 +333,9 @@ class ForkliftExpertPolicy:
 
         # ---- Compute steer (shared across non-retreat stages) ----
         # SIGN: positive lat (right offset) needs NEGATIVE steer (turn left)
-        raw_steer = -(cfg.k_lat * lat + cfg.k_yaw * yaw)
+        # PD controller: proportional on lat+yaw, derivative (damping) on yaw_rate
+        yaw_rate = s["yaw_rate"]
+        raw_steer = -(cfg.k_lat * lat + cfg.k_yaw * yaw + cfg.k_damp * yaw_rate)
         if abs(raw_steer) < cfg.deadband_steer:
             raw_steer = 0.0
         raw_steer = _clip(raw_steer, -cfg.max_steer, cfg.max_steer)
@@ -393,7 +400,9 @@ class ForkliftExpertPolicy:
                     else:
                         # Not aligned -- keep a meaningful creep speed so
                         # Ackermann steering can still correct the heading.
-                        drive = 0.10
+                        # Stress-test showed 0.10 was too slow, causing
+                        # vf=0 in 60% of insertion steps.
+                        drive = 0.30
 
             else:
                 # -------- Docking stage --------
@@ -408,8 +417,15 @@ class ForkliftExpertPolicy:
                     abs(yaw) / max(cfg.yaw_ok, 1e-6),
                 )
                 misalign = _clip(misalign, 0.0, 3.0)
-                speed_scale = 1.0 / (1.0 + 0.08 * misalign)
-                speed_scale = max(speed_scale, 0.90)
+                # Stronger speed reduction when CLOSE and misaligned
+                # to prevent overshooting the pallet.  When far away,
+                # keep speed high so steering has room to correct.
+                if dist < 1.5:
+                    speed_scale = 1.0 / (1.0 + 0.20 * misalign)
+                    speed_scale = max(speed_scale, 0.65)
+                else:
+                    speed_scale = 1.0 / (1.0 + 0.08 * misalign)
+                    speed_scale = max(speed_scale, 0.90)
                 drive = v * speed_scale
 
         # ---- Rate-limit for smoothness ----
