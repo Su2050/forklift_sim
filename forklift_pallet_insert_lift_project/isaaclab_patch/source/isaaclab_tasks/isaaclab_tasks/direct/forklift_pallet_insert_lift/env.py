@@ -1203,6 +1203,31 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self.extras["log"]["term/frac_early_fly"] = self._early_stop_fly.float().mean()
         self.extras["log"]["term/frac_early_stall"] = self._early_stop_stall.float().mean()
 
+        # ==================================================================
+        # S1.0P: 诊断观测指标（不改训练，只改看结果的方式）
+        # ==================================================================
+
+        # --- 近成功区域 yaw 指标 (insert_norm > 0.1) ---
+        near_success_mask = insert_norm > 0.1
+        near_frac = near_success_mask.float().mean()
+        self.extras["log"]["diag/near_success_frac"] = near_frac
+        if near_success_mask.any():
+            yaw_near = yaw_err_deg[near_success_mask]
+            self.extras["log"]["err/yaw_deg_near_success"] = yaw_near.mean()
+            self.extras["log"]["err/lateral_near_success"] = y_err[near_success_mask].mean()
+            # r_hold_align 信号可见性 (改进 4/D)
+            r_align_near = r_hold_align[near_success_mask]
+            self.extras["log"]["s0/r_hold_align_near_p50"] = torch.quantile(r_align_near, 0.5)
+            self.extras["log"]["s0/r_hold_align_near_p90"] = torch.quantile(r_align_near, 0.9)
+
+        # --- 深插阶段 yaw 指标 (insert_norm > 0.3) (改进 6/C) ---
+        deep_insert_mask = insert_norm > 0.3
+        self.extras["log"]["diag/deep_insert_frac"] = deep_insert_mask.float().mean()
+        if deep_insert_mask.any():
+            yaw_deep = yaw_err_deg[deep_insert_mask]
+            self.extras["log"]["err/yaw_deg_deep_mean"] = yaw_deep.mean()
+            self.extras["log"]["err/yaw_deg_deep_p90"] = torch.quantile(yaw_deep, 0.9)
+
         return rew
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
