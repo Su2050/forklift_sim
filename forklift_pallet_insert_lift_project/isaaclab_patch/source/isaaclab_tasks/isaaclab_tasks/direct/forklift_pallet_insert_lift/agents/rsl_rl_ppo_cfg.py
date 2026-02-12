@@ -49,8 +49,8 @@ class ForkliftInsertLiftPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         schedule="adaptive",  # 学习率调度策略
         gamma=0.99,  # 折扣因子
         lam=0.95,  # GAE 参数
-        entropy_coef=0.0015,  # S1.0N: 0.0005→0.0015，保温探索压力，防止 std 再次一路冷却到底
-        desired_kl=0.01,  # KL 目标，用于自适应调整
+        entropy_coef=0.0005,  # StageB: 0.0015→0.0005，降低探索压力，精修模式
+        desired_kl=0.008,  # StageB: 0.01→0.008，更保守更新步幅
         max_grad_norm=1.0,  # 梯度裁剪阈值
         value_loss_coef=1.0,  # 价值函数损失权重
         use_clipped_value_loss=True,  # 是否裁剪 value loss
