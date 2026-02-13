@@ -258,7 +258,7 @@ def main() -> None:
         if not args.quiet and (step % 10 == 0 or done_np[0]):
             log(
                 f"  step={step:4d}  stage={d['stage']:10s}  "
-                f"dist={d['dist_front']:.3f}  lat={d['lat']:.4f}  "
+                f"dist={d['dist_front']:.3f}  lat={d['lat']:.4f}(clip={d['lat_clipped']:.3f})  "
                 f"yaw={d['yaw']:.4f}  ins={d['insert_norm']:.3f}  "
                 f"drv={d['drive']:.3f}  str={d['steer']:.3f}  "
                 f"lft={d['lift']:.3f}  vf={d['v_forward']:.3f}  "

@@ -51,7 +51,8 @@ class ExpertConfig:
     * ``dist``  : metres  (from ``d_xy_r[0]``, forward distance to pallet
                   *center*; subtract ``pallet_half_depth`` to approximate
                   distance to pallet front opening).
-    * ``lat``   : metres  (de-normalised from ``y_err_obs * 0.5``).
+    * ``lat``   : metres  (true pallet-frame lateral error, computed from
+                  ``d_xy_r`` + ``cos/sin(dyaw)``; NOT clipped like ``y_err_obs``).
     * ``yaw``   : radians (recovered via ``atan2(sin_dyaw, cos_dyaw)``).
     """
 
@@ -214,7 +215,7 @@ class ForkliftExpertPolicy:
         expert control logic operates on.
 
         Returns a dict with at least:
-          dist_front, lateral_err, yaw_err, insert_norm,
+          dist_front, lat_true, lat_clipped, yaw_err, insert_norm,
           v_forward, yaw_rate, lift_pos, contact_flag, slip_flag
         """
         _r = self._safe_read  # shorthand
@@ -230,9 +231,15 @@ class ForkliftExpertPolicy:
         sin_dy = _r(obs, self._idx_sin_dyaw, default=0.0)
         yaw_err = math.atan2(sin_dy, cos_dy)  # [-pi, pi]
 
-        # --- Lateral error (metres, from pallet center-line frame) ---------
+        # --- True lateral error (metres, pallet center-line frame) ---------
+        # Rotate robot-frame d_xy_r to pallet-frame, take lateral component.
+        # dyaw = pallet_yaw - robot_yaw; cos_dy/sin_dy encode this angle.
+        # This is the UNSATURATED equivalent of env's y_signed_obs (before clip).
+        lat_true = sin_dy * d_x - cos_dy * d_y
+
+        # Clipped version (from y_err_obs) for reference / logging
         y_err_norm = _r(obs, self._idx_y_err_obs, default=0.0)
-        lateral_err = y_err_norm * 0.5  # metres
+        lat_clipped = y_err_norm * 0.5  # metres, clipped to [-0.5, +0.5]
 
         # --- Other scalars --------------------------------------------------
         insert_norm = _r(obs, self._idx_insert_norm, default=0.0)
@@ -249,7 +256,8 @@ class ForkliftExpertPolicy:
             "dist_to_center": dist_to_center,
             "d_x": d_x,
             "d_y": d_y,
-            "lateral_err": lateral_err,
+            "lat_true": lat_true,
+            "lat_clipped": lat_clipped,
             "yaw_err": yaw_err,
             "insert_norm": insert_norm,
             "v_forward": v_forward,
@@ -290,7 +298,8 @@ class ForkliftExpertPolicy:
         # ---- Decode obs into semantic fields ----
         s = self._decode_obs(obs)
         dist = s["dist_front"]
-        lat  = s["lateral_err"]
+        lat  = s["lat_true"]       # v5-A: use unsaturated pallet-frame lat
+        lat_clipped = s["lat_clipped"]  # for logging only
         yaw  = s["yaw_err"]
         insert_norm  = s["insert_norm"]
         contact_flag = s["contact_flag"]
@@ -401,10 +410,9 @@ class ForkliftExpertPolicy:
                 # In reverse with Ackermann: positive steer (wheels right)
                 # + backward drive causes rear to swing left.
                 # When lat > 0, we want rear to swing left → steer positive.
-                retreat_steer = (
-                    math.copysign(min(abs(lat) * 2.0, 1.0), lat) * cfg.retreat_steer_gain
-                    + yaw * cfg.retreat_k_yaw
-                )
+                retreat_lat_term = math.copysign(min(abs(lat) * 2.0, 1.0), lat) * cfg.retreat_steer_gain
+                retreat_yaw_term = yaw * cfg.retreat_k_yaw
+                retreat_steer = retreat_lat_term + retreat_yaw_term
                 raw_steer = _clip(retreat_steer, -0.8, 0.8)
                 self._retreat_steps += 1
 
@@ -479,7 +487,8 @@ class ForkliftExpertPolicy:
             "dist_to_center": s["dist_to_center"],
             "d_x": s["d_x"],
             "d_y": s["d_y"],
-            "lat": lat,
+            "lat": lat,              # lat_true (unsaturated, for control)
+            "lat_clipped": lat_clipped,  # y_err_obs * 0.5 (for comparison)
             "yaw": yaw,
             "insert_norm": insert_norm,
             "v_forward": s["v_forward"],
