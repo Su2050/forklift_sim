@@ -91,6 +91,10 @@ class ExpertConfig:
     retreat_drive: float = -1.0         # full backward speed
     retreat_steer_gain: float = 0.50    # was 0.15 — strong proportional correction during retreat
     retreat_k_yaw: float = 0.30        # NEW: yaw correction gain during retreat
+    retreat_max_steer: float = 0.90    # v5-B: was hardcoded 0.8 — clip limit for retreat steer
+    retreat_lat_sat: float = 0.75      # v5-B: lat at which retreat_lat_term saturates (was implicit 0.5)
+    retreat_exit_lat_abs: float = 0.40 # v5-B: was 0.30 — abs lat threshold for alignment exit
+    retreat_exit_yaw_max: float = math.radians(30)  # v5-B: yaw must also be OK to exit retreat
     max_retreat_steps: int = 80         # hard cap per single retreat
     retreat_cooldown: int = 150         # was 80 — give docking more time to self-correct
 
@@ -165,6 +169,8 @@ class ForkliftExpertPolicy:
         self._retreat_steps: int = 0
         self._retreat_cooldown_remaining: int = 0
         self._retreat_entry_lat: float = 0.0  # |lat| when retreat started
+        self._retreat_entry_yaw: float = 0.0  # |yaw| when retreat started
+        self._retreat_exit_reason: str = ""   # last exit reason for logging
 
         # Validate specs
         assert "fields" in self.obs_spec, "obs_spec missing 'fields'"
@@ -200,6 +206,8 @@ class ForkliftExpertPolicy:
         self._retreat_steps = 0
         self._retreat_cooldown_remaining = 0
         self._retreat_entry_lat = 0.0
+        self._retreat_entry_yaw = 0.0
+        self._retreat_exit_reason = ""
 
     # -------------------------------------------------------------- helpers
     @staticmethod
@@ -386,18 +394,30 @@ class ForkliftExpertPolicy:
                 self._in_retreat = True
                 self._retreat_steps = 0
                 self._retreat_entry_lat = abs(lat)
+                self._retreat_entry_yaw = abs(yaw)  # v5-B: record entry yaw
+                self._retreat_exit_reason = ""
 
             # Exit conditions: alignment improved OR distance/step budget reached
+            # v5-B: added yaw constraint to prevent "early-exit + cooldown = drift"
             alignment_improved = (
                 abs(lat) < self._retreat_entry_lat * 0.6   # lat improved 40%+
-                and abs(lat) < 0.30                        # absolute lat in reasonable range (tighter)
-                and dist > 1.2                             # enough room to re-approach (was 1.0)
+                and abs(lat) < cfg.retreat_exit_lat_abs     # v5-B: was 0.30, now config (0.40)
+                and abs(yaw) < cfg.retreat_exit_yaw_max     # v5-B: yaw must also be OK
+                and dist > 1.2                              # enough room to re-approach
             )
-            retreat_done = (
-                alignment_improved
-                or dist >= cfg.retreat_target_dist
-                or self._retreat_steps >= cfg.max_retreat_steps
-            )
+
+            # Determine exit reason
+            if alignment_improved:
+                retreat_done = True
+                self._retreat_exit_reason = "alignment"
+            elif dist >= cfg.retreat_target_dist:
+                retreat_done = True
+                self._retreat_exit_reason = "target_dist"
+            elif self._retreat_steps >= cfg.max_retreat_steps:
+                retreat_done = True
+                self._retreat_exit_reason = "max_steps"
+            else:
+                retreat_done = False
 
             if retreat_done:
                 self._in_retreat = False
@@ -406,15 +426,22 @@ class ForkliftExpertPolicy:
             else:
                 stage = "retreat"
                 drive = cfg.retreat_drive
-                # Proportional correction: stronger steer for larger lat error.
-                # In reverse with Ackermann: positive steer (wheels right)
-                # + backward drive causes rear to swing left.
-                # When lat > 0, we want rear to swing left → steer positive.
-                retreat_lat_term = math.copysign(min(abs(lat) * 2.0, 1.0), lat) * cfg.retreat_steer_gain
+                # v5-B: parameterised lat_term with retreat_lat_sat
+                # (decouples slope from saturation point)
+                retreat_lat_term = (
+                    math.copysign(min(abs(lat) / cfg.retreat_lat_sat, 1.0), lat)
+                    * cfg.retreat_steer_gain
+                )
                 retreat_yaw_term = yaw * cfg.retreat_k_yaw
                 retreat_steer = retreat_lat_term + retreat_yaw_term
-                raw_steer = _clip(retreat_steer, -0.8, 0.8)
+                raw_steer = _clip(retreat_steer,
+                                  -cfg.retreat_max_steer, cfg.retreat_max_steer)
                 self._retreat_steps += 1
+
+                # v5-B: skip steer rate_limit on first retreat step
+                # to eliminate ~3-step ramp-up delay
+                if self._retreat_steps == 1:
+                    self._prev_steer = raw_steer
 
         if stage not in ("lift", "retreat"):
             if in_insertion:
@@ -501,5 +528,6 @@ class ForkliftExpertPolicy:
             "backoff_countdown": self._backoff_countdown,
             "in_retreat": self._in_retreat,
             "retreat_steps": self._retreat_steps,
+            "retreat_exit_reason": self._retreat_exit_reason,
         }
         return action, info

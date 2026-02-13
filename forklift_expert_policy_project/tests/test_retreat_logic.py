@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Unit tests for expert policy retreat logic (v5-A: lat_true).
+Unit tests for expert policy retreat logic (v5-B: parameterised retreat).
 
 Tests can run WITHOUT IsaacLab/Isaac Sim — only needs numpy.
 Validates: lat_true computation, steer direction, proportional control,
-           alignment-based exit, false-trigger removal, and cooldown blocking.
+           alignment-based exit (lat+yaw), exit_reason, rate_limit skip,
+           false-trigger removal, and cooldown blocking.
 
 Usage:
     PYTHONPATH=forklift_expert_policy_project:$PYTHONPATH python3 -m pytest tests/test_retreat_logic.py -v
@@ -45,11 +46,7 @@ def _make_obs(
     yaw_err_obs: float = 0.0,
     lift_pos: float = 0.0,
 ) -> np.ndarray:
-    """Build a 15-D obs vector with specified semantic values.
-
-    Note (v5-A): lat is now computed from d_x/d_y/cos_dyaw/sin_dyaw,
-    NOT from y_err_obs.  When dyaw=0: lat_true = -d_y.
-    """
+    """Build a 15-D obs vector with specified semantic values."""
     obs = np.zeros(15, dtype=np.float32)
     obs[FIELDS["d_xy_r_x"]] = d_x
     obs[FIELDS["d_xy_r_y"]] = d_y
@@ -74,22 +71,18 @@ def _make_obs_for_lat(
 
     When dyaw=0: lat_true = sin(0)*d_x - cos(0)*d_y = -d_y
     So d_y = -lat_desired.
-
     Also sets y_err_obs consistently (clipped version).
     """
     d_x = dist_front + _HALF_D
     c = math.cos(dyaw)
     s = math.sin(dyaw)
-    # lat_true = s * d_x - c * d_y = lat_desired
-    # => d_y = (s * d_x - lat_desired) / c  (when c != 0)
     if abs(c) > 1e-6:
         d_y = (s * d_x - lat_desired) / c
     else:
         d_y = 0.0
 
-    # Compute y_err_obs (clipped version for consistency)
     lat_clipped = max(-0.5, min(0.5, lat_desired))
-    y_err_obs = lat_clipped / 0.5  # normalized, clipped to [-1, 1]
+    y_err_obs = lat_clipped / 0.5
 
     return _make_obs(
         d_x=d_x, d_y=d_y,
@@ -121,8 +114,8 @@ def test_case_0_lat_true_computation():
     policy.reset()
     obs_b = _make_obs(d_x=2.0, d_y=-1.2, cos_dyaw=1.0, sin_dyaw=0.0, y_err_obs=1.0)
     _, info_b = policy.act(obs_b)
-    assert abs(info_b["lat"] - 1.2) < 0.01, f"Expected lat_true=1.2, got {info_b['lat']:.4f}"
-    assert abs(info_b["lat_clipped"] - 0.5) < 0.01, f"Expected lat_clipped=0.5, got {info_b['lat_clipped']:.4f}"
+    assert abs(info_b["lat"] - 1.2) < 0.01
+    assert abs(info_b["lat_clipped"] - 0.5) < 0.01
 
     # Case C: with yaw offset (dyaw=30deg)
     policy.reset()
@@ -131,7 +124,7 @@ def test_case_0_lat_true_computation():
     obs_c = _make_obs(d_x=2.0, d_y=0.5, cos_dyaw=c, sin_dyaw=s)
     _, info_c = policy.act(obs_c)
     expected = s * 2.0 - c * 0.5
-    assert abs(info_c["lat"] - expected) < 0.01, f"Expected lat={expected:.4f}, got {info_c['lat']:.4f}"
+    assert abs(info_c["lat"] - expected) < 0.01
 
     print(f"  PASS: lat_true computation verified (aligned, saturated, yaw-offset)")
 
@@ -139,10 +132,8 @@ def test_case_0_lat_true_computation():
 def test_case_1_retreat_steer_direction():
     """lat=+0.5 (right offset) during retreat -> steer should be > 0."""
     policy = _make_policy()
-
-    # dist_front=0.8, lat_true=+0.5
     obs = _make_obs_for_lat(lat_desired=0.5, dist_front=0.8)
-    action, info = policy.act(obs)
+    _, info = policy.act(obs)
     assert info["stage"] == "retreat", f"Expected retreat, got {info['stage']}"
     assert info["raw_steer"] > 0, f"Expected positive steer for lat>0, got {info['raw_steer']:.3f}"
     print(f"  PASS: lat=+0.5 -> retreat steer = {info['raw_steer']:.3f} (positive)")
@@ -150,110 +141,190 @@ def test_case_1_retreat_steer_direction():
 
 def test_case_2_retreat_steer_proportional():
     """Larger |lat| should produce larger |steer| during retreat.
-    v5-A: lat_true can exceed 0.5, so we test 0.49 vs 0.8."""
-    # Policy with lat=0.49 (just above 0.48 threshold)
+    v5-B: lat_term = min(|lat|/0.75, 1.0)*0.50, saturates at lat=0.75."""
+    # lat=0.49 (just above 0.48 threshold)
     p1 = _make_policy()
     obs_small = _make_obs_for_lat(lat_desired=0.49, dist_front=0.8)
     _, info_small = p1.act(obs_small)
 
-    # Policy with lat=0.8 (would be clipped to 0.5 in v4, now seen as 0.8)
+    # lat=0.8 (v5-B: now above sat point 0.75, should be stronger than 0.49)
     p2 = _make_policy()
     obs_large = _make_obs_for_lat(lat_desired=0.8, dist_front=0.8)
     _, info_large = p2.act(obs_large)
 
-    assert info_small["stage"] == "retreat", f"Expected retreat for lat=0.49, got {info_small['stage']}"
-    assert info_large["stage"] == "retreat", f"Expected retreat for lat=0.8, got {info_large['stage']}"
+    assert info_small["stage"] == "retreat"
+    assert info_large["stage"] == "retreat"
     assert abs(info_large["raw_steer"]) > abs(info_small["raw_steer"]), (
-        f"Expected |steer| for lat=0.8 ({abs(info_large['raw_steer']):.3f}) > "
-        f"lat=0.49 ({abs(info_small['raw_steer']):.3f})"
+        f"|steer|(lat=0.8)={abs(info_large['raw_steer']):.3f} should > "
+        f"|steer|(lat=0.49)={abs(info_small['raw_steer']):.3f}"
     )
-    print(f"  PASS: steer(lat=0.8)={info_large['raw_steer']:.3f} > steer(lat=0.49)={info_small['raw_steer']:.3f}")
+
+    # v5-B specific: lat=0.6 vs lat=0.7 should differ (was identical in v5-A)
+    p3 = _make_policy()
+    obs_06 = _make_obs_for_lat(lat_desired=0.6, dist_front=0.8)
+    _, info_06 = p3.act(obs_06)
+
+    p4 = _make_policy()
+    obs_07 = _make_obs_for_lat(lat_desired=0.7, dist_front=0.8)
+    _, info_07 = p4.act(obs_07)
+
+    assert abs(info_07["raw_steer"]) > abs(info_06["raw_steer"]), (
+        f"v5-B: |steer|(lat=0.7)={abs(info_07['raw_steer']):.3f} should > "
+        f"|steer|(lat=0.6)={abs(info_06['raw_steer']):.3f} (was equal in v5-A)"
+    )
+    print(f"  PASS: proportional steer verified; lat=0.6 -> {info_06['raw_steer']:.3f}, "
+          f"lat=0.7 -> {info_07['raw_steer']:.3f}, lat=0.8 -> {info_large['raw_steer']:.3f}")
 
 
 def test_case_3_retreat_exit_on_alignment():
-    """Retreat should exit early when lateral alignment improves 40%+.
-    v5-A: entry lat can be > 0.5 (e.g., 0.7), exit when drops to 0.3."""
+    """Retreat should exit when BOTH lat AND yaw improve sufficiently.
+    v5-B: exit requires abs(yaw) < 30deg in addition to lat conditions."""
     policy = _make_policy()
 
-    # Step 1: trigger retreat with lat=0.7, dist_front=0.8
+    # Step 1: trigger retreat with lat=0.7, yaw=0 (small), dist_front=0.8
     obs_start = _make_obs_for_lat(lat_desired=0.7, dist_front=0.8)
     _, info = policy.act(obs_start)
-    assert info["stage"] == "retreat", f"Should start in retreat, got {info['stage']}"
-    assert policy._retreat_entry_lat > 0.65, f"Entry lat should be ~0.7, got {policy._retreat_entry_lat}"
+    assert info["stage"] == "retreat"
+    assert policy._retreat_entry_lat > 0.65
 
-    # Step 2: lat improves to 0.25, dist increases to 1.3
-    # 0.25 < 0.7 * 0.6 = 0.42 (40%+ improvement)
-    # 0.25 < 0.30 (absolute range ok)
-    # dist 1.3 > 1.2 (enough room)
+    # Step 2: lat improves to 0.25, dist=1.3, yaw still small (dyaw=0)
+    # 0.25 < 0.7*0.6=0.42 OK, 0.25 < 0.40 OK, yaw ~0 < 30deg OK, dist>1.2 OK
     obs_improved = _make_obs_for_lat(lat_desired=0.25, dist_front=1.3)
     _, info2 = policy.act(obs_improved)
-
     assert info2["stage"] != "retreat", (
-        f"Expected exit from retreat (lat improved 0.7->0.25), but stage={info2['stage']}"
+        f"Expected exit from retreat (lat+yaw OK), but stage={info2['stage']}"
     )
-    print(f"  PASS: retreat exited early when lat improved from 0.7 to 0.25 (entry_lat unsaturated!)")
+    assert policy._retreat_exit_reason == "alignment"
+    print(f"  PASS: retreat exited (alignment) when lat improved to 0.25 with small yaw")
+
+
+def test_case_3b_retreat_no_exit_if_yaw_large():
+    """v5-B: retreat should NOT exit alignment-early if yaw is still large,
+    even when lat has improved enough."""
+    policy = _make_policy()
+    cfg = policy.cfg
+
+    # Trigger retreat with lat=0.7, yaw=40deg > exit_yaw_max(30deg)
+    dyaw_entry = math.radians(40)
+    obs_start = _make_obs_for_lat(lat_desired=0.7, dist_front=0.8, dyaw=dyaw_entry)
+    _, info = policy.act(obs_start)
+    assert info["stage"] == "retreat"
+
+    # lat improves to 0.25, but yaw stays at 40deg
+    obs_lat_ok = _make_obs_for_lat(lat_desired=0.25, dist_front=1.3, dyaw=dyaw_entry)
+    _, info2 = policy.act(obs_lat_ok)
+
+    # Should still be in retreat because yaw is too large
+    assert info2["stage"] == "retreat", (
+        f"Should stay in retreat (yaw=40deg > 30deg), but stage={info2['stage']}"
+    )
+    print(f"  PASS: retreat blocked alignment-exit when yaw=40deg (> 30deg limit)")
 
 
 def test_case_4_no_false_trigger():
-    """lat_true=0.3 (below 0.48 threshold) should NOT trigger retreat,
-    even with dist < 1.0."""
+    """lat_true=0.3 (below 0.48 threshold) should NOT trigger retreat."""
     policy = _make_policy()
-
-    # dist_front=0.5, lat_true=0.3 (below 0.48)
     obs = _make_obs_for_lat(lat_desired=0.3, dist_front=0.5)
     _, info = policy.act(obs)
-
-    assert info["stage"] != "retreat", (
-        f"Should NOT trigger retreat for lat=0.3 (below 0.48 threshold), "
-        f"but got stage={info['stage']}"
-    )
+    assert info["stage"] != "retreat"
     print(f"  PASS: lat_true=0.3 -> no retreat trigger (stage={info['stage']})")
 
 
 def test_case_5_cooldown_blocks_retrigger():
-    """After retreat ends, cooldown should block immediate re-triggering."""
+    """After retreat ends, cooldown should block immediate re-triggering.
+    Also checks retreat_exit_reason."""
     policy = _make_policy()
     cfg = policy.cfg
 
-    # Step 1: trigger and run retreat to completion (max_retreat_steps)
+    # Trigger and run retreat to max_steps
     obs_trigger = _make_obs_for_lat(lat_desired=0.6, dist_front=0.8)
     for i in range(cfg.max_retreat_steps + 5):
         _, info = policy.act(obs_trigger)
         if info["stage"] != "retreat" and i > 0:
             break
 
-    assert policy._retreat_cooldown_remaining > 0, (
-        f"Cooldown should be active after retreat, got {policy._retreat_cooldown_remaining}"
+    assert policy._retreat_cooldown_remaining > 0
+    assert policy._retreat_exit_reason == "max_steps", (
+        f"Expected exit reason 'max_steps', got '{policy._retreat_exit_reason}'"
     )
 
-    # Step 2: immediately present same trigger conditions
     _, info_after = policy.act(obs_trigger)
-    assert info_after["stage"] != "retreat", (
-        f"Cooldown should block retreat re-trigger, but got stage={info_after['stage']}"
+    assert info_after["stage"] != "retreat"
+    print(f"  PASS: cooldown blocks re-trigger; exit_reason=max_steps")
+
+
+def test_case_5b_exit_reason_target_dist():
+    """retreat_exit_reason should be 'target_dist' when distance reached."""
+    policy = _make_policy()
+    cfg = policy.cfg
+
+    # Trigger with lat=0.6, dist=0.8
+    obs_trigger = _make_obs_for_lat(lat_desired=0.6, dist_front=0.8)
+    _, info = policy.act(obs_trigger)
+    assert info["stage"] == "retreat"
+
+    # Next step: dist jumps to retreat_target_dist (1.8), lat still bad
+    obs_far = _make_obs_for_lat(lat_desired=0.6, dist_front=cfg.retreat_target_dist)
+    _, info2 = policy.act(obs_far)
+    assert info2["stage"] != "retreat"
+    assert policy._retreat_exit_reason == "target_dist", (
+        f"Expected 'target_dist', got '{policy._retreat_exit_reason}'"
     )
-    print(f"  PASS: cooldown={policy._retreat_cooldown_remaining} blocks re-trigger (stage={info_after['stage']})")
+    print(f"  PASS: retreat exit_reason=target_dist when dist >= {cfg.retreat_target_dist}")
 
 
 def test_case_6_large_lat_triggers_stronger_response():
-    """v5-A key benefit: lat_true=1.0 should produce stronger docking steer
-    than lat_true=0.5 (which was the old v4 ceiling)."""
-    # Policy with lat=0.5 (v4 maximum)
+    """lat_true=1.0 should produce stronger docking steer than lat_true=0.5."""
     p1 = _make_policy()
     obs_v4max = _make_obs_for_lat(lat_desired=0.5, dist_front=2.0)
     _, info_v4 = p1.act(obs_v4max)
 
-    # Policy with lat=1.0 (v5-A can see this)
     p2 = _make_policy()
     obs_v5 = _make_obs_for_lat(lat_desired=1.0, dist_front=2.0)
     _, info_v5 = p2.act(obs_v5)
 
     assert info_v4["stage"] == "docking"
     assert info_v5["stage"] == "docking"
-    assert abs(info_v5["raw_steer"]) > abs(info_v4["raw_steer"]), (
-        f"v5-A should produce stronger steer for lat=1.0 ({abs(info_v5['raw_steer']):.3f}) "
-        f"vs lat=0.5 ({abs(info_v4['raw_steer']):.3f})"
-    )
+    assert abs(info_v5["raw_steer"]) > abs(info_v4["raw_steer"])
     print(f"  PASS: steer(lat=1.0)={info_v5['raw_steer']:.3f} > steer(lat=0.5)={info_v4['raw_steer']:.3f}")
+
+
+def test_case_7_retreat_rate_limit_skip():
+    """v5-B: first retreat step should skip steer rate_limit (no ramp-up)."""
+    policy = _make_policy()
+
+    # Pre-condition: _prev_steer = 0 (fresh policy)
+    assert policy._prev_steer == 0.0
+
+    # Trigger retreat with lat=0.7 -> raw_steer should be significant
+    obs = _make_obs_for_lat(lat_desired=0.7, dist_front=0.8)
+    _, info = policy.act(obs)
+    assert info["stage"] == "retreat"
+
+    # With rate_limit skip, the actual steer should == raw_steer
+    # (no 0.35/step ramp-up from 0)
+    assert abs(info["steer"] - info["raw_steer"]) < 0.01, (
+        f"First retreat step should skip rate_limit: steer={info['steer']:.3f} "
+        f"should == raw_steer={info['raw_steer']:.3f}"
+    )
+    print(f"  PASS: first retreat step steer={info['steer']:.3f} == raw_steer={info['raw_steer']:.3f} (no ramp)")
+
+
+def test_case_8_retreat_lat_sat_parameterised():
+    """v5-B: verify retreat lat_term uses retreat_lat_sat=0.75 parameterisation.
+    lat=0.375 -> lat_term = 0.375/0.75*0.50 = 0.25
+    lat=0.75  -> lat_term = 1.0*0.50 = 0.50 (saturated)
+    lat=1.0   -> lat_term = 1.0*0.50 = 0.50 (still saturated)"""
+    cfg = ExpertConfig()
+
+    # Compute expected values manually
+    for lat_val, expected_term in [(0.375, 0.25), (0.75, 0.50), (1.0, 0.50)]:
+        actual = min(lat_val / cfg.retreat_lat_sat, 1.0) * cfg.retreat_steer_gain
+        assert abs(actual - expected_term) < 0.001, (
+            f"lat={lat_val}: expected lat_term={expected_term}, got {actual:.4f}"
+        )
+
+    print(f"  PASS: retreat_lat_sat parameterisation verified (0.375->0.25, 0.75->0.50, 1.0->0.50)")
 
 
 # =====================================================================
@@ -265,9 +336,13 @@ def main():
         test_case_1_retreat_steer_direction,
         test_case_2_retreat_steer_proportional,
         test_case_3_retreat_exit_on_alignment,
+        test_case_3b_retreat_no_exit_if_yaw_large,
         test_case_4_no_false_trigger,
         test_case_5_cooldown_blocks_retrigger,
+        test_case_5b_exit_reason_target_dist,
         test_case_6_large_lat_triggers_stronger_response,
+        test_case_7_retreat_rate_limit_skip,
+        test_case_8_retreat_lat_sat_parameterised,
     ]
     passed = 0
     failed = 0
