@@ -20,7 +20,7 @@ PROJECT_ROOT="/home/uniubi/projects/forklift_sim"
 ISAACLAB_DIR="${PROJECT_ROOT}/IsaacLab"
 EXPERT_PROJECT="${PROJECT_ROOT}/forklift_expert_policy_project"
 PLAY_SCRIPT="${EXPERT_PROJECT}/scripts/play_expert.py"
-OUTPUT_DIR="${PROJECT_ROOT}/logs/stress_test/large_v5a"
+OUTPUT_DIR="${PROJECT_ROOT}/logs/stress_test/large_v5bc"
 ANALYZE_SCRIPT="${OUTPUT_DIR}/analyze_all.py"
 
 # ---- 测试参数 ----
@@ -39,7 +39,7 @@ unset CONDA_DEFAULT_ENV 2>/dev/null || true
 conda deactivate 2>/dev/null || true
 
 echo "============================================================"
-echo "  Expert Policy Stress Test — large_v5a"
+echo "  Expert Policy Stress Test — large_v5bc"
 echo "  Seeds: ${#SEEDS[@]}  Episodes/seed: ${EPISODES}"
 echo "  Total: $(( ${#SEEDS[@]} * EPISODES )) episodes"
 echo "  Output: ${OUTPUT_DIR}"
