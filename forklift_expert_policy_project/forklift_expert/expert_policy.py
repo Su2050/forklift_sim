@@ -72,6 +72,9 @@ class ExpertConfig:
     max_steer: float = 0.55     # (legacy, used only as fallback)
     max_steer_far: float = 0.65  # steer limit when dist > 2.0m (room to correct)
     max_steer_near: float = 0.40 # steer limit when dist < 0.8m (prevent overshoot)
+    # v5-C: lat-dependent steer bonus (only when dist >= 0.8m)
+    max_steer_lat_bonus_start: float = 0.4   # |lat| > this -> add bonus to eff_max_steer
+    max_steer_lat_bonus_max: float = 0.10    # cap: far limit goes from 0.65 to max 0.75
     slow_dist: float = 0.5      # only slow very close to pallet front
     stop_dist: float = 0.3      # docking "arrived" gate (m, to pallet front)
 
@@ -375,6 +378,13 @@ class ForkliftExpertPolicy:
         else:
             t = (dist - 0.8) / 1.2
             eff_max_steer = cfg.max_steer_near + t * (cfg.max_steer_far - cfg.max_steer_near)
+
+        # v5-C: lat-dependent bonus (only when dist >= 0.8m to protect near-pallet)
+        if dist >= 0.8 and abs(lat) > cfg.max_steer_lat_bonus_start:
+            lat_excess = abs(lat) - cfg.max_steer_lat_bonus_start
+            bonus = min(lat_excess * 0.2, cfg.max_steer_lat_bonus_max)
+            eff_max_steer += bonus
+
         raw_steer = _clip(raw_steer, -eff_max_steer, eff_max_steer)
 
         # ---- Compute drive + lift + steer by stage ----

@@ -327,6 +327,53 @@ def test_case_8_retreat_lat_sat_parameterised():
     print(f"  PASS: retreat_lat_sat parameterisation verified (0.375->0.25, 0.75->0.50, 1.0->0.50)")
 
 
+def test_case_9_lat_dependent_steer_bonus():
+    """v5-C: large |lat| should allow stronger docking steer via bonus.
+    lat=0.3 -> no bonus (below 0.4 threshold), steer unchanged
+    lat=0.8 -> bonus=min(0.4*0.2, 0.10)=0.08, eff_max_steer=0.65+0.08=0.73
+    lat=1.0 -> bonus=min(0.6*0.2, 0.10)=0.10, eff_max_steer=0.75 (capped)"""
+    # Small lat: no bonus, steer same as before
+    p1 = _make_policy()
+    obs_small = _make_obs_for_lat(lat_desired=0.3, dist_front=2.5)  # dist>2.0
+    _, info_small = p1.act(obs_small)
+    # k_lat=1.1, lat=0.3 => raw_steer=0.33+yaw_term, limit should be 0.65 (no bonus)
+    assert abs(info_small["raw_steer"]) <= 0.65 + 0.01, (
+        f"Small lat should not get bonus: raw_steer={info_small['raw_steer']:.3f}"
+    )
+
+    # Large lat: should get bonus and produce stronger steer
+    p2 = _make_policy()
+    obs_large = _make_obs_for_lat(lat_desired=0.8, dist_front=2.5)  # dist>2.0
+    _, info_large = p2.act(obs_large)
+    # k_lat=1.1, lat=0.8 => raw_steer=0.88+yaw_term, eff_max_steer=0.65+0.08=0.73
+    assert abs(info_large["raw_steer"]) > 0.65, (
+        f"Large lat (0.8) should get bonus: raw_steer={info_large['raw_steer']:.3f} should > 0.65"
+    )
+    assert abs(info_large["raw_steer"]) <= 0.75 + 0.01, (
+        f"Bonus should be capped: raw_steer={info_large['raw_steer']:.3f} should <= 0.75"
+    )
+
+    # Very large lat: capped at max bonus
+    p3 = _make_policy()
+    obs_huge = _make_obs_for_lat(lat_desired=1.5, dist_front=2.5)
+    _, info_huge = p3.act(obs_huge)
+    assert abs(info_huge["raw_steer"]) <= 0.75 + 0.01
+
+    # Near-distance: no bonus even with large lat (dist < 0.8)
+    # Use lat=0.3 to avoid retreat trigger (lat < 0.48)
+    p4 = _make_policy()
+    obs_near = _make_obs_for_lat(lat_desired=0.3, dist_front=0.5)  # dist < 0.8
+    _, info_near = p4.act(obs_near)
+    # Near: max_steer_near=0.40, no bonus (dist<0.8), plus gain decay
+    assert abs(info_near["raw_steer"]) <= 0.40 + 0.01, (
+        f"Near-distance should not get bonus: raw_steer={info_near['raw_steer']:.3f}"
+    )
+
+    print(f"  PASS: lat-dependent bonus verified: small(0.3)={info_small['raw_steer']:.3f}, "
+          f"large(0.8)={info_large['raw_steer']:.3f}, huge(1.5)={info_huge['raw_steer']:.3f}, "
+          f"near(0.3,d=0.5)={info_near['raw_steer']:.3f}")
+
+
 # =====================================================================
 # Main (fallback for no-pytest environments)
 # =====================================================================
@@ -343,6 +390,7 @@ def main():
         test_case_6_large_lat_triggers_stronger_response,
         test_case_7_retreat_rate_limit_skip,
         test_case_8_retreat_lat_sat_parameterised,
+        test_case_9_lat_dependent_steer_bonus,
     ]
     passed = 0
     failed = 0
