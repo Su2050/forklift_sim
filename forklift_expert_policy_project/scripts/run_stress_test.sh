@@ -94,7 +94,7 @@ for seed in "${SEEDS[@]}"; do
         --seed "${seed}" \
         --quiet \
         --log_file "${LOG_FILE}" \
-        2>/dev/null || {
+        2>&1 || {
             echo "[WARN] seed=${seed} exited with non-zero status"
         }
 
