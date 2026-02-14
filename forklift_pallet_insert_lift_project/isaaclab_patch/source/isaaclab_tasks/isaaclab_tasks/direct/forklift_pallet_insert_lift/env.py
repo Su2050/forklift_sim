@@ -171,6 +171,22 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self._stall_counter = torch.zeros((self.num_envs,), dtype=torch.int32, device=self.device)
         self._early_stop_fly = torch.zeros((self.num_envs,), dtype=torch.bool, device=self.device)
         self._early_stop_stall = torch.zeros((self.num_envs,), dtype=torch.bool, device=self.device)
+        # S1.0Q Batch-3: dead-zone stuck detector
+        self._dz_stuck_counter = torch.zeros((self.num_envs,), dtype=torch.int32, device=self.device)
+        self._prev_y_err = torch.zeros((self.num_envs,), device=self.device)
+        self._early_stop_dz_stuck = torch.zeros((self.num_envs,), dtype=torch.bool, device=self.device)
+        # S1.0Q Batch-4: penOnly 消融首次触发标记
+        self._dz_stuck_fired = torch.zeros((self.num_envs,), dtype=torch.bool, device=self.device)
+        # S1.0Q: 死区撤退 shaping 状态量
+        self._prev_insert_norm = torch.zeros((self.num_envs,), device=self.device)
+        self._prev_in_dead_zone = torch.zeros((self.num_envs,), dtype=torch.bool, device=self.device)
+        # S1.0Q-A2v2: 撤退窗口缓冲（环形缓冲区）
+        self._insert_norm_window = torch.zeros(
+            (self.num_envs, self.cfg.retreat_window_size), device=self.device)
+        self._window_ptr = torch.zeros((self.num_envs,), dtype=torch.long, device=self.device)
+        self._window_filled = torch.zeros((self.num_envs,), dtype=torch.bool, device=self.device)
+        # S1.0Q: 横向精调 delta shaping 状态量
+        self._prev_phi_lat = torch.zeros((self.num_envs,), device=self.device)
 
         # ---- 派生常量 ----
         # S1.0h 修复：符号 + → -
@@ -959,7 +975,10 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
             -(y_err / self.cfg.y_gate3) ** 2
             - (yaw_err_deg / self.cfg.yaw_gate3) ** 2
         )
-        phi_ins = self.cfg.k_ins * (0.4 + 0.6 * w_align3) * insert_norm * w3
+        # S1.0Q-B1: ins_floor 可配置（B0=0.4，B1a=0.1）+ 横向独立门控 w_lat_gate
+        w_lat_gate = torch.exp(-(y_err / self.cfg.ins_lat_gate_sigma) ** 2)
+        phi_ins = self.cfg.k_ins * (self.cfg.ins_floor + (1.0 - self.cfg.ins_floor) * w_align3) \
+                  * insert_norm * w3 * w_lat_gate
 
         # ---- 举升势函数 + 空举惩罚 ----
         w_lift_base = smoothstep(
@@ -1029,6 +1048,15 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
             + new_hits[:, 6].float() * self.cfg.rew_milestone_precise_align
         )
 
+        # S1.0Q: 死区内衰减 milestone，防止绕过插入门控（A 组配套）
+        in_dead_zone_now = (insert_norm > self.cfg.dead_zone_insert_thresh) & \
+                           (y_err > self.cfg.dead_zone_lat_thresh)
+        milestone_reward = torch.where(
+            in_dead_zone_now,
+            milestone_reward * self.cfg.milestone_dead_zone_scale,
+            milestone_reward
+        )
+
         # ---- 失败早停计数（惩罚在 reward，终止在 dones）----
         fly_cond = d_xy > self.cfg.early_stop_d_xy_max
         self._fly_counter = torch.where(fly_cond, self._fly_counter + 1, torch.zeros_like(self._fly_counter))
@@ -1041,9 +1069,30 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self._stall_counter = torch.where(stall_cond, self._stall_counter + 1, torch.zeros_like(self._stall_counter))
         self._early_stop_stall = self._stall_counter >= self.cfg.early_stop_stall_steps
 
+        # ---- S1.0Q Batch-3: Dead-zone stuck detector ----
+        # 在死区内，如果连续 K 步 insert_norm 和 y_err 变化都 < epsilon，
+        # 则判定为"卡死"（大幅动作但碰撞卡住），给 penalty 并触发 early done
+        dz_stuck_cond = in_dead_zone_now & (
+            torch.abs(insert_norm - self._prev_insert_norm) < self.cfg.dz_stuck_ins_eps
+        ) & (
+            torch.abs(y_err - self._prev_y_err) < self.cfg.dz_stuck_lat_eps
+        )
+        self._dz_stuck_counter = torch.where(
+            dz_stuck_cond, self._dz_stuck_counter + 1,
+            torch.zeros_like(self._dz_stuck_counter))
+        dz_stuck_triggered = self._dz_stuck_counter >= self.cfg.dz_stuck_steps
+        # Batch-4: 拆分 early done 与 penalty
+        # early done 只在 dz_stuck_early_done=True 时触发终止
+        self._early_stop_dz_stuck = dz_stuck_triggered & self.cfg.dz_stuck_early_done
+        # penalty 只在首次触发时给一次（防止 penOnly 模式下每步累积）
+        dz_stuck_first_fire = dz_stuck_triggered & (~self._dz_stuck_fired)
+        self._dz_stuck_fired = self._dz_stuck_fired | dz_stuck_triggered
+        self._prev_y_err = y_err.detach().clone()
+
         early_stop_penalty = (
             self._early_stop_fly.float() * self.cfg.rew_early_stop_fly
             + self._early_stop_stall.float() * self.cfg.rew_early_stop_stall
+            + dz_stuck_first_fire.float() * self.cfg.rew_early_stop_dz_stuck
         )
 
         # ---- S1.0N: 全维度 Schmitt trigger hold counter ----
@@ -1119,8 +1168,51 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         r_lift_progress = torch.where(self._is_first_step, torch.zeros_like(r_lift_progress), r_lift_progress)
         self._prev_phi_lift_progress = phi_lift_progress.detach()
 
+        # ---- S1.0Q-A1: 深插死区惩罚 ----
+        dead_zone = (insert_norm > self.cfg.dead_zone_insert_thresh) & \
+                    (y_err > self.cfg.dead_zone_lat_thresh)
+        pen_dead_zone = -self.cfg.k_dead_zone * dead_zone.float() * \
+            (insert_norm - self.cfg.dead_zone_insert_thresh) * \
+            (y_err - self.cfg.dead_zone_lat_thresh)
+        pen_dead_zone = torch.clamp(pen_dead_zone, min=-self.cfg.dead_zone_pen_clamp, max=0.0)
+
+        # ---- S1.0Q-A2v2: 窗口式死区撤退鼓励 ----
+        # 写入当前 insert_norm 到环形缓冲
+        env_arange = torch.arange(self.num_envs, device=self.device)
+        ptr = self._window_ptr
+        self._insert_norm_window[env_arange, ptr] = insert_norm
+        self._window_ptr = (ptr + 1) % self.cfg.retreat_window_size
+        # 窗口填满后才激活（至少积累满一个完整窗口的数据）
+        self._window_filled = self._window_filled | (self._window_ptr == 0)
+        # 净下降 = 窗口最老值 - 当前值（正值表示净退出）
+        oldest_idx = self._window_ptr  # 下一个要被覆盖的位置就是最老的
+        oldest_insert = self._insert_norm_window[env_arange, oldest_idx]
+        net_retreat = oldest_insert - insert_norm  # 正 = 退出
+        r_retreat = torch.where(
+            self._prev_in_dead_zone & self._window_filled & ~self._is_first_step,
+            self.cfg.k_retreat * torch.clamp(net_retreat, min=0.0),  # 只奖励净退出
+            torch.zeros_like(insert_norm)
+        )
+        r_retreat = torch.clamp(r_retreat, max=self.cfg.retreat_reward_clamp)
+        # 更新 prev 状态
+        self._prev_insert_norm = insert_norm.detach()
+        self._prev_in_dead_zone = dead_zone.detach().clone()
+
+        # ---- S1.0Q-C1: 横向 delta shaping ----
+        lat_fine_active = insert_norm > self.cfg.lat_fine_ins_thresh
+        phi_lat = torch.exp(-(y_err / self.cfg.lat_fine_sigma) ** 2)
+        r_lat_fine = self.cfg.k_lat_fine * (phi_lat - self._prev_phi_lat)
+        r_lat_fine = torch.where(
+            lat_fine_active & ~self._is_first_step,
+            r_lat_fine,
+            torch.zeros_like(r_lat_fine)
+        )
+        self._prev_phi_lat = phi_lat.detach()
+
         # ---- 总奖励 ----
-        rew = r_pot + pen_premature + pen_dense + r_terminal + milestone_reward + r_hold_align + r_lift_progress + early_stop_penalty
+        rew = (r_pot + pen_premature + pen_dense + r_terminal + milestone_reward
+               + r_hold_align + r_lift_progress + early_stop_penalty
+               + pen_dead_zone + r_retreat + r_lat_fine)
 
         # 清除首步标记
         self._is_first_step[:] = False
@@ -1147,6 +1239,10 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self.extras["log"]["s0/r_hold_align"] = r_hold_align.mean()
         self.extras["log"]["s0/r_lift_progress"] = r_lift_progress.mean()
         self.extras["log"]["s0/pen_early_stop"] = early_stop_penalty.mean()
+        # S1.0Q: 新增奖励分量日志
+        self.extras["log"]["s0/pen_dead_zone"] = pen_dead_zone.mean()
+        self.extras["log"]["s0/r_retreat"] = r_retreat.mean()
+        self.extras["log"]["s0/r_lat_fine"] = r_lat_fine.mean()
 
         # 门控权重
         self.extras["log"]["s0/w_band"] = w_band.mean()
@@ -1156,6 +1252,8 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self.extras["log"]["s0/w_lift_base"] = w_lift_base.mean()
         self.extras["log"]["s0/w_lift"] = w_lift.mean()
         self.extras["log"]["s0/e_band"] = e_band.mean()
+        # S1.0Q: 新增门控权重日志
+        self.extras["log"]["s0/w_lat_gate"] = w_lat_gate.mean()
 
         # 误差分布
         self.extras["log"]["err/lateral_mean"] = y_err.mean()
@@ -1202,6 +1300,7 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self.extras["log"]["term/frac_timeout"] = time_out_now.float().mean()
         self.extras["log"]["term/frac_early_fly"] = self._early_stop_fly.float().mean()
         self.extras["log"]["term/frac_early_stall"] = self._early_stop_stall.float().mean()
+        self.extras["log"]["term/frac_early_dz_stuck"] = self._early_stop_dz_stuck.float().mean()
 
         # ==================================================================
         # S1.0P: 诊断观测指标（不改训练，只改看结果的方式）
@@ -1228,6 +1327,12 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
             self.extras["log"]["err/yaw_deg_deep_mean"] = yaw_deep.mean()
             self.extras["log"]["err/yaw_deg_deep_p90"] = torch.quantile(yaw_deep, 0.9)
 
+        # ==================================================================
+        # S1.0Q: 新增诊断指标
+        # ==================================================================
+        # 死区 step 比例（深插 + 横向大偏差）
+        self.extras["log"]["diag/deep_lat_bad_frac"] = dead_zone.float().mean()
+
         return rew
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
@@ -1249,7 +1354,7 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         pitch = torch.asin(torch.clamp(sinp, -1.0, 1.0))
         tipped = (torch.abs(roll) > self.cfg.max_roll_pitch_rad) | (torch.abs(pitch) > self.cfg.max_roll_pitch_rad)
 
-        terminated = tipped | success | self._early_stop_fly | self._early_stop_stall
+        terminated = tipped | success | self._early_stop_fly | self._early_stop_stall | self._early_stop_dz_stuck
         return terminated, time_out
 
     # ---------------------------
@@ -1283,10 +1388,24 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self._stall_counter[env_ids] = 0
         self._early_stop_fly[env_ids] = False
         self._early_stop_stall[env_ids] = False
+        # S1.0Q Batch-3: dead-zone stuck detector
+        self._dz_stuck_counter[env_ids] = 0
+        self._prev_y_err[env_ids] = 0.0
+        self._early_stop_dz_stuck[env_ids] = False
+        # S1.0Q Batch-4: penOnly 首次触发标记
+        self._dz_stuck_fired[env_ids] = False
         # S1.0N: _prev_phi_align 暂时清零，在位姿写入后再初始化为当前 phi_align
         self._prev_phi_align[env_ids] = 0.0
         # S1.0O-A3: lift 进度势函数缓存清零
         self._prev_phi_lift_progress[env_ids] = 0.0
+        # S1.0Q: 死区撤退 / 横向精调状态量清零
+        self._prev_insert_norm[env_ids] = 0.0
+        self._prev_in_dead_zone[env_ids] = False
+        self._prev_phi_lat[env_ids] = 0.0
+        # S1.0Q-A2v2: 撤退窗口缓冲清零
+        self._insert_norm_window[env_ids] = 0.0
+        self._window_ptr[env_ids] = 0
+        self._window_filled[env_ids] = False
 
         # ---- 托盘固定位姿（可选：后续可加随机化） ----
         pallet_pos = torch.tensor(self.cfg.pallet_cfg.init_state.pos, device=self.device).repeat(len(env_ids), 1)
@@ -1392,6 +1511,11 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
             * torch.exp(-(yaw_err_deg_reset / self.cfg.hold_align_sigma_yaw) ** 2)
         )
         self._prev_phi_align[env_ids] = phi_align_init.detach()
+
+        # S1.0Q: 初始化 _prev_phi_lat 为 reset 位姿的 phi_lat（防"开局白嫖"）
+        phi_lat_init = torch.exp(-(y_err_reset / self.cfg.lat_fine_sigma) ** 2)
+        self._prev_phi_lat[env_ids] = phi_lat_init.detach()
+        # _prev_insert_norm 在 reset 时 insert_norm ≈ 0，保持清零即可
 
         # 注：不再额外调用 self.robot.reset(env_ids)，
         # super()._reset_idx() 已通过 scene.reset(env_ids) 调用过一次。

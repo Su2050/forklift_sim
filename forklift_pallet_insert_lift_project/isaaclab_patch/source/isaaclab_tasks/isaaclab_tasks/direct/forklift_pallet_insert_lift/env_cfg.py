@@ -180,6 +180,33 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     hold_align_sigma_y: float = 0.25   # 横向尺度 (m)
     hold_align_sigma_yaw: float = 8.0  # 偏航尺度 (deg) — A3B1C2_v2: 12→8 收紧 yaw 梯度
 
+    # ---- S1.0Q: 死区惩罚 (A1) ----
+    dead_zone_insert_thresh: float = 0.30   # 死区插入阈值（归一化）
+    dead_zone_lat_thresh: float = 0.20      # 死区横向阈值 (m)
+    k_dead_zone: float = 0.5               # 死区惩罚权重
+    dead_zone_pen_clamp: float = 0.05      # 每步最大惩罚绝对值
+
+    # ---- S1.0Q: 撤退鼓励 (A2/A2v2) ----
+    k_retreat: float = 0.0                  # B0=0（不激活）; A2v2 改为 2.0
+    retreat_reward_clamp: float = 0.1       # 每步最大撤退奖励
+    retreat_window_size: int = 8            # A2v2: 撤退窗口长度（步数）
+
+    # ---- S1.0Q: Milestone 死区衰减 ----
+    milestone_dead_zone_scale: float = 1.0  # B0=1.0（不衰减）; A 组改为 0.0
+
+    # ---- S1.0Q: 插入进度门控 (B1) ----
+    ins_floor: float = 0.4                  # B0=0.4（原硬编码）; B1a 改为 0.1
+    ins_lat_gate_sigma: float = 1e6         # B0=无穷大（不生效）; B1b 改为 0.20
+
+    # ---- S1.0Q: 横向精调 (C1) ----
+    k_lat_fine: float = 0.0                 # B0=0（不激活）; C1 改为 0.8
+    lat_fine_sigma: float = 0.15            # 横向高斯尺度 (m)
+    lat_fine_ins_thresh: float = 0.05       # 激活门槛（归一化 insert_norm）
+
+    # ---- S1.0Q: 观测分辨率 (C2) ----
+    y_err_fine_scale: float = 0.20          # 精细横向归一化尺度 (m)
+    yaw_err_fine_scale_deg: float = 8.0     # 精细偏航归一化尺度 (°)
+
     # 失败早停
     early_stop_d_xy_max: float = 3.0
     early_stop_d_xy_steps: int = 30
@@ -188,6 +215,14 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     early_stop_stall_action_eps: float = 0.05
     rew_early_stop_fly: float = -2.0
     rew_early_stop_stall: float = -1.0
+
+    # ---- S1.0Q Batch-3: Dead-zone stuck detector ----
+    dz_stuck_ins_eps: float = 0.005         # insert_norm 变化阈值
+    dz_stuck_lat_eps: float = 0.005         # y_err 变化阈值 (m)
+    dz_stuck_steps: int = 99999             # 默认不激活; Exp4 改为 30
+    rew_early_stop_dz_stuck: float = -2.0   # 卡死 penalty
+    # ---- S1.0Q Batch-4: stuck detector 消融控制 ----
+    dz_stuck_early_done: bool = True        # False = penOnly（只给 penalty 不终止）
 
     # termination thresholds
     max_roll_pitch_rad: float = 0.45  # ~25 deg
