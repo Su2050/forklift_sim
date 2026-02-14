@@ -694,6 +694,24 @@ def analyze_and_output(episodes, experiment_name, output_dir, seed_list):
 # ==============================================================================
 # Main
 # ==============================================================================
+def _reseed_env(raw_env, seed_val):
+    """在同一环境内重新设置随机种子并强制全量 reset。
+
+    Isaac Sim 环境不支持在同一进程中多次 gym.make()，
+    因此我们通过重新设置 PyTorch 和 numpy 的随机状态来实现多 seed 评估。
+    初始位姿随机化（_reset_idx 中的 sample_uniform）使用 PyTorch 的 RNG。
+
+    注意: 必须在 inference_mode 内执行，因为 eval 循环中部分 tensor
+    已被标记为 inference tensor，_reset_idx 中的 inplace 更新需要同一上下文。
+    """
+    torch.manual_seed(seed_val)
+    np.random.seed(seed_val)
+    # 强制重置所有环境（在 inference_mode 内，避免 inplace update 冲突）
+    with torch.inference_mode():
+        all_ids = torch.arange(raw_env.num_envs, device=raw_env.device)
+        raw_env._reset_idx(all_ids)
+
+
 @hydra_task_config(args.task, args.agent)
 def main(env_cfg, agent_cfg):
     ckpt = args.checkpoint
@@ -702,6 +720,21 @@ def main(env_cfg, agent_cfg):
 
     env_cfg.scene.num_envs = args.num_envs
     env_cfg.sim.device = "cuda:0"
+    # 使用第一个 seed 创建环境（仅创建一次）
+    env_cfg.seed = SEED_LIST[0]
+    env = gym.make(args.task, cfg=env_cfg)
+    env_wrapped = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
+    raw_env = env.unwrapped
+    device = raw_env.device
+
+    print(f"[INFO] Experiment: {experiment_name}", flush=True)
+    print(f"[INFO] Loading checkpoint: {ckpt}", flush=True)
+    runner = OnPolicyRunner(env_wrapped, agent_cfg.to_dict(), log_dir=None, device="cuda:0")
+    runner.load(ckpt)
+    try:
+        policy_nn = runner.alg.policy
+    except AttributeError:
+        policy_nn = runner.alg.actor_critic
 
     all_episodes = []
 
@@ -710,20 +743,8 @@ def main(env_cfg, agent_cfg):
         print(f"[MULTI-SEED] Running seed {seed_val} ({seed_idx+1}/{len(SEED_LIST)})")
         print(f"{'='*70}")
 
-        env_cfg.seed = seed_val
-        env = gym.make(args.task, cfg=env_cfg)
-        env_wrapped = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
-        raw_env = env.unwrapped
-        device = raw_env.device
-
-        print(f"[INFO] Experiment: {experiment_name}, seed={seed_val}", flush=True)
-        print(f"[INFO] Loading checkpoint: {ckpt}", flush=True)
-        runner = OnPolicyRunner(env_wrapped, agent_cfg.to_dict(), log_dir=None, device="cuda:0")
-        runner.load(ckpt)
-        try:
-            policy_nn = runner.alg.policy
-        except AttributeError:
-            policy_nn = runner.alg.actor_critic
+        # 重新设置随机种子（不重建环境）
+        _reseed_env(raw_env, seed_val)
 
         t0 = _time.time()
         episodes = run_eval_single_seed(
@@ -731,10 +752,10 @@ def main(env_cfg, agent_cfg):
         )
         elapsed = _time.time() - t0
         print(f"[INFO] seed={seed_val} eval 耗时: {elapsed:.1f}s", flush=True)
-        env.close()
 
         all_episodes.extend(episodes)
 
+    env.close()
     print(f"\n[MULTI-SEED] 总计: {len(all_episodes)} episodes across {len(SEED_LIST)} seeds")
     analyze_and_output(all_episodes, experiment_name, output_dir, SEED_LIST)
 
