@@ -187,6 +187,14 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self._window_filled = torch.zeros((self.num_envs,), dtype=torch.bool, device=self.device)
         # S1.0Q: 横向精调 delta shaping 状态量
         self._prev_phi_lat = torch.zeros((self.num_envs,), device=self.device)
+        # S1.0S Phase-2: 举升里程碑 flags (10cm, 20cm)
+        self._milestone_lift_10cm = torch.zeros((self.num_envs,), dtype=torch.bool, device=self.device)
+        self._milestone_lift_20cm = torch.zeros((self.num_envs,), dtype=torch.bool, device=self.device)
+        # S1.0S Phase-R: 远场大横偏修正 delta shaping 状态量
+        self._prev_y_err_far = torch.zeros((self.num_envs,), device=self.device)
+        # S1.0S Phase-3: 全局进展停滞检测器
+        self._global_stall_counter = torch.zeros((self.num_envs,), dtype=torch.int32, device=self.device)
+        self._prev_phi_total_stall = torch.zeros((self.num_envs,), device=self.device)
 
         # ---- 派生常量 ----
         # S1.0h 修复：符号 + → -
@@ -832,7 +840,8 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         sp_obs = torch.sin(pallet_yaw)
         v_lat_obs = torch.stack([-sp_obs, cp_obs], dim=-1)
         y_signed_obs = torch.sum((root_pos[:, :2] - pallet_pos[:, :2]) * v_lat_obs, dim=-1)
-        y_err_obs = torch.clamp(y_signed_obs / 0.5, -1.0, 1.0)  # 归一化 + 硬 clip
+        # S1.0S Phase-0.5: 使用可配置尺度替代硬编码 0.5（消除 |y|>scale 时观测饱和）
+        y_err_obs = torch.clamp(y_signed_obs / self.cfg.y_err_obs_scale, -1.0, 1.0)
 
         dyaw_signed_obs = torch.atan2(torch.sin(yaw - pallet_yaw), torch.cos(yaw - pallet_yaw))
         yaw_err_obs = torch.clamp(dyaw_signed_obs / (15.0 * math.pi / 180.0), -1.0, 1.0)
@@ -1057,6 +1066,16 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
             milestone_reward
         )
 
+        # ---- S1.0S Phase-2: 举升里程碑（一次性触发）----
+        hit_lift_10cm = (lift_height >= 0.10) & (~self._milestone_lift_10cm)
+        hit_lift_20cm = (lift_height >= 0.20) & (~self._milestone_lift_20cm)
+        self._milestone_lift_10cm = self._milestone_lift_10cm | (lift_height >= 0.10)
+        self._milestone_lift_20cm = self._milestone_lift_20cm | (lift_height >= 0.20)
+        milestone_reward = milestone_reward + (
+            hit_lift_10cm.float() * self.cfg.rew_milestone_lift_10cm
+            + hit_lift_20cm.float() * self.cfg.rew_milestone_lift_20cm
+        )
+
         # ---- 失败早停计数（惩罚在 reward，终止在 dones）----
         fly_cond = d_xy > self.cfg.early_stop_d_xy_max
         self._fly_counter = torch.where(fly_cond, self._fly_counter + 1, torch.zeros_like(self._fly_counter))
@@ -1209,10 +1228,37 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         )
         self._prev_phi_lat = phi_lat.detach()
 
+        # ---- S1.0S Phase-R: 远场大横偏修正奖励 ----
+        # 仅在 y_err > 阈值 且 insert_norm < 阈值（还没开始插入）时激活
+        far_lat_active = (y_err > self.cfg.far_lat_y_thresh) & (insert_norm < self.cfg.far_lat_ins_thresh)
+        r_far_lat_fix = self.cfg.k_far_lat * far_lat_active.float() * torch.clamp(
+            self._prev_y_err_far - y_err, min=0.0
+        )
+        r_far_lat_fix = torch.where(self._is_first_step, torch.zeros_like(r_far_lat_fix), r_far_lat_fix)
+        self._prev_y_err_far = y_err.detach().clone()
+
+        # ---- S1.0S Phase-3: 全局进展停滞检测 ----
+        global_stall_cond = (
+            (~self._is_first_step)
+            & (torch.abs(phi_total - self._prev_phi_total_stall) < self.cfg.global_stall_phi_eps)
+        )
+        self._global_stall_counter = torch.where(
+            global_stall_cond,
+            self._global_stall_counter + 1,
+            torch.zeros_like(self._global_stall_counter)
+        )
+        pen_global_stall = torch.where(
+            self._global_stall_counter >= self.cfg.global_stall_steps,
+            torch.full_like(phi_total, self.cfg.rew_global_stall),
+            torch.zeros_like(phi_total)
+        )
+        self._prev_phi_total_stall = phi_total.detach().clone()
+
         # ---- 总奖励 ----
         rew = (r_pot + pen_premature + pen_dense + r_terminal + milestone_reward
                + r_hold_align + r_lift_progress + early_stop_penalty
-               + pen_dead_zone + r_retreat + r_lat_fine)
+               + pen_dead_zone + r_retreat + r_lat_fine
+               + r_far_lat_fix + pen_global_stall)
 
         # 清除首步标记
         self._is_first_step[:] = False
@@ -1243,6 +1289,9 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self.extras["log"]["s0/pen_dead_zone"] = pen_dead_zone.mean()
         self.extras["log"]["s0/r_retreat"] = r_retreat.mean()
         self.extras["log"]["s0/r_lat_fine"] = r_lat_fine.mean()
+        # S1.0S: 新增奖励分量日志
+        self.extras["log"]["s0/r_far_lat_fix"] = r_far_lat_fix.mean()
+        self.extras["log"]["s0/pen_global_stall"] = pen_global_stall.mean()
 
         # 门控权重
         self.extras["log"]["s0/w_band"] = w_band.mean()
@@ -1284,6 +1333,9 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         # S1.0M: 对齐里程碑日志
         self.extras["log"]["milestone/hit_fine_align"] = new_hits[:, 5].float().mean()
         self.extras["log"]["milestone/hit_precise_align"] = new_hits[:, 6].float().mean()
+        # S1.0S: 举升里程碑日志
+        self.extras["log"]["milestone/lift_10cm_frac"] = self._milestone_lift_10cm.float().mean()
+        self.extras["log"]["milestone/lift_20cm_frac"] = self._milestone_lift_20cm.float().mean()
 
         # 终止原因
         q = self.robot.data.root_quat_w
@@ -1402,6 +1454,14 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self._prev_insert_norm[env_ids] = 0.0
         self._prev_in_dead_zone[env_ids] = False
         self._prev_phi_lat[env_ids] = 0.0
+        # S1.0S Phase-2: 举升里程碑清零
+        self._milestone_lift_10cm[env_ids] = False
+        self._milestone_lift_20cm[env_ids] = False
+        # S1.0S Phase-R: 远场修正状态量清零
+        self._prev_y_err_far[env_ids] = 0.0
+        # S1.0S Phase-3: 全局停滞检测器清零
+        self._global_stall_counter[env_ids] = 0
+        self._prev_phi_total_stall[env_ids] = 0.0
         # S1.0Q-A2v2: 撤退窗口缓冲清零
         self._insert_norm_window[env_ids] = 0.0
         self._window_ptr[env_ids] = 0

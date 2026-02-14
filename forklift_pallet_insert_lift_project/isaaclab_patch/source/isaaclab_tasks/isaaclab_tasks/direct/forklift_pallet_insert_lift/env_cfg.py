@@ -192,10 +192,12 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     retreat_window_size: int = 8            # A2v2: 撤退窗口长度（步数）
 
     # ---- S1.0Q: Milestone 死区衰减 ----
-    milestone_dead_zone_scale: float = 1.0  # B0=1.0（不衰减）; A 组改为 0.0
+    # S1.0S: 锁定 A1 最佳配置为默认值（s1.0q 验证 milestone_dead_zone_scale=0.0 最优）
+    milestone_dead_zone_scale: float = 0.0  # S1.0S default: A1 验证最优
 
     # ---- S1.0Q: 插入进度门控 (B1) ----
-    ins_floor: float = 0.4                  # B0=0.4（原硬编码）; B1a 改为 0.1
+    # S1.0S: 锁定 B1a' 最佳配置为默认值（s1.0q 验证 ins_floor=0.2 最优）
+    ins_floor: float = 0.2                  # S1.0S default: B1a' 验证最优
     ins_lat_gate_sigma: float = 1e6         # B0=无穷大（不生效）; B1b 改为 0.20
 
     # ---- S1.0Q: 横向精调 (C1) ----
@@ -206,6 +208,11 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     # ---- S1.0Q: 观测分辨率 (C2) ----
     y_err_fine_scale: float = 0.20          # 精细横向归一化尺度 (m)
     yaw_err_fine_scale_deg: float = 8.0     # 精细偏航归一化尺度 (°)
+
+    # ---- S1.0S Phase-0.5: 初始位姿鲁棒性 ----
+    # 方案 B: y_err_obs 归一化尺度（原硬编码 0.5，|y|>0.5m 时观测饱和）
+    # 扩大到 0.8 消除 Y=[-0.6,+0.6] 范围内的观测饱和
+    y_err_obs_scale: float = 0.5            # 默认 0.5（原行为）; Phase-0.5 P1/P3 改为 0.8
 
     # 失败早停
     early_stop_d_xy_max: float = 3.0
@@ -223,6 +230,20 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     rew_early_stop_dz_stuck: float = -2.0   # 卡死 penalty
     # ---- S1.0Q Batch-4: stuck detector 消融控制 ----
     dz_stuck_early_done: bool = True        # False = penOnly（只给 penalty 不终止）
+
+    # ---- S1.0S Phase-2: 举升里程碑 ----
+    rew_milestone_lift_10cm: float = 3.0    # 首次 lift_height >= 0.10m
+    rew_milestone_lift_20cm: float = 5.0    # 首次 lift_height >= 0.20m
+
+    # ---- S1.0S Phase-R: 远场大横偏修正奖励 ----
+    k_far_lat: float = 0.0                  # 默认不激活; Phase-R 改为 2.0
+    far_lat_y_thresh: float = 0.4           # y_err 激活阈值 (m)
+    far_lat_ins_thresh: float = 0.1         # insert_norm 激活阈值（仅远场生效）
+
+    # ---- S1.0S Phase-3: 全局进展停滞检测器 ----
+    global_stall_phi_eps: float = 0.01      # phi_total 变化阈值
+    global_stall_steps: int = 99999         # 默认不激活; Phase-3 改为 120（约 4 秒）
+    rew_global_stall: float = -1.5          # 全局停滞 penalty
 
     # termination thresholds
     max_roll_pitch_rad: float = 0.45  # ~25 deg
