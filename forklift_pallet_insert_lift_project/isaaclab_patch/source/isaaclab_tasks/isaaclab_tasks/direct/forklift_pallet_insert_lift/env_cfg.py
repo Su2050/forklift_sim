@@ -78,7 +78,7 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     # 原 2/3 (1.44m) 阈值物理不可达。降低到 0.40 (0.864m)，留 15% 安全余量。
     # 详见 docs/diagnostic_reports/success_sanity_check_2026-02-10.md
     insert_fraction: float = 0.40
-    lift_delta_m: float = 0.12
+    lift_delta_m: float = 0.25
     # S1.0M: hold_time_s 从 1.0 降到 0.33（hold_steps: 30→~10）。
     # sanity check A2 显示即使理论成功位姿，hold_counter 最高 4/30 即断，
     # 物理抖动使 30 步连续保持几乎不可能。课程阶段先出 success 再收紧。
@@ -91,7 +91,7 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     # S1.0N: hold counter 全维度 Schmitt trigger（抗物理抖动）
     hysteresis_ratio: float = 1.2       # 对齐 exit 阈值 = entry × 1.2
     insert_exit_epsilon: float = 0.02   # 插入深度 exit 容差（与 insert_depth 同单位）
-    lift_exit_epsilon: float = 0.01     # 举升高度 exit 容差 (m)
+    lift_exit_epsilon: float = 0.02     # 举升高度 exit 容差 (m)
     # S1.0O-C2: hold counter 衰减（越界不清零，改为 *= decay）
     hold_counter_decay: float = 0.8
 
@@ -122,7 +122,7 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     yaw_scale2: float = 5.0  # S1.0M: 8→5，yaw 在 E2 中权重 0.94→1.50
     k_phi2: float = 10.0     # Stage2 势函数强度
     # S1.0M: 放宽 w_align2 门控。原 y_gate2=0.25 在 y≈0.25m 时 w_align2≈0.37（丢弃 63%）。
-    y_gate2: float = 0.40    # S1.0M: 0.25→0.40，信号保留翻倍
+    y_gate2: float = 0.60    # S1.0M: 0.25→0.40，信号保留翻倍
     yaw_gate2: float = 20.0  # S1.0M: 15→20
 
     # Stage 3: 插入深化
@@ -149,7 +149,7 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     premature_hard_thresh: float = 0.05    # insert_norm < 此值时全额惩罚
     premature_soft_thresh: float = 0.20    # insert_norm >= 此值时惩罚 → 0
     # S1.0O-A3: lift 进度 delta 势函数
-    k_lift_progress: float = 0.4           # lift delta shaping 权重
+    k_lift_progress: float = 0.8           # lift delta shaping 权重
     sigma_lift: float = 0.08               # lift 误差尺度 (m)
 
     # 常驻惩罚
@@ -212,7 +212,7 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     # ---- S1.0S Phase-0.5: 初始位姿鲁棒性 ----
     # 方案 B: y_err_obs 归一化尺度（原硬编码 0.5，|y|>0.5m 时观测饱和）
     # 扩大到 0.8 消除 Y=[-0.6,+0.6] 范围内的观测饱和
-    y_err_obs_scale: float = 0.5            # 默认 0.5（原行为）; Phase-0.5 P1/P3 改为 0.8
+    y_err_obs_scale: float = 0.8            # 默认 0.5（原行为）; Phase-0.5 P1/P3 改为 0.8
 
     # 失败早停
     early_stop_d_xy_max: float = 3.0
@@ -242,7 +242,7 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
 
     # ---- S1.0S Phase-3: 全局进展停滞检测器 ----
     global_stall_phi_eps: float = 0.01      # phi_total 变化阈值
-    global_stall_steps: int = 99999         # 默认不激活; Phase-3 改为 120（约 4 秒）
+    global_stall_steps: int = 120         # 默认不激活; Phase-3 改为 120（约 4 秒）
     rew_global_stall: float = -1.5          # 全局停滞 penalty
 
     # termination thresholds
