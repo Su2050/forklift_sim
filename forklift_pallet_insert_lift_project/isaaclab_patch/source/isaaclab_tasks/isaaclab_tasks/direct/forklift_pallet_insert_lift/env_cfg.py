@@ -78,7 +78,7 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     # 原 2/3 (1.44m) 阈值物理不可达。降低到 0.40 (0.864m)，留 15% 安全余量。
     # 详见 docs/diagnostic_reports/success_sanity_check_2026-02-10.md
     insert_fraction: float = 0.40
-    lift_delta_m: float = 0.25
+    lift_delta_m: float = 1.0      # S1.0T: 0.25→1.0（工业搬运标准）
     # S1.0M: hold_time_s 从 1.0 降到 0.33（hold_steps: 30→~10）。
     # sanity check A2 显示即使理论成功位姿，hold_counter 最高 4/30 即断，
     # 物理抖动使 30 步连续保持几乎不可能。课程阶段先出 success 再收紧。
@@ -91,7 +91,7 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     # S1.0N: hold counter 全维度 Schmitt trigger（抗物理抖动）
     hysteresis_ratio: float = 1.2       # 对齐 exit 阈值 = entry × 1.2
     insert_exit_epsilon: float = 0.02   # 插入深度 exit 容差（与 insert_depth 同单位）
-    lift_exit_epsilon: float = 0.02     # 举升高度 exit 容差 (m)
+    lift_exit_epsilon: float = 0.08     # S1.0T: 0.02→0.08 等比放大 (m)
     # S1.0O-C2: hold counter 衰减（越界不清零，改为 *= decay）
     hold_counter_decay: float = 0.8
 
@@ -234,6 +234,13 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     # ---- S1.0S Phase-2: 举升里程碑 ----
     rew_milestone_lift_10cm: float = 3.0    # 首次 lift_height >= 0.10m
     rew_milestone_lift_20cm: float = 5.0    # 首次 lift_height >= 0.20m
+
+    # ---- S1.0T: 高举升里程碑 ----
+    rew_milestone_lift_50cm: float = 6.0    # 首次 lift_height >= 0.50m
+    rew_milestone_lift_75cm: float = 8.0    # 首次 lift_height >= 0.75m
+
+    # ---- S1.0T: 观测归一化 ----
+    lift_pos_scale: float = 1.0             # obs 中 lift_pos /= scale（防止高举升 OOD）
 
     # ---- S1.0S Phase-R: 远场大横偏修正奖励 ----
     k_far_lat: float = 0.0                  # 默认不激活; Phase-R 改为 2.0

@@ -190,6 +190,9 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         # S1.0S Phase-2: 举升里程碑 flags (10cm, 20cm)
         self._milestone_lift_10cm = torch.zeros((self.num_envs,), dtype=torch.bool, device=self.device)
         self._milestone_lift_20cm = torch.zeros((self.num_envs,), dtype=torch.bool, device=self.device)
+        # S1.0T: 高举升里程碑 flags (50cm, 75cm)
+        self._milestone_lift_50cm = torch.zeros((self.num_envs,), dtype=torch.bool, device=self.device)
+        self._milestone_lift_75cm = torch.zeros((self.num_envs,), dtype=torch.bool, device=self.device)
         # S1.0S Phase-R: 远场大横偏修正 delta shaping 状态量
         self._prev_y_err_far = torch.zeros((self.num_envs,), device=self.device)
         # S1.0S Phase-3: 全局进展停滞检测器
@@ -852,7 +855,7 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
                 cos_dyaw.unsqueeze(-1), sin_dyaw.unsqueeze(-1),  # 2
                 v_xy_r,  # 2
                 yaw_rate,  # 1
-                lift_pos, lift_vel,  # 2
+                lift_pos / self.cfg.lift_pos_scale, lift_vel,  # 2  S1.0T: obs 归一化
                 insert_norm,  # 1
                 self.actions,  # 3
                 y_err_obs.unsqueeze(-1),    # 1 — S1.0N
@@ -1071,9 +1074,16 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         hit_lift_20cm = (lift_height >= 0.20) & (~self._milestone_lift_20cm)
         self._milestone_lift_10cm = self._milestone_lift_10cm | (lift_height >= 0.10)
         self._milestone_lift_20cm = self._milestone_lift_20cm | (lift_height >= 0.20)
+        # S1.0T: 高举升里程碑
+        hit_lift_50cm = (lift_height >= 0.50) & (~self._milestone_lift_50cm)
+        hit_lift_75cm = (lift_height >= 0.75) & (~self._milestone_lift_75cm)
+        self._milestone_lift_50cm = self._milestone_lift_50cm | (lift_height >= 0.50)
+        self._milestone_lift_75cm = self._milestone_lift_75cm | (lift_height >= 0.75)
         milestone_reward = milestone_reward + (
             hit_lift_10cm.float() * self.cfg.rew_milestone_lift_10cm
             + hit_lift_20cm.float() * self.cfg.rew_milestone_lift_20cm
+            + hit_lift_50cm.float() * self.cfg.rew_milestone_lift_50cm
+            + hit_lift_75cm.float() * self.cfg.rew_milestone_lift_75cm
         )
 
         # ---- 失败早停计数（惩罚在 reward，终止在 dones）----
@@ -1180,7 +1190,7 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self._prev_phi_align = phi_align.detach()
 
         # ---- S1.0O-A3: lift 进度 delta shaping ----
-        lift_target = self.cfg.lift_delta_m   # 0.12m
+        lift_target = self.cfg.lift_delta_m   # S1.0T: 1.0m
         lift_err = torch.abs(lift_height - lift_target)
         phi_lift_progress = torch.exp(-(lift_err / self.cfg.sigma_lift) ** 2)
         r_lift_progress = self.cfg.k_lift_progress * (phi_lift_progress - self._prev_phi_lift_progress)
@@ -1336,6 +1346,9 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         # S1.0S: 举升里程碑日志
         self.extras["log"]["milestone/lift_10cm_frac"] = self._milestone_lift_10cm.float().mean()
         self.extras["log"]["milestone/lift_20cm_frac"] = self._milestone_lift_20cm.float().mean()
+        # S1.0T: 高举升里程碑日志
+        self.extras["log"]["milestone/lift_50cm_frac"] = self._milestone_lift_50cm.float().mean()
+        self.extras["log"]["milestone/lift_75cm_frac"] = self._milestone_lift_75cm.float().mean()
 
         # 终止原因
         q = self.robot.data.root_quat_w
@@ -1457,6 +1470,9 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         # S1.0S Phase-2: 举升里程碑清零
         self._milestone_lift_10cm[env_ids] = False
         self._milestone_lift_20cm[env_ids] = False
+        # S1.0T: 高举升里程碑清零
+        self._milestone_lift_50cm[env_ids] = False
+        self._milestone_lift_75cm[env_ids] = False
         # S1.0S Phase-R: 远场修正状态量清零
         self._prev_y_err_far[env_ids] = 0.0
         # S1.0S Phase-3: 全局停滞检测器清零
