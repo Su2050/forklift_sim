@@ -1,0 +1,75 @@
+{
+  "experiment": "L_s20",
+  "n_seeds": 10,
+  "seeds": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10
+  ],
+  "n_episodes": 34684,
+  "success_rate_ep": 83.64,
+  "success_rate_ci_lo": 83.26,
+  "success_rate_ci_hi": 84.03,
+  "ep_reward_p50": 277.39,
+  "ep_reward_mean": 226.6,
+  "p50_ep_len": 381.0,
+  "p95_ep_len": 1079.0,
+  "mean_ep_len": 478.0,
+  "P_ever_near": 98.6,
+  "P_ever_deep": 94.45,
+  "P_ever_both_ok": 85.61,
+  "P_ever_grace": 83.74,
+  "P_ever_dead_zone": 12.61,
+  "P_dz_given_failed": 64.88,
+  "fail_step_share": 36.7,
+  "mean_fail_ep_len": 1072.0,
+  "timeout_frac": 16.24,
+  "lateral_near_p90": 0.306,
+  "yaw_near_p90": 5.67,
+  "success_per_1e6_steps": 1749.9,
+  "timeout_per_1e6_steps": 339.7,
+  "tier_stats": {
+    "easy": {
+      "n_episodes": 6379,
+      "frac": 0.1839176565563372,
+      "success_rate": 99.04,
+      "success_rate_ci_lo": 98.81,
+      "success_rate_ci_hi": 99.26
+    },
+    "medium": {
+      "n_episodes": 25052,
+      "frac": 0.7222926998039442,
+      "success_rate": 80.83,
+      "success_rate_ci_lo": 80.36,
+      "success_rate_ci_hi": 81.3
+    },
+    "hard": {
+      "n_episodes": 2664,
+      "frac": 0.07680774997116827,
+      "success_rate": 80.11,
+      "success_rate_ci_lo": 78.57,
+      "success_rate_ci_hi": 81.65
+    },
+    "extreme": {
+      "n_episodes": 589,
+      "frac": 0.01698189366855034,
+      "success_rate": 52.29,
+      "success_rate_ci_lo": 48.39,
+      "success_rate_ci_hi": 56.37
+    }
+  },
+  "success_gap_easy_hard": 18.93,
+  "success_rate_easy": 99.04,
+  "success_rate_hard": 80.11,
+  "success_rate_extreme": 52.29,
+  "lift_height_p50": 0.295,
+  "lift_height_p90": 0.376,
+  "lift_height_max": 1.97
+}

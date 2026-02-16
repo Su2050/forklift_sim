@@ -1,0 +1,368 @@
+{
+  "experiments": {
+    "B4_baseline": {
+      "n_episodes": 3722,
+      "n_timeout": 544,
+      "n_failed": 585,
+      "max_steps": 1079,
+      "mean_fail_ep_len": 1022,
+      "bootstrap_ci": {
+        "success_rate": {
+          "point": 84.28,
+          "ci_lo": 83.1,
+          "ci_hi": 85.41
+        },
+        "timeout_frac": {
+          "point": 14.62,
+          "ci_lo": 13.51,
+          "ci_hi": 15.72
+        },
+        "fail_step_share": {
+          "point": 35.94,
+          "ci_lo": 33.84,
+          "ci_hi": 38.01
+        },
+        "lateral_near_p90": {
+          "point": 0.306,
+          "ci_lo": 0.261,
+          "ci_hi": 0.33
+        },
+        "success_per_1e6_steps": {
+          "point": 1885.4,
+          "ci_lo": 1822.9,
+          "ci_hi": 1950.1
+        },
+        "timeout_per_1e6_steps": {
+          "point": 327.0,
+          "ci_lo": 307.6,
+          "ci_hi": 346.1
+        }
+      },
+      "failure_mode_split": {
+        "timeout_and_dz_count": 339,
+        "timeout_and_no_dz_count": 205,
+        "pct_timeout_dz_of_all": 9.11,
+        "pct_timeout_no_dz_of_all": 5.51,
+        "frac_timeout_with_dz": 62.3,
+        "frac_timeout_without_dz": 37.7
+      }
+    },
+    "B4_SD60": {
+      "n_episodes": 5139,
+      "n_timeout": 181,
+      "n_failed": 1152,
+      "max_steps": 1079,
+      "mean_fail_ep_len": 363,
+      "bootstrap_ci": {
+        "success_rate": {
+          "point": 77.58,
+          "ci_lo": 76.47,
+          "ci_hi": 78.71
+        },
+        "timeout_frac": {
+          "point": 3.52,
+          "ci_lo": 3.02,
+          "ci_hi": 4.03
+        },
+        "fail_step_share": {
+          "point": 23.61,
+          "ci_lo": 22.12,
+          "ci_hi": 25.14
+        },
+        "lateral_near_p90": {
+          "point": 0.419,
+          "ci_lo": 0.403,
+          "ci_hi": 0.431
+        },
+        "success_per_1e6_steps": {
+          "point": 2252.6,
+          "ci_lo": 2201.2,
+          "ci_hi": 2306.9
+        },
+        "timeout_per_1e6_steps": {
+          "point": 102.3,
+          "ci_lo": 88.6,
+          "ci_hi": 115.7
+        }
+      },
+      "failure_mode_split": {
+        "timeout_and_dz_count": 8,
+        "timeout_and_no_dz_count": 173,
+        "pct_timeout_dz_of_all": 0.16,
+        "pct_timeout_no_dz_of_all": 3.37,
+        "frac_timeout_with_dz": 4.4,
+        "frac_timeout_without_dz": 95.6
+      }
+    },
+    "B4_SD80": {
+      "n_episodes": 5038,
+      "n_timeout": 208,
+      "n_failed": 1143,
+      "max_steps": 1079,
+      "mean_fail_ep_len": 390,
+      "bootstrap_ci": {
+        "success_rate": {
+          "point": 77.31,
+          "ci_lo": 76.08,
+          "ci_hi": 78.48
+        },
+        "timeout_frac": {
+          "point": 4.13,
+          "ci_lo": 3.59,
+          "ci_hi": 4.66
+        },
+        "fail_step_share": {
+          "point": 25.3,
+          "ci_lo": 23.61,
+          "ci_hi": 26.95
+        },
+        "lateral_near_p90": {
+          "point": 0.434,
+          "ci_lo": 0.421,
+          "ci_hi": 0.445
+        },
+        "success_per_1e6_steps": {
+          "point": 2209.7,
+          "ci_lo": 2156.8,
+          "ci_hi": 2264.3
+        },
+        "timeout_per_1e6_steps": {
+          "point": 118.0,
+          "ci_lo": 103.6,
+          "ci_hi": 132.0
+        }
+      },
+      "failure_mode_split": {
+        "timeout_and_dz_count": 10,
+        "timeout_and_no_dz_count": 198,
+        "pct_timeout_dz_of_all": 0.2,
+        "pct_timeout_no_dz_of_all": 3.93,
+        "frac_timeout_with_dz": 4.8,
+        "frac_timeout_without_dz": 95.2
+      }
+    },
+    "B4_SD100": {
+      "n_episodes": 4904,
+      "n_timeout": 241,
+      "n_failed": 1103,
+      "max_steps": 1079,
+      "mean_fail_ep_len": 430,
+      "bootstrap_ci": {
+        "success_rate": {
+          "point": 77.51,
+          "ci_lo": 76.37,
+          "ci_hi": 78.65
+        },
+        "timeout_frac": {
+          "point": 4.91,
+          "ci_lo": 4.32,
+          "ci_hi": 5.51
+        },
+        "fail_step_share": {
+          "point": 27.08,
+          "ci_lo": 25.4,
+          "ci_hi": 28.77
+        },
+        "lateral_near_p90": {
+          "point": 0.429,
+          "ci_lo": 0.414,
+          "ci_hi": 0.444
+        },
+        "success_per_1e6_steps": {
+          "point": 2171.2,
+          "ci_lo": 2116.5,
+          "ci_hi": 2227.9
+        },
+        "timeout_per_1e6_steps": {
+          "point": 137.7,
+          "ci_lo": 122.3,
+          "ci_hi": 152.7
+        }
+      },
+      "failure_mode_split": {
+        "timeout_and_dz_count": 13,
+        "timeout_and_no_dz_count": 228,
+        "pct_timeout_dz_of_all": 0.27,
+        "pct_timeout_no_dz_of_all": 4.65,
+        "frac_timeout_with_dz": 5.4,
+        "frac_timeout_without_dz": 94.6
+      }
+    },
+    "B4_SD80_penOnly": {
+      "n_episodes": 3595,
+      "n_timeout": 584,
+      "n_failed": 603,
+      "max_steps": 1079,
+      "mean_fail_ep_len": 1059,
+      "bootstrap_ci": {
+        "success_rate": {
+          "point": 83.23,
+          "ci_lo": 82.0,
+          "ci_hi": 84.48
+        },
+        "timeout_frac": {
+          "point": 16.24,
+          "ci_lo": 15.02,
+          "ci_hi": 17.41
+        },
+        "fail_step_share": {
+          "point": 38.64,
+          "ci_lo": 36.47,
+          "ci_hi": 40.63
+        },
+        "lateral_near_p90": {
+          "point": 0.332,
+          "ci_lo": 0.324,
+          "ci_hi": 0.344
+        },
+        "success_per_1e6_steps": {
+          "point": 1810.5,
+          "ci_lo": 1746.4,
+          "ci_hi": 1877.3
+        },
+        "timeout_per_1e6_steps": {
+          "point": 353.4,
+          "ci_lo": 333.6,
+          "ci_hi": 371.9
+        }
+      },
+      "failure_mode_split": {
+        "timeout_and_dz_count": 370,
+        "timeout_and_no_dz_count": 214,
+        "pct_timeout_dz_of_all": 10.29,
+        "pct_timeout_no_dz_of_all": 5.95,
+        "frac_timeout_with_dz": 63.4,
+        "frac_timeout_without_dz": 36.6
+      }
+    },
+    "B4_SD80_doneOnly": {
+      "n_episodes": 4953,
+      "n_timeout": 225,
+      "n_failed": 1085,
+      "max_steps": 1079,
+      "mean_fail_ep_len": 411,
+      "bootstrap_ci": {
+        "success_rate": {
+          "point": 78.09,
+          "ci_lo": 76.88,
+          "ci_hi": 79.18
+        },
+        "timeout_frac": {
+          "point": 4.54,
+          "ci_lo": 3.98,
+          "ci_hi": 5.15
+        },
+        "fail_step_share": {
+          "point": 25.28,
+          "ci_lo": 23.59,
+          "ci_hi": 26.97
+        },
+        "lateral_near_p90": {
+          "point": 0.43,
+          "ci_lo": 0.411,
+          "ci_hi": 0.445
+        },
+        "success_per_1e6_steps": {
+          "point": 2193.0,
+          "ci_lo": 2140.3,
+          "ci_hi": 2245.4
+        },
+        "timeout_per_1e6_steps": {
+          "point": 127.6,
+          "ci_lo": 113.2,
+          "ci_hi": 143.1
+        }
+      },
+      "failure_mode_split": {
+        "timeout_and_dz_count": 10,
+        "timeout_and_no_dz_count": 215,
+        "pct_timeout_dz_of_all": 0.2,
+        "pct_timeout_no_dz_of_all": 4.34,
+        "frac_timeout_with_dz": 4.4,
+        "frac_timeout_without_dz": 95.6
+      }
+    }
+  },
+  "shadow_tradeoff": [
+    {
+      "threshold": 30,
+      "would_trigger_count": 351,
+      "false_positive_count": 14,
+      "false_positive_rate_pct": 0.38,
+      "n_dz_timeout": 339,
+      "coverage_count": 337,
+      "coverage_pct": 99.4,
+      "n_episodes": 3722
+    },
+    {
+      "threshold": 40,
+      "would_trigger_count": 350,
+      "false_positive_count": 13,
+      "false_positive_rate_pct": 0.35,
+      "n_dz_timeout": 339,
+      "coverage_count": 337,
+      "coverage_pct": 99.4,
+      "n_episodes": 3722
+    },
+    {
+      "threshold": 50,
+      "would_trigger_count": 348,
+      "false_positive_count": 12,
+      "false_positive_rate_pct": 0.32,
+      "n_dz_timeout": 339,
+      "coverage_count": 336,
+      "coverage_pct": 99.1,
+      "n_episodes": 3722
+    },
+    {
+      "threshold": 60,
+      "would_trigger_count": 340,
+      "false_positive_count": 7,
+      "false_positive_rate_pct": 0.19,
+      "n_dz_timeout": 339,
+      "coverage_count": 333,
+      "coverage_pct": 98.2,
+      "n_episodes": 3722
+    },
+    {
+      "threshold": 70,
+      "would_trigger_count": 339,
+      "false_positive_count": 6,
+      "false_positive_rate_pct": 0.16,
+      "n_dz_timeout": 339,
+      "coverage_count": 333,
+      "coverage_pct": 98.2,
+      "n_episodes": 3722
+    },
+    {
+      "threshold": 80,
+      "would_trigger_count": 337,
+      "false_positive_count": 6,
+      "false_positive_rate_pct": 0.16,
+      "n_dz_timeout": 339,
+      "coverage_count": 331,
+      "coverage_pct": 97.6,
+      "n_episodes": 3722
+    },
+    {
+      "threshold": 90,
+      "would_trigger_count": 335,
+      "false_positive_count": 4,
+      "false_positive_rate_pct": 0.11,
+      "n_dz_timeout": 339,
+      "coverage_count": 331,
+      "coverage_pct": 97.6,
+      "n_episodes": 3722
+    },
+    {
+      "threshold": 100,
+      "would_trigger_count": 335,
+      "false_positive_count": 4,
+      "false_positive_rate_pct": 0.11,
+      "n_dz_timeout": 339,
+      "coverage_count": 331,
+      "coverage_pct": 97.6,
+      "n_episodes": 3722
+    }
+  ]
+}

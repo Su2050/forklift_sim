@@ -70,7 +70,7 @@ class ExpertConfig:
     v_max: float = 0.95         # max forward command — near full speed
     v_min: float = 0.80         # strong forward drive is critical for Ackermann steering
     max_steer: float = 0.55     # (legacy, used only as fallback)
-    max_steer_far: float = 0.65  # steer limit when dist > 2.0m (room to correct)
+    max_steer_far: float = 0.80  # v7: full authority for Stanley in Approach
     max_steer_near: float = 0.40 # steer limit when dist < 0.8m (prevent overshoot)
     # v5-C: lat-dependent steer bonus (only when dist >= 0.8m)
     max_steer_lat_bonus_start: float = 0.4   # |lat| > this -> add bonus to eff_max_steer
@@ -90,7 +90,7 @@ class ExpertConfig:
     retreat_lat_thresh: float = 0.48    # near-saturated lat (metres)
     retreat_yaw_thresh: float = math.radians(35.0)  # large yaw
     retreat_dist_thresh: float = 1.0    # only retreat when < 1m to pallet front
-    retreat_target_dist: float = 2.5    # v7: increased from 1.8 for longer correction runway
+    retreat_target_dist: float = 2.8    # v7: balance runway vs env boundary (~3.0m limit)
     retreat_drive: float = -1.0         # full backward speed
     retreat_steer_gain: float = 0.50    # v5-B legacy (unused in v7 FSM)
     retreat_k_yaw: float = 0.30        # v5-B legacy (unused in v7 FSM)
@@ -98,7 +98,7 @@ class ExpertConfig:
     retreat_lat_sat: float = 0.75      # v5-B: lat at which retreat_lat_term saturates (was implicit 0.5)
     retreat_exit_lat_abs: float = 0.40 # v5-B: was 0.30 — abs lat threshold for alignment exit
     retreat_exit_yaw_max: float = math.radians(30)  # v5-B: yaw must also be OK to exit retreat
-    max_retreat_steps: int = 80         # hard cap per single retreat
+    max_retreat_steps: int = 150        # v7: generous safety cap for longer retreat
     retreat_cooldown: int = 80          # v7: reduced from 150 (FSM state-locking handles cycling)
 
     # ---- Insertion ----
@@ -142,20 +142,20 @@ class ExpertConfig:
     hard_wall: float = 0.2             # hard FSM boundary (dtc < this → FinalInsert or HardAbort)
 
     # ---- v7 FSM: Alignment thresholds (hysteresis) ----
-    final_lat_ok: float = 0.08         # strict entry to FinalInsert (metres)
-    final_yaw_ok: float = math.radians(5.0)   # strict entry to FinalInsert
-    abort_lat: float = 0.15            # loose exit from FinalInsert (metres)
-    abort_yaw: float = math.radians(10.0)     # loose exit from FinalInsert
+    final_lat_ok: float = 0.15         # entry to FinalInsert (relaxed from 0.08 after smoke test)
+    final_yaw_ok: float = math.radians(8.0)   # entry to FinalInsert (relaxed from 5deg)
+    abort_lat: float = 0.25            # loose exit from FinalInsert (> final_lat_ok)
+    abort_yaw: float = math.radians(15.0)     # loose exit from FinalInsert (> final_yaw_ok)
 
     # ---- v7 FSM: FinalInsert ----
     final_insert_drive: float = 0.50   # constant forward push in FinalInsert
 
     # ---- v7 FSM: HardAbort (Smart Retreat) ----
-    k_lat_rev: float = 0.50            # reverse steer lateral gain (POSITIVE: lat>0 → steer>0)
-    k_yaw_rev: float = 0.30            # reverse steer yaw gain (POSITIVE)
+    k_lat_rev: float = 1.50            # reverse steer lateral gain (POSITIVE: lat>0 → steer>0)
+    k_yaw_rev: float = 0.80            # reverse steer yaw gain (POSITIVE)
 
     # ---- v7 FSM: Stanley controller (A1+, unused in A0) ----
-    k_e: float = 3.0                   # crosstrack gain
+    k_e: float = 5.0                   # crosstrack gain (boosted for faster convergence)
     k_soft: float = 0.4                # low-speed protection
     k_steer: float = 1.667             # rad→normalised scaling (1/steer_angle_rad)
     steer_angle_rad: float = 0.6       # env steer angle in radians
@@ -374,6 +374,8 @@ class ForkliftExpertPolicy:
                 self._fsm_stage = "Approach"
                 self._retreat_cooldown_remaining = cfg.retreat_cooldown
                 self._retreat_steps = 0
+                self._prev_steer = 0.0
+                self._prev_throttle = 0.0
 
         elif self._fsm_stage == "Straighten":
             if abs(lat) > cfg.abort_lat or abs(yaw) > cfg.abort_yaw:
@@ -465,7 +467,12 @@ class ForkliftExpertPolicy:
                 abs(yaw) / max(cfg.yaw_ok, 1e-6),
             )
             misalign = _clip(misalign, 0.0, 3.0)
-            if dist < 1.5:
+
+            if dtc < cfg.pre_insert:
+                dtc_ratio = _clip(dtc / max(cfg.pre_insert, 1e-3), 0.3, 1.0)
+                speed_scale = dtc_ratio / (1.0 + 0.25 * misalign)
+                speed_scale = max(speed_scale, 0.30)
+            elif dist < 1.5:
                 speed_scale = 1.0 / (1.0 + 0.20 * misalign)
                 speed_scale = max(speed_scale, 0.65)
             else:

@@ -276,23 +276,23 @@ def test_fsm_final_insert_to_hard_abort_alignment():
 
 
 def test_fsm_hysteresis():
-    """Strict entry, loose exit: lat=0.10 should NOT trigger HardAbort from FinalInsert
-    (abort_lat=0.15), but lat=0.10 > final_lat_ok=0.08 would prevent entry."""
+    """Entry threshold < abort threshold: a value between them stays in FinalInsert."""
     cfg = ExpertConfig()
     assert cfg.final_lat_ok < cfg.abort_lat, (
         f"Hysteresis requires final_lat_ok({cfg.final_lat_ok}) < abort_lat({cfg.abort_lat})"
     )
+    mid_lat = (cfg.final_lat_ok + cfg.abort_lat) / 2.0
     policy = _make_policy()
     policy._fsm_stage = "FinalInsert"
     policy._prev_steer = 0.0
     dtc_target = cfg.hard_wall - 0.01
     dist_front = dtc_target + cfg.fork_length
-    obs = _make_obs_for_lat(lat_desired=0.10, dist_front=dist_front, insert_norm=0.3)
+    obs = _make_obs_for_lat(lat_desired=mid_lat, dist_front=dist_front, insert_norm=0.3)
     _, info = policy.act(obs)
     assert info["fsm_stage"] == "FinalInsert", (
-        f"lat=0.10 within hysteresis band should stay FinalInsert, got {info['fsm_stage']}"
+        f"lat={mid_lat:.3f} within hysteresis band should stay FinalInsert, got {info['fsm_stage']}"
     )
-    print(f"  PASS: FSM hysteresis — lat=0.10 stays in FinalInsert "
+    print(f"  PASS: FSM hysteresis — lat={mid_lat:.3f} stays in FinalInsert "
           f"(entry<{cfg.final_lat_ok}, exit>{cfg.abort_lat})")
 
 
