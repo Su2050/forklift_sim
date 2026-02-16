@@ -433,32 +433,14 @@ class ForkliftExpertPolicy:
             raw_steer = 0.0
 
         else:
-            # ---- Approach: PD steering (A0) ----
-            raw_steer = -(cfg.k_lat * lat + cfg.k_yaw * yaw
-                          + cfg.k_damp * yaw_rate)
+            # ---- Approach: Stanley steering (A1) ----
+            eff_max_steer = cfg.max_steer_far  # 0.80 in Approach
 
-            if dist < 1.0:
-                gain_scale = max(0.4, dist / 1.0)
-                raw_steer *= gain_scale
-
-            if abs(raw_steer) < cfg.deadband_steer:
-                raw_steer = 0.0
-
-            if dist > 2.0:
-                eff_max_steer = cfg.max_steer_far
-            elif dist < 0.8:
-                eff_max_steer = cfg.max_steer_near
-            else:
-                t = (dist - 0.8) / 1.2
-                eff_max_steer = (cfg.max_steer_near
-                                 + t * (cfg.max_steer_far - cfg.max_steer_near))
-
-            if dist >= 0.8 and abs(lat) > cfg.max_steer_lat_bonus_start:
-                lat_excess = abs(lat) - cfg.max_steer_lat_bonus_start
-                bonus = min(lat_excess * 0.2, cfg.max_steer_lat_bonus_max)
-                eff_max_steer += bonus
-
-            raw_steer = _clip(raw_steer, -eff_max_steer, eff_max_steer)
+            effective_v = max(abs(v_forward), 0.2)
+            crosstrack_term = math.atan2(cfg.k_e * lat, effective_v + cfg.k_soft)
+            delta_rad = yaw + crosstrack_term + cfg.k_damp * yaw_rate
+            raw_steer = _clip(-delta_rad * cfg.k_steer,
+                              -eff_max_steer, eff_max_steer)
 
             # ---- Approach: speed control ----
             v = _clip(cfg.k_dist * dist, cfg.v_min, cfg.v_max)
@@ -513,6 +495,7 @@ class ForkliftExpertPolicy:
             "steer": steer,
             "drive": drive,
             "lift": lift,
+            "eff_max_steer": eff_max_steer,
             "steer_sat_ratio": steer_sat_ratio,
             "abort_reason": self._abort_reason,
             "in_retreat": self._fsm_stage == "HardAbort",
