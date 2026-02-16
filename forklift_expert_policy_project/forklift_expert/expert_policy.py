@@ -388,13 +388,26 @@ class ForkliftExpertPolicy:
                 self._fsm_stage = "HardAbort"
                 self._abort_reason = "alignment_lost"
                 self._retreat_steps = 0
+                self._no_progress_count = 0
+            else:
+                ins_delta = insert_norm - self._prev_insert_norm
+                if ins_delta < cfg.no_progress_eps:
+                    self._no_progress_count += 1
+                    if self._no_progress_count >= cfg.no_progress_steps:
+                        self._fsm_stage = "HardAbort"
+                        self._abort_reason = "no_progress"
+                        self._retreat_steps = 0
+                        self._no_progress_count = 0
+                else:
+                    self._no_progress_count = 0
 
         elif self._fsm_stage == "Approach":
             if dtc <= cfg.hard_wall:
                 aligned = (abs(lat) < cfg.final_lat_ok
                            and abs(yaw) < cfg.final_yaw_ok)
                 if aligned:
-                    self._fsm_stage = "FinalInsert"
+                    self._fsm_stage = "Straighten"
+                    self._no_progress_count = 0
                 else:
                     self._fsm_stage = "HardAbort"
                     self._abort_reason = "pose_not_aligned"
@@ -470,6 +483,7 @@ class ForkliftExpertPolicy:
 
         self._prev_steer = steer
         self._prev_throttle = drive
+        self._prev_insert_norm = insert_norm
 
         action = self._build_action(drive=drive, steer=steer, lift=lift)
 
