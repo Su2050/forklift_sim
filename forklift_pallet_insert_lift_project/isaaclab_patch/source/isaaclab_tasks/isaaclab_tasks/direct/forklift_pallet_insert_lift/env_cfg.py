@@ -98,7 +98,7 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     # ===== 动作范围（[-1, 1] 的归一化动作会乘以下列缩放）=====
     wheel_speed_rad_s: float = 20.0
     steer_angle_rad: float = 0.6
-    lift_speed_m_s: float = 0.25
+    lift_speed_m_s: float = 0.5
 
     # ---------- S1.0k 奖励参数（三阶段势函数 + 严格几何） ----------
     # PPO 折扣因子（势函数 shaping 用）
@@ -149,8 +149,8 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     premature_hard_thresh: float = 0.05    # insert_norm < 此值时全额惩罚
     premature_soft_thresh: float = 0.20    # insert_norm >= 此值时惩罚 → 0
     # S1.0O-A3: lift 进度 delta 势函数
-    k_lift_progress: float = 0.8           # lift delta shaping 权重
-    sigma_lift: float = 0.08               # lift 误差尺度 (m)
+    k_lift_progress: float = 1.2           # lift delta shaping 权重
+    sigma_lift: float = 0.15               # lift 误差尺度 (m)
 
     # 常驻惩罚
     rew_action_l2: float = -0.01
