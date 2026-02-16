@@ -240,21 +240,26 @@ def test_fsm_straighten_to_hard_abort():
     print(f"  PASS: Straighten → HardAbort when lat=0.3 > abort_lat={cfg.abort_lat}")
 
 
-def test_fsm_final_insert_steer_zero():
-    """FinalInsert must produce steer=0 (blind push)."""
+def test_fsm_final_insert_steering():
+    """FinalInsert uses Stanley steering with reduced authority (max_steer_near)."""
     policy = _make_policy()
     policy._fsm_stage = "FinalInsert"
     policy._prev_steer = 0.0
     cfg = policy.cfg
     dtc_target = cfg.hard_wall - 0.01
     dist_front = dtc_target + cfg.fork_length
-    obs = _make_obs_for_lat(lat_desired=0.02, dist_front=dist_front, insert_norm=0.3)
+    obs = _make_obs_for_lat(lat_desired=0.10, dist_front=dist_front, insert_norm=0.3)
     _, info = policy.act(obs)
     assert info["fsm_stage"] == "FinalInsert"
-    assert info["raw_steer"] == 0.0, (
-        f"FinalInsert raw_steer must be 0, got {info['raw_steer']:.4f}"
+    assert abs(info["raw_steer"]) > 0.0, (
+        f"FinalInsert should steer to correct lat, got raw_steer={info['raw_steer']:.4f}"
     )
-    print(f"  PASS: FinalInsert steer=0 (blind push)")
+    assert abs(info["raw_steer"]) <= cfg.max_steer_near + 1e-6, (
+        f"FinalInsert steer must be capped at max_steer_near={cfg.max_steer_near}, "
+        f"got |raw_steer|={abs(info['raw_steer']):.4f}"
+    )
+    print(f"  PASS: FinalInsert uses Stanley steering |raw_steer|={abs(info['raw_steer']):.3f} "
+          f"(max={cfg.max_steer_near})")
 
 
 def test_fsm_final_insert_to_hard_abort_alignment():
@@ -520,7 +525,7 @@ def test_progress_resets_counter():
 # =====================================================================
 
 def test_dist_to_contact():
-    """dtc = max(dist_front - fork_length, 0)."""
+    """dtc = max(dist_front - fork_length, 0). With fork_length=0, dtc == dist_front."""
     policy = _make_policy()
     cfg = policy.cfg
 
@@ -531,14 +536,20 @@ def test_dist_to_contact():
     assert abs(info_far["dist_to_contact"] - expected_dtc) < 0.01, (
         f"dtc should be {expected_dtc:.3f}, got {info_far['dist_to_contact']:.3f}"
     )
+    if cfg.fork_length == 0.0:
+        assert abs(info_far["dist_to_contact"] - expected_dist_front) < 0.01, (
+            f"with fork_length=0, dtc should equal dist_front={expected_dist_front:.3f}"
+        )
 
     policy.reset()
-    obs_close = _make_obs(d_x=cfg.pallet_half_depth + cfg.fork_length - 0.1)
+    obs_close = _make_obs(d_x=cfg.pallet_half_depth + 0.1)
     _, info_close = policy.act(obs_close)
-    assert info_close["dist_to_contact"] == 0.0, (
-        f"dtc should be 0 when dist_front < fork_length, got {info_close['dist_to_contact']:.3f}"
+    expected_close_dtc = max(0.1 - cfg.fork_length, 0.0)
+    assert abs(info_close["dist_to_contact"] - expected_close_dtc) < 0.01, (
+        f"dtc should be {expected_close_dtc:.3f}, got {info_close['dist_to_contact']:.3f}"
     )
-    print(f"  PASS: dist_to_contact computation: far={info_far['dist_to_contact']:.3f}, close=0.0")
+    print(f"  PASS: dist_to_contact computation: far={info_far['dist_to_contact']:.3f}, "
+          f"close={info_close['dist_to_contact']:.3f}")
 
 
 # =====================================================================
@@ -576,7 +587,7 @@ def main():
         test_fsm_approach_to_hard_abort,
         test_fsm_straighten_to_final_insert,
         test_fsm_straighten_to_hard_abort,
-        test_fsm_final_insert_steer_zero,
+        test_fsm_final_insert_steering,
         test_fsm_final_insert_to_hard_abort_alignment,
         test_fsm_hysteresis,
         test_fsm_hard_abort_state_lock,

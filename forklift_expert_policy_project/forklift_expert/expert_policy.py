@@ -90,7 +90,7 @@ class ExpertConfig:
     retreat_lat_thresh: float = 0.48    # near-saturated lat (metres)
     retreat_yaw_thresh: float = math.radians(35.0)  # large yaw
     retreat_dist_thresh: float = 1.0    # only retreat when < 1m to pallet front
-    retreat_target_dist: float = 2.8    # v7: balance runway vs env boundary (~3.0m limit)
+    retreat_target_dist: float = 2.0    # v7: retreat to dist_front >= 2.0 (ample approach runway)
     retreat_drive: float = -1.0         # full backward speed
     retreat_steer_gain: float = 0.50    # v5-B legacy (unused in v7 FSM)
     retreat_k_yaw: float = 0.30        # v5-B legacy (unused in v7 FSM)
@@ -98,7 +98,7 @@ class ExpertConfig:
     retreat_lat_sat: float = 0.75      # v5-B: lat at which retreat_lat_term saturates (was implicit 0.5)
     retreat_exit_lat_abs: float = 0.40 # v5-B: was 0.30 — abs lat threshold for alignment exit
     retreat_exit_yaw_max: float = math.radians(30)  # v5-B: yaw must also be OK to exit retreat
-    max_retreat_steps: int = 150        # v7: generous safety cap for longer retreat
+    max_retreat_steps: int = 120        # v7: reasonable safety cap
     retreat_cooldown: int = 80          # v7: reduced from 150 (FSM state-locking handles cycling)
 
     # ---- Insertion ----
@@ -135,20 +135,21 @@ class ExpertConfig:
     insert_enter_stage: float = 0.15
 
     # ---- v7 FSM: Geometry ----
-    fork_length: float = 1.87          # fork length (metres)
+    fork_length: float = 0.0           # DISABLED: forks reach pallet at typical init dist,
+                                       # so dtc = dist_front (use dist_front thresholds directly)
 
-    # ---- v7 FSM: Distance thresholds ----
-    pre_insert: float = 0.5            # soft zone: tighten alignment but still Approach
-    hard_wall: float = 0.2             # hard FSM boundary (dtc < this → FinalInsert or HardAbort)
+    # ---- v7 FSM: Distance thresholds (dist_front space, since fork_length=0) ----
+    pre_insert: float = 0.80           # soft zone: tighten alignment when dist_front < 0.8m
+    hard_wall: float = 0.30            # hard FSM boundary (dist_front < this → FinalInsert or HardAbort)
 
     # ---- v7 FSM: Alignment thresholds (hysteresis) ----
-    final_lat_ok: float = 0.15         # entry to FinalInsert (relaxed from 0.08 after smoke test)
-    final_yaw_ok: float = math.radians(8.0)   # entry to FinalInsert (relaxed from 5deg)
-    abort_lat: float = 0.25            # loose exit from FinalInsert (> final_lat_ok)
-    abort_yaw: float = math.radians(15.0)     # loose exit from FinalInsert (> final_yaw_ok)
+    final_lat_ok: float = 0.15         # entry to FinalInsert
+    final_yaw_ok: float = math.radians(8.0)   # entry to FinalInsert
+    abort_lat: float = 0.30            # loose exit from FinalInsert (wider band)
+    abort_yaw: float = math.radians(20.0)     # loose exit from FinalInsert (wider band)
 
     # ---- v7 FSM: FinalInsert ----
-    final_insert_drive: float = 0.50   # constant forward push in FinalInsert
+    final_insert_drive: float = 0.80   # strong forward push (matching baseline ins_v_max)
 
     # ---- v7 FSM: HardAbort (Smart Retreat) ----
     k_lat_rev: float = 1.50            # reverse steer lateral gain (POSITIVE: lat>0 → steer>0)
@@ -445,7 +446,12 @@ class ForkliftExpertPolicy:
 
         elif self._fsm_stage == "FinalInsert":
             drive = cfg.final_insert_drive
-            raw_steer = 0.0
+            eff_max_steer = cfg.max_steer_near  # reduced authority in FinalInsert
+            effective_v = max(abs(v_forward), 0.2)
+            crosstrack_term = math.atan2(cfg.k_e * lat, effective_v + cfg.k_soft)
+            delta_rad = yaw + crosstrack_term + cfg.k_damp * yaw_rate
+            raw_steer = _clip(-delta_rad * cfg.k_steer,
+                              -eff_max_steer, eff_max_steer)
 
         else:
             # ---- Approach: Stanley steering (A1) ----
