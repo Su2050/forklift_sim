@@ -61,6 +61,23 @@ class ExpertConfig:
     # distance-to-front from distance-to-center.
     pallet_half_depth: float = 1.08
 
+    # ---- S1.0U: BBox / Fork Tip Geometry ----
+    # fork_forward_offset = 1.8667m measured from USD mesh (see
+    # docs/diagnostic_reports/success_sanity_check_2026-02-10.md L73).
+    # Rounded up to 1.87m for safety margin.
+    fork_reach: float = 1.87           # root to fork tip forward distance (m)
+    fork_tip_lat_ok: float = 0.10      # max fork tip lateral error at contact (m)
+
+    # ---- S1.0U: Pre-contact Safety Gates ----
+    hard_wall: float = 1.92            # absolute safety line = fork_reach + 5cm
+    hard_wall_hyst: float = 0.05       # Schmitt hysteresis for hard wall re-entry
+    pre_insert_dist: float = 2.40      # deceleration zone start (m)
+    bbox_abort_hold_steps: int = 8     # min steps to hold abort-triggered retreat
+
+    # ---- S1.0U: Contact boundary alignment (stricter than far-field) ----
+    final_lat_ok: float = 0.15         # max root lateral error at hard wall (m)
+    final_yaw_ok: float = 0.175        # max yaw error at hard wall (~10 deg)
+
     # ---- Docking (approach + align) ----
     k_lat: float = 1.1          # steering gain for lateral error — reduced from 1.5
                                 # to prevent lateral overshoot (stress-test: 26% drift pattern)
@@ -89,7 +106,7 @@ class ExpertConfig:
     # enough steps.  Retreat is a last resort for extreme cases.
     retreat_lat_thresh: float = 0.48    # near-saturated lat (metres)
     retreat_yaw_thresh: float = math.radians(35.0)  # large yaw
-    retreat_dist_thresh: float = 1.0    # only retreat when < 1m to pallet front
+    retreat_dist_thresh: float = 2.0    # S1.0U: 1.0 -> 2.0, cover pre-contact zone
     retreat_target_dist: float = 1.8    # was 2.5 → 1.5 too short → 1.8 compromise
     retreat_drive: float = -1.0         # full backward speed
     retreat_steer_gain: float = 0.50    # was 0.15 — strong proportional correction during retreat
@@ -175,6 +192,12 @@ class ForkliftExpertPolicy:
         self._retreat_entry_yaw: float = 0.0  # |yaw| when retreat started
         self._retreat_exit_reason: str = ""   # last exit reason for logging
 
+        # S1.0U: BBox abort state
+        self._bbox_abort_hold: int = 0       # remaining hold steps for abort retreat
+        self._bbox_abort_reason: str = ""    # last abort reason
+        self._bbox_abort_count: int = 0      # cumulative abort count (for logging)
+        self._passed_hard_wall: bool = False # Schmitt: once passed, use relaxed exit
+
         # Validate specs
         assert "fields" in self.obs_spec, "obs_spec missing 'fields'"
         assert "fields" in self.action_spec, "action_spec missing 'fields'"
@@ -211,6 +234,11 @@ class ForkliftExpertPolicy:
         self._retreat_entry_lat = 0.0
         self._retreat_entry_yaw = 0.0
         self._retreat_exit_reason = ""
+        # S1.0U
+        self._bbox_abort_hold = 0
+        self._bbox_abort_reason = ""
+        self._bbox_abort_count = 0
+        self._passed_hard_wall = False
 
     # -------------------------------------------------------------- helpers
     @staticmethod
@@ -319,13 +347,26 @@ class ForkliftExpertPolicy:
         # Unsaturated lateral signal from robot-frame d_y.
         lat_unsaturated = abs(s["d_y"])
 
+        # ---- S1.0U: Fork tip lateral projection ----
+        # Lever-arm effect: fork tip sweeps laterally when yaw != 0.
+        tip_lat = lat + cfg.fork_reach * math.sin(yaw)
+
+        # Dynamic safety corridor: narrows as forklift approaches contact.
+        safe_corridor = cfg.fork_tip_lat_ok + max(0.0, dist - cfg.fork_reach) * 0.4
+
+        # Is fork tip aligned at the contact boundary?
+        tip_aligned = abs(tip_lat) < cfg.fork_tip_lat_ok
+        body_aligned = abs(lat) < cfg.final_lat_ok and abs(yaw) < cfg.final_yaw_ok
+
         # ---- Stage decision (insertion) ----
+        # S1.0U: also require tip_lat alignment to enter insertion.
         in_insertion = False
         if cfg.use_insert_norm_for_stage:
             in_insertion = (
                 insert_norm >= cfg.insert_enter_stage
                 and abs(lat) < cfg.ins_stage_lat_gate
                 and abs(yaw) < cfg.ins_stage_yaw_gate
+                and abs(tip_lat) < cfg.fork_tip_lat_ok  # S1.0U
             )
         else:
             in_insertion = (
@@ -341,6 +382,37 @@ class ForkliftExpertPolicy:
                     self._backoff_countdown, cfg.backoff_steps
                 )
 
+        # ---- S1.0U: BBox collision prediction ----
+        # Decrement abort hold counter each step.
+        bbox_abort = False
+        if self._bbox_abort_hold > 0:
+            self._bbox_abort_hold -= 1
+            bbox_abort = True  # still in forced retreat from prior abort
+
+        if not in_insertion and not bbox_abort:
+            # Layer 1: Dynamic safety corridor check
+            if dist < cfg.pre_insert_dist and abs(tip_lat) > safe_corridor:
+                bbox_abort = True
+                self._bbox_abort_hold = cfg.bbox_abort_hold_steps
+                self._bbox_abort_reason = "corridor"
+                self._bbox_abort_count += 1
+
+            # Layer 2: Hard wall gate (Schmitt trigger)
+            # Use hysteresis: once passed inside hard_wall, must retreat
+            # past hard_wall + hyst before being allowed to re-enter.
+            wall_enter = cfg.hard_wall
+            wall_exit = cfg.hard_wall + cfg.hard_wall_hyst
+            if dist <= wall_enter:
+                self._passed_hard_wall = True
+            if self._passed_hard_wall:
+                if dist > wall_exit:
+                    self._passed_hard_wall = False
+                elif not (body_aligned and tip_aligned):
+                    bbox_abort = True
+                    self._bbox_abort_hold = cfg.bbox_abort_hold_steps
+                    self._bbox_abort_reason = "hard_wall"
+                    self._bbox_abort_count += 1
+
         # ---- Retreat trigger ----
         # Cooldown prevents rapid retreat-dock cycling that wastes steps.
         if self._retreat_cooldown_remaining > 0:
@@ -353,8 +425,11 @@ class ForkliftExpertPolicy:
             and self._retreat_cooldown_remaining <= 0
             and (abs(lat) >= cfg.retreat_lat_thresh
                  or abs(yaw) >= cfg.retreat_yaw_thresh)
-            # Removed: lat_unsaturated false-positive (d_y != true lateral error when yaw != 0)
         )
+
+        # S1.0U: bbox_abort also forces retreat (bypass cooldown).
+        if bbox_abort and not self._in_retreat:
+            need_retreat = True
 
         # ---- Compute steer (shared across non-retreat stages) ----
         # SIGN: positive lat (right offset) needs NEGATIVE steer (turn left)
@@ -384,6 +459,12 @@ class ForkliftExpertPolicy:
             lat_excess = abs(lat) - cfg.max_steer_lat_bonus_start
             bonus = min(lat_excess * 0.2, cfg.max_steer_lat_bonus_max)
             eff_max_steer += bonus
+
+        # S1.0U: tighten steer limit inside decel zone to reduce tip sweep rate
+        if dist < cfg.pre_insert_dist:
+            decel_t = _clip((cfg.pre_insert_dist - dist)
+                            / (cfg.pre_insert_dist - cfg.fork_reach), 0.0, 1.0)
+            eff_max_steer *= (1.0 - 0.4 * decel_t)  # shrink up to 40%
 
         raw_steer = _clip(raw_steer, -eff_max_steer, eff_max_steer)
 
@@ -415,6 +496,11 @@ class ForkliftExpertPolicy:
                 and abs(yaw) < cfg.retreat_exit_yaw_max     # v5-B: yaw must also be OK
                 and dist > 1.2                              # enough room to re-approach
             )
+
+            # S1.0U: if retreat was triggered by bbox_abort, also require
+            # tip_lat to be within corridor before allowing exit.
+            if self._bbox_abort_hold > 0:
+                alignment_improved = False  # force hold until counter expires
 
             # Determine exit reason
             if alignment_improved:
@@ -477,8 +563,6 @@ class ForkliftExpertPolicy:
                     else:
                         # Not aligned -- keep a meaningful creep speed so
                         # Ackermann steering can still correct the heading.
-                        # Stress-test showed 0.10 was too slow, causing
-                        # vf=0 in 60% of insertion steps.
                         drive = 0.30
 
             else:
@@ -488,6 +572,15 @@ class ForkliftExpertPolicy:
                 v = _clip(cfg.k_dist * dist, cfg.v_min, cfg.v_max)
                 if dist <= cfg.slow_dist:
                     v *= _clip(dist / max(cfg.slow_dist, 1e-3), 0.15, 1.0)
+
+                # S1.0U: deceleration zone — linearly reduce speed as
+                # forklift enters pre-contact region.
+                if dist < cfg.pre_insert_dist:
+                    decel_t = _clip((cfg.pre_insert_dist - dist)
+                                    / (cfg.pre_insert_dist - cfg.fork_reach),
+                                    0.0, 1.0)
+                    v_cap = cfg.v_max * (1.0 - 0.5 * decel_t)  # 0.95 -> ~0.475
+                    v = min(v, v_cap)
 
                 misalign = max(
                     abs(lat) / max(cfg.lat_ok, 1e-6),
@@ -539,5 +632,14 @@ class ForkliftExpertPolicy:
             "in_retreat": self._in_retreat,
             "retreat_steps": self._retreat_steps,
             "retreat_exit_reason": self._retreat_exit_reason,
+            # S1.0U: bbox safety diagnostics
+            "tip_lat": tip_lat,
+            "safe_corridor": safe_corridor,
+            "tip_aligned": tip_aligned,
+            "body_aligned": body_aligned,
+            "bbox_abort": bbox_abort,
+            "bbox_abort_reason": self._bbox_abort_reason,
+            "bbox_abort_count": self._bbox_abort_count,
+            "passed_hard_wall": self._passed_hard_wall,
         }
         return action, info

@@ -252,6 +252,24 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     global_stall_steps: int = 120         # 默认不激活; Phase-3 改为 120（约 4 秒）
     rew_global_stall: float = -1.5          # 全局停滞 penalty
 
+    # ---- S1.0U: Fork-tip alignment gate ----
+    # Adds tip_y_err (fork tip lateral error) to w_align2/w_align3 gates,
+    # distance-weighted so far-field training is unaffected.
+    fork_reach_m: float = 1.87              # root to fork tip forward distance (m)
+    tip_y_gate2: float = 0.50              # Stage2 fork tip lateral gate sigma (m)
+    tip_y_gate3: float = 0.20              # Stage3 fork tip lateral gate sigma (m)
+    tip_y_weight_dist_thresh: float = 2.5  # tip_y_err starts blending in below this dist (m)
+
+    # ---- S1.0U: Collision proximity penalty ----
+    k_tip_proximity_pen: float = 1.5       # proximity penalty weight
+    tip_prox_dist_thresh: float = 2.2      # only active when dist < this (m)
+    tip_prox_lat_thresh: float = 0.15      # tip_y_err dead-zone (m), no penalty below
+
+    # ---- S1.0U: Success/hold tip alignment consistency ----
+    tip_align_entry_m: float = 0.12        # tip_y_err <= this to enter hold (near-field)
+    tip_align_exit_m: float = 0.16         # Schmitt exit: tip_y_err > this breaks hold
+    tip_align_near_dist: float = 2.2       # tip constraint only active below this dist
+
     # termination thresholds
     max_roll_pitch_rad: float = 0.45  # ~25 deg
     max_time_s: float = episode_length_s
