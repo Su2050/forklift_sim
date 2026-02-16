@@ -152,9 +152,9 @@ def test_stanley_unit_scaling():
 
 
 def test_stanley_low_speed_protection():
-    """effective_v = max(|v_forward|, 0.2) prevents divergence at v=0.
-    Same lat/yaw at v=0 vs v=0.8 should produce different steer magnitudes.
-    Use small lat to avoid hitting eff_max_steer clamp."""
+    """Anti-scrubbing: at v=0, speed-steer coupling caps eff_max_steer to 0.10,
+    preventing tire-friction deadlock. At v=0.8, full steer authority is available.
+    This inverts the naive expectation: low speed → LESS steer (not more)."""
     p1 = _make_policy()
     obs_slow = _make_obs_for_lat(lat_desired=0.05, dist_front=3.0, v_forward=0.0)
     _, info_slow = p1.act(obs_slow)
@@ -165,13 +165,17 @@ def test_stanley_low_speed_protection():
 
     assert info_slow["fsm_stage"] == "Approach"
     assert info_fast["fsm_stage"] == "Approach"
-    assert abs(info_slow["raw_steer"]) > abs(info_fast["raw_steer"]), (
-        f"Low speed should produce stronger correction: "
-        f"|steer(v=0)|={abs(info_slow['raw_steer']):.3f} should > "
-        f"|steer(v=0.8)|={abs(info_fast['raw_steer']):.3f}"
+    assert abs(info_slow["raw_steer"]) <= 0.10 + 1e-6, (
+        f"At v=0, anti-scrubbing should cap |steer| to 0.10, "
+        f"got {abs(info_slow['raw_steer']):.3f}"
     )
-    print(f"  PASS: Stanley v=0 → |steer|={abs(info_slow['raw_steer']):.3f} > "
-          f"v=0.8 → |steer|={abs(info_fast['raw_steer']):.3f}")
+    assert abs(info_fast["raw_steer"]) > abs(info_slow["raw_steer"]), (
+        f"At v=0.8, steer should be uncapped and larger: "
+        f"|steer(v=0.8)|={abs(info_fast['raw_steer']):.3f} should > "
+        f"|steer(v=0)|={abs(info_slow['raw_steer']):.3f}"
+    )
+    print(f"  PASS: Anti-scrubbing: v=0 → |steer|={abs(info_slow['raw_steer']):.3f} (capped), "
+          f"v=0.8 → |steer|={abs(info_fast['raw_steer']):.3f} (full)")
 
 
 # =====================================================================
@@ -198,13 +202,13 @@ def test_fsm_approach_to_hard_abort():
     cfg = policy.cfg
     dtc_target = cfg.hard_wall - 0.01
     dist_front = dtc_target + cfg.fork_length
-    obs = _make_obs_for_lat(lat_desired=0.3, dist_front=dist_front)
+    obs = _make_obs_for_lat(lat_desired=0.35, dist_front=dist_front)
     _, info = policy.act(obs)
     assert info["fsm_stage"] == "HardAbort", (
         f"Misaligned at hard_wall should go to HardAbort, got {info['fsm_stage']}"
     )
     assert info["abort_reason"] == "pose_not_aligned"
-    print(f"  PASS: Approach → HardAbort when lat=0.3 at hard_wall")
+    print(f"  PASS: Approach → HardAbort when lat=0.35 > final_lat_ok={cfg.final_lat_ok}")
 
 
 def test_fsm_straighten_to_final_insert():
@@ -224,20 +228,20 @@ def test_fsm_straighten_to_final_insert():
 
 
 def test_fsm_straighten_to_hard_abort():
-    """Straighten → HardAbort when alignment lost."""
+    """Straighten → HardAbort when alignment lost (lat > abort_lat)."""
     policy = _make_policy()
     cfg = policy.cfg
     policy._fsm_stage = "Straighten"
     policy._prev_steer = 0.3
     dtc_target = cfg.hard_wall - 0.01
     dist_front = dtc_target + cfg.fork_length
-    obs = _make_obs_for_lat(lat_desired=0.3, dist_front=dist_front)
+    obs = _make_obs_for_lat(lat_desired=cfg.abort_lat + 0.05, dist_front=dist_front)
     _, info = policy.act(obs)
     assert info["fsm_stage"] == "HardAbort", (
         f"Straighten with large lat should go to HardAbort, got {info['fsm_stage']}"
     )
     assert info["abort_reason"] == "alignment_lost"
-    print(f"  PASS: Straighten → HardAbort when lat=0.3 > abort_lat={cfg.abort_lat}")
+    print(f"  PASS: Straighten → HardAbort when lat={cfg.abort_lat + 0.05:.2f} > abort_lat={cfg.abort_lat}")
 
 
 def test_fsm_final_insert_steering():

@@ -65,13 +65,14 @@ class ExpertConfig:
     k_lat: float = 1.1          # steering gain for lateral error — reduced from 1.5
                                 # to prevent lateral overshoot (stress-test: 26% drift pattern)
     k_yaw: float = 0.9          # steering gain for yaw error   — reduced from 1.2
-    k_damp: float = 0.20        # NEW: yaw-rate damping to suppress oscillation
+    k_damp: float = 0.35        # yaw-rate damping — raised from 0.20 to suppress
+                                # non-minimum-phase overshoot on rear-wheel steering
     k_dist: float = 0.6         # throttle gain for distance
     v_max: float = 0.95         # max forward command — near full speed
     v_min: float = 0.80         # strong forward drive is critical for Ackermann steering
     max_steer: float = 0.55     # (legacy, used only as fallback)
     max_steer_far: float = 0.80  # v7: full authority for Stanley in Approach
-    max_steer_near: float = 0.40 # steer limit when dist < 0.8m (prevent overshoot)
+    max_steer_near: float = 0.80 # FinalInsert steer: match Approach, rely on k_e=3.0 for natural limit
     # v5-C: lat-dependent steer bonus (only when dist >= 0.8m)
     max_steer_lat_bonus_start: float = 0.4   # |lat| > this -> add bonus to eff_max_steer
     max_steer_lat_bonus_max: float = 0.10    # cap: far limit goes from 0.65 to max 0.75
@@ -90,7 +91,7 @@ class ExpertConfig:
     retreat_lat_thresh: float = 0.48    # near-saturated lat (metres)
     retreat_yaw_thresh: float = math.radians(35.0)  # large yaw
     retreat_dist_thresh: float = 1.0    # only retreat when < 1m to pallet front
-    retreat_target_dist: float = 2.0    # v7: retreat to dist_front >= 2.0 (ample approach runway)
+    retreat_target_dist: float = 2.8    # retreat well above pre_insert to give 1.15m approach runway
     retreat_drive: float = -1.0         # full backward speed
     retreat_steer_gain: float = 0.50    # v5-B legacy (unused in v7 FSM)
     retreat_k_yaw: float = 0.30        # v5-B legacy (unused in v7 FSM)
@@ -139,25 +140,29 @@ class ExpertConfig:
                                        # so dtc = dist_front (use dist_front thresholds directly)
 
     # ---- v7 FSM: Distance thresholds (dist_front space, since fork_length=0) ----
-    pre_insert: float = 0.80           # soft zone: tighten alignment when dist_front < 0.8m
-    hard_wall: float = 0.30            # hard FSM boundary (dist_front < this → FinalInsert or HardAbort)
+    # D0 calibration: ins starts at dist_front≈1.83, body stabilises at ~1.60 during insertion
+    pre_insert: float = 2.00           # soft zone: slow down + tighten alignment (wider zone)
+    hard_wall: float = 1.65            # FSM gate: forks about to enter → FinalInsert or HardAbort
 
     # ---- v7 FSM: Alignment thresholds (hysteresis) ----
-    final_lat_ok: float = 0.15         # entry to FinalInsert
-    final_yaw_ok: float = math.radians(8.0)   # entry to FinalInsert
-    abort_lat: float = 0.30            # loose exit from FinalInsert (wider band)
-    abort_yaw: float = math.radians(20.0)     # loose exit from FinalInsert (wider band)
+    # Relaxed alignment gates: account for non-minimum-phase yaw increase during approach
+    final_lat_ok: float = 0.30         # entry to FinalInsert
+    final_yaw_ok: float = math.radians(18.0)  # entry to FinalInsert (0.314 rad)
+    abort_lat: float = 0.45            # loose exit from FinalInsert
+    abort_yaw: float = math.radians(30.0)     # loose exit from FinalInsert
 
     # ---- v7 FSM: FinalInsert ----
-    final_insert_drive: float = 0.80   # strong forward push (matching baseline ins_v_max)
+    final_insert_drive: float = 0.90   # strong push, but not max (avoid pushing pallet away)
 
     # ---- v7 FSM: HardAbort (Smart Retreat) ----
     k_lat_rev: float = 1.50            # reverse steer lateral gain (POSITIVE: lat>0 → steer>0)
     k_yaw_rev: float = 0.80            # reverse steer yaw gain (POSITIVE)
 
     # ---- v7 FSM: Stanley controller (A1+, unused in A0) ----
-    k_e: float = 5.0                   # crosstrack gain (boosted for faster convergence)
-    k_soft: float = 0.4                # low-speed protection
+    k_e: float = 3.0                   # crosstrack gain — reduced from 5.0 to prevent
+                                       # non-minimum-phase overshoot on rear-wheel steering
+    k_soft: float = 0.8                # low-speed protection — raised from 0.4 to reduce
+                                       # low-speed sensitivity (anti-scrubbing)
     k_steer: float = 1.667             # rad→normalised scaling (1/steer_angle_rad)
     steer_angle_rad: float = 0.6       # env steer angle in radians
 
@@ -165,8 +170,10 @@ class ExpertConfig:
     steer_straight_ok: float = 0.05    # |prev_steer| < this → wheels are straight
 
     # ---- v7 FSM: Progress detection (A2, unused in A0/A1) ----
-    no_progress_steps: int = 20        # consecutive steps without ins growth
-    no_progress_eps: float = 0.01      # min insert_norm delta to count as progress
+    # D0 calibration: per-step ins delta ≈ 0.003 during healthy insertion.
+    # Old eps=0.01 caused false abort after just 20 steps.
+    no_progress_steps: int = 60        # consecutive steps without ins growth
+    no_progress_eps: float = 0.001     # min per-step delta to count as progress
 
 
 # ---------------------------------------------------------------------------
@@ -446,7 +453,7 @@ class ForkliftExpertPolicy:
 
         elif self._fsm_stage == "FinalInsert":
             drive = cfg.final_insert_drive
-            eff_max_steer = cfg.max_steer_near  # reduced authority in FinalInsert
+            eff_max_steer = cfg.max_steer_near  # full authority: steer "wedge" overcomes friction
             effective_v = max(abs(v_forward), 0.2)
             crosstrack_term = math.atan2(cfg.k_e * lat, effective_v + cfg.k_soft)
             delta_rad = yaw + crosstrack_term + cfg.k_damp * yaw_rate
@@ -456,6 +463,11 @@ class ForkliftExpertPolicy:
         else:
             # ---- Approach: Stanley steering (A1) ----
             eff_max_steer = cfg.max_steer_far  # 0.80 in Approach
+
+            # Anti-scrubbing: limit steer authority by actual forward speed.
+            # Prevents tire-friction deadlock when v_forward ≈ 0.
+            speed_steer_cap = _clip(abs(v_forward) * 2.5, 0.10, cfg.max_steer_far)
+            eff_max_steer = min(eff_max_steer, speed_steer_cap)
 
             effective_v = max(abs(v_forward), 0.2)
             crosstrack_term = math.atan2(cfg.k_e * lat, effective_v + cfg.k_soft)
