@@ -90,16 +90,16 @@ class ExpertConfig:
     retreat_lat_thresh: float = 0.48    # near-saturated lat (metres)
     retreat_yaw_thresh: float = math.radians(35.0)  # large yaw
     retreat_dist_thresh: float = 1.0    # only retreat when < 1m to pallet front
-    retreat_target_dist: float = 1.8    # was 2.5 → 1.5 too short → 1.8 compromise
+    retreat_target_dist: float = 2.5    # v7: increased from 1.8 for longer correction runway
     retreat_drive: float = -1.0         # full backward speed
-    retreat_steer_gain: float = 0.50    # was 0.15 — strong proportional correction during retreat
-    retreat_k_yaw: float = 0.30        # NEW: yaw correction gain during retreat
-    retreat_max_steer: float = 0.90    # v5-B: was hardcoded 0.8 — clip limit for retreat steer
+    retreat_steer_gain: float = 0.50    # v5-B legacy (unused in v7 FSM)
+    retreat_k_yaw: float = 0.30        # v5-B legacy (unused in v7 FSM)
+    retreat_max_steer: float = 0.80    # v7: reduced from 0.90
     retreat_lat_sat: float = 0.75      # v5-B: lat at which retreat_lat_term saturates (was implicit 0.5)
     retreat_exit_lat_abs: float = 0.40 # v5-B: was 0.30 — abs lat threshold for alignment exit
     retreat_exit_yaw_max: float = math.radians(30)  # v5-B: yaw must also be OK to exit retreat
     max_retreat_steps: int = 80         # hard cap per single retreat
-    retreat_cooldown: int = 150         # was 80 — give docking more time to self-correct
+    retreat_cooldown: int = 80          # v7: reduced from 150 (FSM state-locking handles cycling)
 
     # ---- Insertion ----
     # Stress-test showed max_ins ≈ 0.43-0.48 even after 300+ insertion steps
@@ -130,9 +130,42 @@ class ExpertConfig:
     throttle_rate_limit: float = 0.50  # max delta-throttle per step — faster acceleration
     deadband_steer: float = 0.02
 
-    # ---- Stage heuristic ----
+    # ---- Stage heuristic (v5 legacy, unused by v7 FSM) ----
     use_insert_norm_for_stage: bool = True
-    insert_enter_stage: float = 0.15   # reverted from 0.05; premature entry caused pushing against pallet side
+    insert_enter_stage: float = 0.15
+
+    # ---- v7 FSM: Geometry ----
+    fork_length: float = 1.87          # fork length (metres)
+
+    # ---- v7 FSM: Distance thresholds ----
+    pre_insert: float = 0.5            # soft zone: tighten alignment but still Approach
+    hard_wall: float = 0.2             # hard FSM boundary (dtc < this → FinalInsert or HardAbort)
+
+    # ---- v7 FSM: Alignment thresholds (hysteresis) ----
+    final_lat_ok: float = 0.08         # strict entry to FinalInsert (metres)
+    final_yaw_ok: float = math.radians(5.0)   # strict entry to FinalInsert
+    abort_lat: float = 0.15            # loose exit from FinalInsert (metres)
+    abort_yaw: float = math.radians(10.0)     # loose exit from FinalInsert
+
+    # ---- v7 FSM: FinalInsert ----
+    final_insert_drive: float = 0.50   # constant forward push in FinalInsert
+
+    # ---- v7 FSM: HardAbort (Smart Retreat) ----
+    k_lat_rev: float = 0.50            # reverse steer lateral gain (POSITIVE: lat>0 → steer>0)
+    k_yaw_rev: float = 0.30            # reverse steer yaw gain (POSITIVE)
+
+    # ---- v7 FSM: Stanley controller (A1+, unused in A0) ----
+    k_e: float = 3.0                   # crosstrack gain
+    k_soft: float = 0.4                # low-speed protection
+    k_steer: float = 1.667             # rad→normalised scaling (1/steer_angle_rad)
+    steer_angle_rad: float = 0.6       # env steer angle in radians
+
+    # ---- v7 FSM: Straighten sub-phase (A2, unused in A0/A1) ----
+    steer_straight_ok: float = 0.05    # |prev_steer| < this → wheels are straight
+
+    # ---- v7 FSM: Progress detection (A2, unused in A0/A1) ----
+    no_progress_steps: int = 20        # consecutive steps without ins growth
+    no_progress_eps: float = 0.01      # min insert_norm delta to count as progress
 
 
 # ---------------------------------------------------------------------------
@@ -140,17 +173,18 @@ class ExpertConfig:
 # ---------------------------------------------------------------------------
 class ForkliftExpertPolicy:
     """
-    A rule-based expert policy.
+    A rule-based expert policy (v7: FSM architecture).
 
     It consumes the 15-D obs vector from the IsaacLab forklift env and emits
     a 3-D action vector ``[drive, steer, lift]``.
 
-    Stages
-    ------
-    * **Retreat**   : back up when too close + severely misaligned
-    * **Docking**   : align + approach to the pallet front
-    * **Insertion** : low-speed insertion with stricter alignment gates
-    * **Lift**      : lift after sufficient insertion depth
+    v7 FSM Stages
+    -------------
+    * **Approach**     : far-field alignment + approach (PD or Stanley steering)
+    * **Straighten**   : (A2) wheels straight before final push
+    * **FinalInsert**  : steer-blind constant push into pallet
+    * **HardAbort**    : Smart Retreat — backward + active steering correction
+    * **Lift**         : lift after sufficient insertion depth
     """
 
     def __init__(
@@ -165,15 +199,16 @@ class ForkliftExpertPolicy:
 
         self._prev_steer: float = 0.0
         self._prev_throttle: float = 0.0
-        self._backoff_countdown: int = 0
 
-        # Retreat state
-        self._in_retreat: bool = False
+        # v7 FSM state
+        self._fsm_stage: str = "Approach"
+        self._abort_reason: str = ""
         self._retreat_steps: int = 0
         self._retreat_cooldown_remaining: int = 0
-        self._retreat_entry_lat: float = 0.0  # |lat| when retreat started
-        self._retreat_entry_yaw: float = 0.0  # |yaw| when retreat started
-        self._retreat_exit_reason: str = ""   # last exit reason for logging
+
+        # v7 A2: progress detection (unused in A0/A1)
+        self._prev_insert_norm: float = 0.0
+        self._no_progress_count: int = 0
 
         # Validate specs
         assert "fields" in self.obs_spec, "obs_spec missing 'fields'"
@@ -204,13 +239,12 @@ class ForkliftExpertPolicy:
     def reset(self) -> None:
         self._prev_steer = 0.0
         self._prev_throttle = 0.0
-        self._backoff_countdown = 0
-        self._in_retreat = False
+        self._fsm_stage = "Approach"
+        self._abort_reason = ""
         self._retreat_steps = 0
         self._retreat_cooldown_remaining = 0
-        self._retreat_entry_lat = 0.0
-        self._retreat_entry_yaw = 0.0
-        self._retreat_exit_reason = ""
+        self._prev_insert_norm = 0.0
+        self._no_progress_count = 0
 
     # -------------------------------------------------------------- helpers
     @staticmethod
@@ -262,8 +296,11 @@ class ForkliftExpertPolicy:
         contact_flag = 0.0
         slip_flag    = 0.0
 
+        dist_to_contact = max(dist_front - self.cfg.fork_length, 0.0)
+
         return {
             "dist_front": dist_front,
+            "dist_to_contact": dist_to_contact,
             "dist_to_center": dist_to_center,
             "d_x": d_x,
             "d_y": d_y,
@@ -303,207 +340,143 @@ class ForkliftExpertPolicy:
 
     # --------------------------------------------------------------- main
     def act(self, obs: np.ndarray) -> Tuple[np.ndarray, Dict[str, Any]]:
-        """Compute expert action from a single 15-D observation."""
+        """Compute expert action from a single 15-D observation.
+
+        v7 FSM: Approach → (Straighten →) FinalInsert → Lift
+                 ↕ HardAbort ↔ Approach
+        """
         cfg = self.cfg
 
-        # ---- Decode obs into semantic fields ----
+        # ---- Decode obs ----
         s = self._decode_obs(obs)
         dist = s["dist_front"]
-        lat  = s["lat_true"]       # v5-A: use unsaturated pallet-frame lat
-        lat_clipped = s["lat_clipped"]  # for logging only
+        dtc  = s["dist_to_contact"]
+        lat  = s["lat_true"]
+        lat_clipped = s["lat_clipped"]
         yaw  = s["yaw_err"]
-        insert_norm  = s["insert_norm"]
-        contact_flag = s["contact_flag"]
-        slip_flag    = s["slip_flag"]
+        insert_norm = s["insert_norm"]
+        yaw_rate = s["yaw_rate"]
+        v_forward = s["v_forward"]
 
-        # Unsaturated lateral signal from robot-frame d_y.
-        lat_unsaturated = abs(s["d_y"])
-
-        # ---- Stage decision (insertion) ----
-        in_insertion = False
-        if cfg.use_insert_norm_for_stage:
-            in_insertion = (
-                insert_norm >= cfg.insert_enter_stage
-                and abs(lat) < cfg.ins_stage_lat_gate
-                and abs(yaw) < cfg.ins_stage_yaw_gate
-            )
-        else:
-            in_insertion = (
-                dist <= cfg.stop_dist + 0.05
-                and abs(lat) <= cfg.lat_ok * 1.5
-                and abs(yaw) <= cfg.yaw_ok * 1.5
-            )
-
-        # ---- Backoff trigger ----
-        if cfg.backoff_on_contact and (contact_flag > 0.5 or slip_flag > 0.5):
-            if in_insertion:
-                self._backoff_countdown = max(
-                    self._backoff_countdown, cfg.backoff_steps
-                )
-
-        # ---- Retreat trigger ----
-        # Cooldown prevents rapid retreat-dock cycling that wastes steps.
+        # ---- Cooldown tick ----
         if self._retreat_cooldown_remaining > 0:
             self._retreat_cooldown_remaining -= 1
 
-        need_retreat = (
-            not in_insertion
-            and insert_norm < cfg.lift_on_insert_norm
-            and dist < cfg.retreat_dist_thresh
-            and self._retreat_cooldown_remaining <= 0
-            and (abs(lat) >= cfg.retreat_lat_thresh
-                 or abs(yaw) >= cfg.retreat_yaw_thresh)
-            # Removed: lat_unsaturated false-positive (d_y != true lateral error when yaw != 0)
-        )
-
-        # ---- Compute steer (shared across non-retreat stages) ----
-        # SIGN: positive lat (right offset) needs NEGATIVE steer (turn left)
-        # PD controller: proportional on lat+yaw, derivative (damping) on yaw_rate
-        yaw_rate = s["yaw_rate"]
-        raw_steer = -(cfg.k_lat * lat + cfg.k_yaw * yaw + cfg.k_damp * yaw_rate)
-
-        # Fix C: near-distance gain decay to prevent overshoot
-        if dist < 1.0:
-            gain_scale = max(0.4, dist / 1.0)
-            raw_steer *= gain_scale
-
-        if abs(raw_steer) < cfg.deadband_steer:
-            raw_steer = 0.0
-
-        # Fix B: distance-adaptive steer limit (aggressive far, gentle near)
-        if dist > 2.0:
-            eff_max_steer = cfg.max_steer_far
-        elif dist < 0.8:
-            eff_max_steer = cfg.max_steer_near
-        else:
-            t = (dist - 0.8) / 1.2
-            eff_max_steer = cfg.max_steer_near + t * (cfg.max_steer_far - cfg.max_steer_near)
-
-        # v5-C: lat-dependent bonus (only when dist >= 0.8m to protect near-pallet)
-        if dist >= 0.8 and abs(lat) > cfg.max_steer_lat_bonus_start:
-            lat_excess = abs(lat) - cfg.max_steer_lat_bonus_start
-            bonus = min(lat_excess * 0.2, cfg.max_steer_lat_bonus_max)
-            eff_max_steer += bonus
-
-        raw_steer = _clip(raw_steer, -eff_max_steer, eff_max_steer)
-
-        # ---- Compute drive + lift + steer by stage ----
-        drive = 0.0
-        lift = 0.0
-        stage = "docking"
-
+        # ================================================================
+        # FSM state transitions  (priority order)
+        # ================================================================
         if insert_norm >= cfg.lift_on_insert_norm:
-            # -------- Lift stage --------
-            stage = "lift"
+            self._fsm_stage = "Lift"
+
+        elif self._fsm_stage == "HardAbort":
+            if (dist >= cfg.retreat_target_dist
+                    or self._retreat_steps >= cfg.max_retreat_steps):
+                self._fsm_stage = "Approach"
+                self._retreat_cooldown_remaining = cfg.retreat_cooldown
+                self._retreat_steps = 0
+
+        elif self._fsm_stage == "Straighten":
+            if abs(lat) > cfg.abort_lat or abs(yaw) > cfg.abort_yaw:
+                self._fsm_stage = "HardAbort"
+                self._abort_reason = "alignment_lost"
+                self._retreat_steps = 0
+            elif abs(self._prev_steer) < cfg.steer_straight_ok:
+                self._fsm_stage = "FinalInsert"
+
+        elif self._fsm_stage == "FinalInsert":
+            if abs(lat) > cfg.abort_lat or abs(yaw) > cfg.abort_yaw:
+                self._fsm_stage = "HardAbort"
+                self._abort_reason = "alignment_lost"
+                self._retreat_steps = 0
+
+        elif self._fsm_stage == "Approach":
+            if dtc <= cfg.hard_wall:
+                aligned = (abs(lat) < cfg.final_lat_ok
+                           and abs(yaw) < cfg.final_yaw_ok)
+                if aligned:
+                    self._fsm_stage = "FinalInsert"
+                else:
+                    self._fsm_stage = "HardAbort"
+                    self._abort_reason = "pose_not_aligned"
+                    self._retreat_steps = 0
+
+        # ================================================================
+        # Per-stage control
+        # ================================================================
+        drive = 0.0
+        raw_steer = 0.0
+        lift = 0.0
+        eff_max_steer = 1.0
+
+        if self._fsm_stage == "Lift":
             drive = 0.0
+            raw_steer = 0.0
             lift = cfg.lift_cmd
 
-        elif self._in_retreat or need_retreat:
-            # -------- Retreat stage --------
-            if not self._in_retreat:
-                self._in_retreat = True
-                self._retreat_steps = 0
-                self._retreat_entry_lat = abs(lat)
-                self._retreat_entry_yaw = abs(yaw)  # v5-B: record entry yaw
-                self._retreat_exit_reason = ""
-
-            # Exit conditions: alignment improved OR distance/step budget reached
-            # v5-B: added yaw constraint to prevent "early-exit + cooldown = drift"
-            alignment_improved = (
-                abs(lat) < self._retreat_entry_lat * 0.6   # lat improved 40%+
-                and abs(lat) < cfg.retreat_exit_lat_abs     # v5-B: was 0.30, now config (0.40)
-                and abs(yaw) < cfg.retreat_exit_yaw_max     # v5-B: yaw must also be OK
-                and dist > 1.2                              # enough room to re-approach
+        elif self._fsm_stage == "HardAbort":
+            drive = cfg.retreat_drive
+            eff_max_steer = cfg.retreat_max_steer
+            raw_steer = _clip(
+                cfg.k_lat_rev * lat + cfg.k_yaw_rev * yaw,
+                -eff_max_steer, eff_max_steer,
             )
+            self._retreat_steps += 1
+            if self._retreat_steps == 1:
+                self._prev_steer = raw_steer
 
-            # Determine exit reason
-            if alignment_improved:
-                retreat_done = True
-                self._retreat_exit_reason = "alignment"
-            elif dist >= cfg.retreat_target_dist:
-                retreat_done = True
-                self._retreat_exit_reason = "target_dist"
-            elif self._retreat_steps >= cfg.max_retreat_steps:
-                retreat_done = True
-                self._retreat_exit_reason = "max_steps"
+        elif self._fsm_stage == "Straighten":
+            drive = 0.0
+            raw_steer = 0.0
+
+        elif self._fsm_stage == "FinalInsert":
+            drive = cfg.final_insert_drive
+            raw_steer = 0.0
+
+        else:
+            # ---- Approach: PD steering (A0) ----
+            raw_steer = -(cfg.k_lat * lat + cfg.k_yaw * yaw
+                          + cfg.k_damp * yaw_rate)
+
+            if dist < 1.0:
+                gain_scale = max(0.4, dist / 1.0)
+                raw_steer *= gain_scale
+
+            if abs(raw_steer) < cfg.deadband_steer:
+                raw_steer = 0.0
+
+            if dist > 2.0:
+                eff_max_steer = cfg.max_steer_far
+            elif dist < 0.8:
+                eff_max_steer = cfg.max_steer_near
             else:
-                retreat_done = False
+                t = (dist - 0.8) / 1.2
+                eff_max_steer = (cfg.max_steer_near
+                                 + t * (cfg.max_steer_far - cfg.max_steer_near))
 
-            if retreat_done:
-                self._in_retreat = False
-                self._retreat_steps = 0
-                self._retreat_cooldown_remaining = cfg.retreat_cooldown
+            if dist >= 0.8 and abs(lat) > cfg.max_steer_lat_bonus_start:
+                lat_excess = abs(lat) - cfg.max_steer_lat_bonus_start
+                bonus = min(lat_excess * 0.2, cfg.max_steer_lat_bonus_max)
+                eff_max_steer += bonus
+
+            raw_steer = _clip(raw_steer, -eff_max_steer, eff_max_steer)
+
+            # ---- Approach: speed control ----
+            v = _clip(cfg.k_dist * dist, cfg.v_min, cfg.v_max)
+            if dist <= cfg.slow_dist:
+                v *= _clip(dist / max(cfg.slow_dist, 1e-3), 0.15, 1.0)
+
+            misalign = max(
+                abs(lat) / max(cfg.lat_ok, 1e-6),
+                abs(yaw) / max(cfg.yaw_ok, 1e-6),
+            )
+            misalign = _clip(misalign, 0.0, 3.0)
+            if dist < 1.5:
+                speed_scale = 1.0 / (1.0 + 0.20 * misalign)
+                speed_scale = max(speed_scale, 0.65)
             else:
-                stage = "retreat"
-                drive = cfg.retreat_drive
-                # v5-B: parameterised lat_term with retreat_lat_sat
-                # (decouples slope from saturation point)
-                retreat_lat_term = (
-                    math.copysign(min(abs(lat) / cfg.retreat_lat_sat, 1.0), lat)
-                    * cfg.retreat_steer_gain
-                )
-                retreat_yaw_term = yaw * cfg.retreat_k_yaw
-                retreat_steer = retreat_lat_term + retreat_yaw_term
-                raw_steer = _clip(retreat_steer,
-                                  -cfg.retreat_max_steer, cfg.retreat_max_steer)
-                self._retreat_steps += 1
-
-                # v5-B: skip steer rate_limit on first retreat step
-                # to eliminate ~3-step ramp-up delay
-                if self._retreat_steps == 1:
-                    self._prev_steer = raw_steer
-
-        if stage not in ("lift", "retreat"):
-            if in_insertion:
-                # -------- Insertion stage --------
-                stage = "insertion"
-
-                if self._backoff_countdown > 0:
-                    drive = cfg.backoff_throttle
-                    self._backoff_countdown -= 1
-                else:
-                    aligned = (
-                        abs(lat) <= cfg.ins_lat_ok
-                        and abs(yaw) <= cfg.ins_yaw_ok
-                    )
-                    if aligned:
-                        base = cfg.ins_v_max
-                        slow = 1.0
-                        if dist <= cfg.slow_dist:
-                            slow = _clip(
-                                dist / max(cfg.slow_dist, 1e-3), 0.2, 1.0
-                            )
-                        drive = _clip(base * slow, cfg.ins_v_min, cfg.ins_v_max)
-                    else:
-                        # Not aligned -- keep a meaningful creep speed so
-                        # Ackermann steering can still correct the heading.
-                        # Stress-test showed 0.10 was too slow, causing
-                        # vf=0 in 60% of insertion steps.
-                        drive = 0.30
-
-            else:
-                # -------- Docking stage --------
-                stage = "docking"
-
-                v = _clip(cfg.k_dist * dist, cfg.v_min, cfg.v_max)
-                if dist <= cfg.slow_dist:
-                    v *= _clip(dist / max(cfg.slow_dist, 1e-3), 0.15, 1.0)
-
-                misalign = max(
-                    abs(lat) / max(cfg.lat_ok, 1e-6),
-                    abs(yaw) / max(cfg.yaw_ok, 1e-6),
-                )
-                misalign = _clip(misalign, 0.0, 3.0)
-                # Stronger speed reduction when CLOSE and misaligned
-                # to prevent overshooting the pallet.  When far away,
-                # keep speed high so steering has room to correct.
-                if dist < 1.5:
-                    speed_scale = 1.0 / (1.0 + 0.20 * misalign)
-                    speed_scale = max(speed_scale, 0.65)
-                else:
-                    speed_scale = 1.0 / (1.0 + 0.08 * misalign)
-                    speed_scale = max(speed_scale, 0.90)
-                drive = v * speed_scale
+                speed_scale = 1.0 / (1.0 + 0.08 * misalign)
+                speed_scale = max(speed_scale, 0.90)
+            drive = v * speed_scale
 
         # ---- Rate-limit for smoothness ----
         steer = self._rate_limit(
@@ -518,26 +491,32 @@ class ForkliftExpertPolicy:
 
         action = self._build_action(drive=drive, steer=steer, lift=lift)
 
+        steer_sat_ratio = (abs(raw_steer) / max(eff_max_steer, 1e-6)
+                           if eff_max_steer > 0 else 0.0)
+
         info = {
-            "stage": stage,
+            "stage": self._fsm_stage,
+            "fsm_stage": self._fsm_stage,
             "dist_front": dist,
+            "dist_to_contact": dtc,
             "dist_to_center": s["dist_to_center"],
             "d_x": s["d_x"],
             "d_y": s["d_y"],
-            "lat": lat,              # lat_true (unsaturated, for control)
-            "lat_clipped": lat_clipped,  # y_err_obs * 0.5 (for comparison)
+            "lat": lat,
+            "lat_clipped": lat_clipped,
             "yaw": yaw,
             "insert_norm": insert_norm,
-            "v_forward": s["v_forward"],
-            "contact_flag": contact_flag,
-            "slip_flag": slip_flag,
+            "v_forward": v_forward,
+            "contact_flag": s["contact_flag"],
+            "slip_flag": s["slip_flag"],
             "raw_steer": raw_steer,
             "steer": steer,
             "drive": drive,
             "lift": lift,
-            "backoff_countdown": self._backoff_countdown,
-            "in_retreat": self._in_retreat,
+            "steer_sat_ratio": steer_sat_ratio,
+            "abort_reason": self._abort_reason,
+            "in_retreat": self._fsm_stage == "HardAbort",
             "retreat_steps": self._retreat_steps,
-            "retreat_exit_reason": self._retreat_exit_reason,
+            "retreat_cooldown": self._retreat_cooldown_remaining,
         }
         return action, info
