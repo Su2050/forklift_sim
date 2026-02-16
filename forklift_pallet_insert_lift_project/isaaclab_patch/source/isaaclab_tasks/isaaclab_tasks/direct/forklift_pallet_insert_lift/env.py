@@ -1069,16 +1069,32 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
             milestone_reward
         )
 
-        # ---- S1.0S Phase-2: 举升里程碑（一次性触发）----
-        hit_lift_10cm = (lift_height >= 0.10) & (~self._milestone_lift_10cm)
-        hit_lift_20cm = (lift_height >= 0.20) & (~self._milestone_lift_20cm)
-        self._milestone_lift_10cm = self._milestone_lift_10cm | (lift_height >= 0.10)
-        self._milestone_lift_20cm = self._milestone_lift_20cm | (lift_height >= 0.20)
-        # S1.0T: 高举升里程碑
-        hit_lift_50cm = (lift_height >= 0.50) & (~self._milestone_lift_50cm)
-        hit_lift_75cm = (lift_height >= 0.75) & (~self._milestone_lift_75cm)
-        self._milestone_lift_50cm = self._milestone_lift_50cm | (lift_height >= 0.50)
-        self._milestone_lift_75cm = self._milestone_lift_75cm | (lift_height >= 0.75)
+        # ---- S1.0T-fix: 举升里程碑（插入门控 + 阈值穿越触发）----
+        # 必须在叉齿插入后、且高度从下方穿越阈值时才触发，防止空举刷分。
+        # delta_lift 在 L947 已计算（用旧 _last_lift_pos），此处可安全回推 prev。
+        prev_lift_height = lift_height - delta_lift
+        lift_milestone_gate = insert_norm >= self.cfg.insert_gate_norm  # 0.35
+        hit_lift_10cm = (
+            (prev_lift_height < 0.10) & (lift_height >= 0.10)
+            & lift_milestone_gate & (~self._milestone_lift_10cm)
+        )
+        hit_lift_20cm = (
+            (prev_lift_height < 0.20) & (lift_height >= 0.20)
+            & lift_milestone_gate & (~self._milestone_lift_20cm)
+        )
+        self._milestone_lift_10cm |= hit_lift_10cm
+        self._milestone_lift_20cm |= hit_lift_20cm
+        # S1.0T: 高举升里程碑（同样需要插入门控 + 穿越）
+        hit_lift_50cm = (
+            (prev_lift_height < 0.50) & (lift_height >= 0.50)
+            & lift_milestone_gate & (~self._milestone_lift_50cm)
+        )
+        hit_lift_75cm = (
+            (prev_lift_height < 0.75) & (lift_height >= 0.75)
+            & lift_milestone_gate & (~self._milestone_lift_75cm)
+        )
+        self._milestone_lift_50cm |= hit_lift_50cm
+        self._milestone_lift_75cm |= hit_lift_75cm
         milestone_reward = milestone_reward + (
             hit_lift_10cm.float() * self.cfg.rew_milestone_lift_10cm
             + hit_lift_20cm.float() * self.cfg.rew_milestone_lift_20cm
@@ -1189,13 +1205,16 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         r_hold_align = torch.where(self._is_first_step, torch.zeros_like(r_hold_align), r_hold_align)
         self._prev_phi_align = phi_align.detach()
 
-        # ---- S1.0O-A3: lift 进度 delta shaping ----
+        # ---- S1.0T-fix: lift 进度 delta shaping（门控势函数差分）----
+        # 用 w_lift_base 门控原始势函数后再做差分，防止空举获得 lift progress 奖励，
+        # 并保持 potential-difference 语义连续（避免门控开关瞬间产生伪脉冲）。
         lift_target = self.cfg.lift_delta_m   # S1.0T: 1.0m
         lift_err = torch.abs(lift_height - lift_target)
-        phi_lift_progress = torch.exp(-(lift_err / self.cfg.sigma_lift) ** 2)
-        r_lift_progress = self.cfg.k_lift_progress * (phi_lift_progress - self._prev_phi_lift_progress)
+        phi_lift_progress_raw = torch.exp(-(lift_err / self.cfg.sigma_lift) ** 2)
+        phi_lift_progress_gated = w_lift_base * phi_lift_progress_raw
+        r_lift_progress = self.cfg.k_lift_progress * (phi_lift_progress_gated - self._prev_phi_lift_progress)
         r_lift_progress = torch.where(self._is_first_step, torch.zeros_like(r_lift_progress), r_lift_progress)
-        self._prev_phi_lift_progress = phi_lift_progress.detach()
+        self._prev_phi_lift_progress = phi_lift_progress_gated.detach()
 
         # ---- S1.0Q-A1: 深插死区惩罚 ----
         dead_zone = (insert_norm > self.cfg.dead_zone_insert_thresh) & \
