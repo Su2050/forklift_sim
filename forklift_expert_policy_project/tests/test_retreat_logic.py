@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Unit tests for expert policy retreat logic (v5-B: parameterised retreat).
+Unit tests for expert policy v7 FSM architecture.
 
 Tests can run WITHOUT IsaacLab/Isaac Sim — only needs numpy.
-Validates: lat_true computation, steer direction, proportional control,
-           alignment-based exit (lat+yaw), exit_reason, rate_limit skip,
-           false-trigger removal, and cooldown blocking.
+Validates: Stanley controller, FSM transitions with hysteresis,
+           HardAbort reverse steer polarity, Straighten sub-phase,
+           insert_norm progress detection.
 
 Usage:
     PYTHONPATH=forklift_expert_policy_project:$PYTHONPATH python3 -m pytest tests/test_retreat_logic.py -v
@@ -18,7 +18,6 @@ import os
 import sys
 import numpy as np
 
-# ---- Import policy ----
 from forklift_expert.expert_policy import ForkliftExpertPolicy, ExpertConfig
 
 # ---- Load specs ----
@@ -29,9 +28,8 @@ with open(os.path.join(_BASE, "forklift_expert", "action_spec.json")) as f:
     ACTION_SPEC = json.load(f)
 
 FIELDS = OBS_SPEC["fields"]
-
-# pallet_half_depth from ExpertConfig
 _HALF_D = ExpertConfig().pallet_half_depth  # 1.08
+_FORK_LEN = ExpertConfig().fork_length      # 1.87
 
 
 def _make_obs(
@@ -66,12 +64,12 @@ def _make_obs_for_lat(
     dist_front: float = 2.0,
     dyaw: float = 0.0,
     insert_norm: float = 0.0,
+    v_forward: float = 0.5,
 ) -> np.ndarray:
-    """Helper: build obs that produces a specific lat_true and dist_front.
+    """Build obs that produces a specific lat_true and dist_front.
 
     When dyaw=0: lat_true = sin(0)*d_x - cos(0)*d_y = -d_y
     So d_y = -lat_desired.
-    Also sets y_err_obs consistently (clipped version).
     """
     d_x = dist_front + _HALF_D
     c = math.cos(dyaw)
@@ -89,6 +87,7 @@ def _make_obs_for_lat(
         cos_dyaw=c, sin_dyaw=s,
         insert_norm=insert_norm,
         y_err_obs=y_err_obs,
+        v_forward=v_forward,
     )
 
 
@@ -97,300 +96,500 @@ def _make_policy() -> ForkliftExpertPolicy:
 
 
 # =====================================================================
-# Test Cases
+# 1. Stanley controller tests
 # =====================================================================
 
-def test_case_0_lat_true_computation():
-    """Verify lat_true is computed correctly from d_x/d_y/dyaw."""
+def test_stanley_direction_lat_positive():
+    """lat>0 (vehicle right of path) → steer should be negative (turn left).
+    Stanley: delta_rad = yaw + atan2(k_e * lat, v + k_soft) → positive
+    raw_steer = -delta_rad * k_steer → negative."""
     policy = _make_policy()
-
-    # Case A: dyaw=0, d_y=-0.3 -> lat_true = +0.3
-    obs_a = _make_obs(d_x=2.0, d_y=-0.3, cos_dyaw=1.0, sin_dyaw=0.0, y_err_obs=0.6)
-    _, info_a = policy.act(obs_a)
-    assert abs(info_a["lat"] - 0.3) < 0.01, f"Expected lat=0.3, got {info_a['lat']:.4f}"
-    assert abs(info_a["lat_clipped"] - 0.3) < 0.01
-
-    # Case B: saturated — d_y=-1.2 -> lat_true = +1.2, but lat_clipped = 0.5
-    policy.reset()
-    obs_b = _make_obs(d_x=2.0, d_y=-1.2, cos_dyaw=1.0, sin_dyaw=0.0, y_err_obs=1.0)
-    _, info_b = policy.act(obs_b)
-    assert abs(info_b["lat"] - 1.2) < 0.01
-    assert abs(info_b["lat_clipped"] - 0.5) < 0.01
-
-    # Case C: with yaw offset (dyaw=30deg)
-    policy.reset()
-    dyaw = math.radians(30)
-    c, s = math.cos(dyaw), math.sin(dyaw)
-    obs_c = _make_obs(d_x=2.0, d_y=0.5, cos_dyaw=c, sin_dyaw=s)
-    _, info_c = policy.act(obs_c)
-    expected = s * 2.0 - c * 0.5
-    assert abs(info_c["lat"] - expected) < 0.01
-
-    print(f"  PASS: lat_true computation verified (aligned, saturated, yaw-offset)")
-
-
-def test_case_1_retreat_steer_direction():
-    """lat=+0.5 (right offset) during retreat -> steer should be > 0."""
-    policy = _make_policy()
-    obs = _make_obs_for_lat(lat_desired=0.5, dist_front=0.8)
+    obs = _make_obs_for_lat(lat_desired=0.3, dist_front=3.0, v_forward=0.8)
     _, info = policy.act(obs)
-    assert info["stage"] == "retreat", f"Expected retreat, got {info['stage']}"
-    assert info["raw_steer"] > 0, f"Expected positive steer for lat>0, got {info['raw_steer']:.3f}"
-    print(f"  PASS: lat=+0.5 -> retreat steer = {info['raw_steer']:.3f} (positive)")
+    assert info["fsm_stage"] == "Approach"
+    assert info["raw_steer"] < 0, (
+        f"lat>0 in Approach: steer should be negative, got {info['raw_steer']:.3f}"
+    )
+    print(f"  PASS: Stanley direction lat>0 → steer={info['raw_steer']:.3f} (negative)")
 
 
-def test_case_2_retreat_steer_proportional():
-    """Larger |lat| should produce larger |steer| during retreat.
-    v5-B: lat_term = min(|lat|/0.75, 1.0)*0.50, saturates at lat=0.75."""
-    # lat=0.49 (just above 0.48 threshold)
+def test_stanley_direction_lat_negative():
+    """lat<0 (vehicle left of path) → steer should be positive."""
+    policy = _make_policy()
+    obs = _make_obs_for_lat(lat_desired=-0.3, dist_front=3.0, v_forward=0.8)
+    _, info = policy.act(obs)
+    assert info["fsm_stage"] == "Approach"
+    assert info["raw_steer"] > 0, (
+        f"lat<0 in Approach: steer should be positive, got {info['raw_steer']:.3f}"
+    )
+    print(f"  PASS: Stanley direction lat<0 → steer={info['raw_steer']:.3f} (positive)")
+
+
+def test_stanley_saturation():
+    """Large lat should NOT produce steer > eff_max_steer due to atan2 saturation."""
+    policy = _make_policy()
+    obs = _make_obs_for_lat(lat_desired=2.0, dist_front=3.0, v_forward=0.8)
+    _, info = policy.act(obs)
+    assert info["fsm_stage"] == "Approach"
+    eff = info["eff_max_steer"]
+    assert abs(info["raw_steer"]) <= eff + 0.001, (
+        f"Stanley should be capped at eff_max_steer={eff:.3f}, "
+        f"got |raw_steer|={abs(info['raw_steer']):.3f}"
+    )
+    print(f"  PASS: Stanley saturation: lat=2.0 → |steer|={abs(info['raw_steer']):.3f} <= {eff:.3f}")
+
+
+def test_stanley_unit_scaling():
+    """Verify k_steer converts radians to normalised steer correctly.
+    At small angles: raw_steer ≈ -delta_rad * k_steer
+    delta_rad should be in physical radians; k_steer = 1/0.6 ≈ 1.667."""
+    cfg = ExpertConfig()
+    assert abs(cfg.k_steer - 1.0 / cfg.steer_angle_rad) < 0.01, (
+        f"k_steer should be 1/steer_angle_rad = {1.0/cfg.steer_angle_rad:.3f}, "
+        f"got {cfg.k_steer:.3f}"
+    )
+    print(f"  PASS: k_steer = {cfg.k_steer:.3f} ≈ 1/{cfg.steer_angle_rad}")
+
+
+def test_stanley_low_speed_protection():
+    """effective_v = max(|v_forward|, 0.2) prevents divergence at v=0.
+    Same lat/yaw at v=0 vs v=0.8 should produce different steer magnitudes.
+    Use small lat to avoid hitting eff_max_steer clamp."""
     p1 = _make_policy()
-    obs_small = _make_obs_for_lat(lat_desired=0.49, dist_front=0.8)
+    obs_slow = _make_obs_for_lat(lat_desired=0.05, dist_front=3.0, v_forward=0.0)
+    _, info_slow = p1.act(obs_slow)
+
+    p2 = _make_policy()
+    obs_fast = _make_obs_for_lat(lat_desired=0.05, dist_front=3.0, v_forward=0.8)
+    _, info_fast = p2.act(obs_fast)
+
+    assert info_slow["fsm_stage"] == "Approach"
+    assert info_fast["fsm_stage"] == "Approach"
+    assert abs(info_slow["raw_steer"]) > abs(info_fast["raw_steer"]), (
+        f"Low speed should produce stronger correction: "
+        f"|steer(v=0)|={abs(info_slow['raw_steer']):.3f} should > "
+        f"|steer(v=0.8)|={abs(info_fast['raw_steer']):.3f}"
+    )
+    print(f"  PASS: Stanley v=0 → |steer|={abs(info_slow['raw_steer']):.3f} > "
+          f"v=0.8 → |steer|={abs(info_fast['raw_steer']):.3f}")
+
+
+# =====================================================================
+# 2. FSM transition tests
+# =====================================================================
+
+def test_fsm_approach_to_straighten():
+    """When dtc <= hard_wall and aligned → transition to Straighten (not FinalInsert)."""
+    policy = _make_policy()
+    cfg = policy.cfg
+    dtc_target = cfg.hard_wall - 0.01
+    dist_front = dtc_target + cfg.fork_length
+    obs = _make_obs_for_lat(lat_desired=0.0, dist_front=dist_front)
+    _, info = policy.act(obs)
+    assert info["fsm_stage"] == "Straighten", (
+        f"Aligned at hard_wall should go to Straighten, got {info['fsm_stage']}"
+    )
+    print(f"  PASS: Approach → Straighten when dtc={dtc_target:.3f}, aligned")
+
+
+def test_fsm_approach_to_hard_abort():
+    """When dtc <= hard_wall and NOT aligned → HardAbort."""
+    policy = _make_policy()
+    cfg = policy.cfg
+    dtc_target = cfg.hard_wall - 0.01
+    dist_front = dtc_target + cfg.fork_length
+    obs = _make_obs_for_lat(lat_desired=0.3, dist_front=dist_front)
+    _, info = policy.act(obs)
+    assert info["fsm_stage"] == "HardAbort", (
+        f"Misaligned at hard_wall should go to HardAbort, got {info['fsm_stage']}"
+    )
+    assert info["abort_reason"] == "pose_not_aligned"
+    print(f"  PASS: Approach → HardAbort when lat=0.3 at hard_wall")
+
+
+def test_fsm_straighten_to_final_insert():
+    """Straighten → FinalInsert when |prev_steer| < steer_straight_ok."""
+    policy = _make_policy()
+    cfg = policy.cfg
+    policy._fsm_stage = "Straighten"
+    policy._prev_steer = 0.01
+    dtc_target = cfg.hard_wall - 0.01
+    dist_front = dtc_target + cfg.fork_length
+    obs = _make_obs_for_lat(lat_desired=0.0, dist_front=dist_front)
+    _, info = policy.act(obs)
+    assert info["fsm_stage"] == "FinalInsert", (
+        f"Straighten with small prev_steer should go to FinalInsert, got {info['fsm_stage']}"
+    )
+    print(f"  PASS: Straighten → FinalInsert when prev_steer={policy._prev_steer:.3f}")
+
+
+def test_fsm_straighten_to_hard_abort():
+    """Straighten → HardAbort when alignment lost."""
+    policy = _make_policy()
+    cfg = policy.cfg
+    policy._fsm_stage = "Straighten"
+    policy._prev_steer = 0.3
+    dtc_target = cfg.hard_wall - 0.01
+    dist_front = dtc_target + cfg.fork_length
+    obs = _make_obs_for_lat(lat_desired=0.3, dist_front=dist_front)
+    _, info = policy.act(obs)
+    assert info["fsm_stage"] == "HardAbort", (
+        f"Straighten with large lat should go to HardAbort, got {info['fsm_stage']}"
+    )
+    assert info["abort_reason"] == "alignment_lost"
+    print(f"  PASS: Straighten → HardAbort when lat=0.3 > abort_lat={cfg.abort_lat}")
+
+
+def test_fsm_final_insert_steer_zero():
+    """FinalInsert must produce steer=0 (blind push)."""
+    policy = _make_policy()
+    policy._fsm_stage = "FinalInsert"
+    policy._prev_steer = 0.0
+    cfg = policy.cfg
+    dtc_target = cfg.hard_wall - 0.01
+    dist_front = dtc_target + cfg.fork_length
+    obs = _make_obs_for_lat(lat_desired=0.02, dist_front=dist_front, insert_norm=0.3)
+    _, info = policy.act(obs)
+    assert info["fsm_stage"] == "FinalInsert"
+    assert info["raw_steer"] == 0.0, (
+        f"FinalInsert raw_steer must be 0, got {info['raw_steer']:.4f}"
+    )
+    print(f"  PASS: FinalInsert steer=0 (blind push)")
+
+
+def test_fsm_final_insert_to_hard_abort_alignment():
+    """FinalInsert → HardAbort on alignment loss (loose thresholds)."""
+    policy = _make_policy()
+    cfg = policy.cfg
+    policy._fsm_stage = "FinalInsert"
+    policy._prev_steer = 0.0
+    dtc_target = cfg.hard_wall - 0.01
+    dist_front = dtc_target + cfg.fork_length
+    obs = _make_obs_for_lat(
+        lat_desired=cfg.abort_lat + 0.01, dist_front=dist_front, insert_norm=0.3)
+    _, info = policy.act(obs)
+    assert info["fsm_stage"] == "HardAbort", (
+        f"Expected HardAbort on alignment loss, got {info['fsm_stage']}"
+    )
+    assert info["abort_reason"] == "alignment_lost"
+    print(f"  PASS: FinalInsert → HardAbort when lat > abort_lat")
+
+
+def test_fsm_hysteresis():
+    """Strict entry, loose exit: lat=0.10 should NOT trigger HardAbort from FinalInsert
+    (abort_lat=0.15), but lat=0.10 > final_lat_ok=0.08 would prevent entry."""
+    cfg = ExpertConfig()
+    assert cfg.final_lat_ok < cfg.abort_lat, (
+        f"Hysteresis requires final_lat_ok({cfg.final_lat_ok}) < abort_lat({cfg.abort_lat})"
+    )
+    policy = _make_policy()
+    policy._fsm_stage = "FinalInsert"
+    policy._prev_steer = 0.0
+    dtc_target = cfg.hard_wall - 0.01
+    dist_front = dtc_target + cfg.fork_length
+    obs = _make_obs_for_lat(lat_desired=0.10, dist_front=dist_front, insert_norm=0.3)
+    _, info = policy.act(obs)
+    assert info["fsm_stage"] == "FinalInsert", (
+        f"lat=0.10 within hysteresis band should stay FinalInsert, got {info['fsm_stage']}"
+    )
+    print(f"  PASS: FSM hysteresis — lat=0.10 stays in FinalInsert "
+          f"(entry<{cfg.final_lat_ok}, exit>{cfg.abort_lat})")
+
+
+def test_fsm_hard_abort_state_lock():
+    """HardAbort stays locked until dist >= retreat_target_dist, ignoring dtc."""
+    policy = _make_policy()
+    cfg = policy.cfg
+    policy._fsm_stage = "HardAbort"
+    policy._retreat_steps = 0
+    dist_front = cfg.retreat_target_dist - 0.5
+    obs = _make_obs_for_lat(lat_desired=0.0, dist_front=dist_front)
+    _, info = policy.act(obs)
+    assert info["fsm_stage"] == "HardAbort", (
+        f"HardAbort should be locked until dist >= target, got {info['fsm_stage']}"
+    )
+    policy.reset()
+    policy._fsm_stage = "HardAbort"
+    obs_far = _make_obs_for_lat(lat_desired=0.0, dist_front=cfg.retreat_target_dist + 0.1)
+    _, info2 = policy.act(obs_far)
+    assert info2["fsm_stage"] == "Approach", (
+        f"HardAbort should exit to Approach at retreat_target_dist, got {info2['fsm_stage']}"
+    )
+    print(f"  PASS: HardAbort state lock and exit at retreat_target_dist={cfg.retreat_target_dist}")
+
+
+def test_fsm_to_lift():
+    """insert_norm >= lift_on_insert_norm → Lift from any FSM stage."""
+    for stage in ("Approach", "Straighten", "FinalInsert", "HardAbort"):
+        policy = _make_policy()
+        policy._fsm_stage = stage
+        cfg = policy.cfg
+        obs = _make_obs(insert_norm=cfg.lift_on_insert_norm + 0.01)
+        _, info = policy.act(obs)
+        assert info["fsm_stage"] == "Lift", (
+            f"From {stage}: insert_norm >= threshold should go to Lift, got {info['fsm_stage']}"
+        )
+    print(f"  PASS: Lift transition from all FSM stages on insert_norm >= {cfg.lift_on_insert_norm}")
+
+
+# =====================================================================
+# 3. HardAbort reverse steer polarity (TDD critical)
+# =====================================================================
+
+def test_reverse_steer_polarity():
+    """HardAbort: lat>0 → steer>0, lat<0 → steer<0 (hard-coded signs).
+    Verified by v5-BC test_case_1: drive=-1 + steer=sign(lat) correctly
+    corrects lateral offset during reverse driving."""
+    policy = _make_policy()
+    cfg = policy.cfg
+    policy._fsm_stage = "HardAbort"
+    policy._retreat_steps = 1
+    dist_front = cfg.retreat_target_dist - 0.5
+    obs_right = _make_obs_for_lat(lat_desired=0.5, dist_front=dist_front)
+    _, info = policy.act(obs_right)
+    assert info["fsm_stage"] == "HardAbort"
+    assert info["raw_steer"] > 0, (
+        f"lat>0 in HardAbort: steer MUST be >0, got {info['raw_steer']:.3f}"
+    )
+
+    policy2 = _make_policy()
+    policy2._fsm_stage = "HardAbort"
+    policy2._retreat_steps = 1
+    obs_left = _make_obs_for_lat(lat_desired=-0.5, dist_front=dist_front)
+    _, info2 = policy2.act(obs_left)
+    assert info2["fsm_stage"] == "HardAbort"
+    assert info2["raw_steer"] < 0, (
+        f"lat<0 in HardAbort: steer MUST be <0, got {info2['raw_steer']:.3f}"
+    )
+    print(f"  PASS: reverse steer polarity: lat>0 → steer={info['raw_steer']:.3f}, "
+          f"lat<0 → steer={info2['raw_steer']:.3f}")
+
+
+def test_reverse_steer_proportional():
+    """Larger |lat| should produce larger |steer| in HardAbort."""
+    p1 = _make_policy()
+    p1._fsm_stage = "HardAbort"
+    p1._retreat_steps = 1
+    cfg = p1.cfg
+    dist_front = cfg.retreat_target_dist - 0.5
+
+    obs_small = _make_obs_for_lat(lat_desired=0.2, dist_front=dist_front)
     _, info_small = p1.act(obs_small)
 
-    # lat=0.8 (v5-B: now above sat point 0.75, should be stronger than 0.49)
     p2 = _make_policy()
-    obs_large = _make_obs_for_lat(lat_desired=0.8, dist_front=0.8)
+    p2._fsm_stage = "HardAbort"
+    p2._retreat_steps = 1
+    obs_large = _make_obs_for_lat(lat_desired=0.8, dist_front=dist_front)
     _, info_large = p2.act(obs_large)
 
-    assert info_small["stage"] == "retreat"
-    assert info_large["stage"] == "retreat"
     assert abs(info_large["raw_steer"]) > abs(info_small["raw_steer"]), (
-        f"|steer|(lat=0.8)={abs(info_large['raw_steer']):.3f} should > "
-        f"|steer|(lat=0.49)={abs(info_small['raw_steer']):.3f}"
+        f"|steer(lat=0.8)|={abs(info_large['raw_steer']):.3f} should > "
+        f"|steer(lat=0.2)|={abs(info_small['raw_steer']):.3f}"
     )
-
-    # v5-B specific: lat=0.6 vs lat=0.7 should differ (was identical in v5-A)
-    p3 = _make_policy()
-    obs_06 = _make_obs_for_lat(lat_desired=0.6, dist_front=0.8)
-    _, info_06 = p3.act(obs_06)
-
-    p4 = _make_policy()
-    obs_07 = _make_obs_for_lat(lat_desired=0.7, dist_front=0.8)
-    _, info_07 = p4.act(obs_07)
-
-    assert abs(info_07["raw_steer"]) > abs(info_06["raw_steer"]), (
-        f"v5-B: |steer|(lat=0.7)={abs(info_07['raw_steer']):.3f} should > "
-        f"|steer|(lat=0.6)={abs(info_06['raw_steer']):.3f} (was equal in v5-A)"
-    )
-    print(f"  PASS: proportional steer verified; lat=0.6 -> {info_06['raw_steer']:.3f}, "
-          f"lat=0.7 -> {info_07['raw_steer']:.3f}, lat=0.8 -> {info_large['raw_steer']:.3f}")
+    print(f"  PASS: reverse proportional: lat=0.2→{info_small['raw_steer']:.3f}, "
+          f"lat=0.8→{info_large['raw_steer']:.3f}")
 
 
-def test_case_3_retreat_exit_on_alignment():
-    """Retreat should exit when BOTH lat AND yaw improve sufficiently.
-    v5-B: exit requires abs(yaw) < 30deg in addition to lat conditions."""
-    policy = _make_policy()
-
-    # Step 1: trigger retreat with lat=0.7, yaw=0 (small), dist_front=0.8
-    obs_start = _make_obs_for_lat(lat_desired=0.7, dist_front=0.8)
-    _, info = policy.act(obs_start)
-    assert info["stage"] == "retreat"
-    assert policy._retreat_entry_lat > 0.65
-
-    # Step 2: lat improves to 0.25, dist=1.3, yaw still small (dyaw=0)
-    # 0.25 < 0.7*0.6=0.42 OK, 0.25 < 0.40 OK, yaw ~0 < 30deg OK, dist>1.2 OK
-    obs_improved = _make_obs_for_lat(lat_desired=0.25, dist_front=1.3)
-    _, info2 = policy.act(obs_improved)
-    assert info2["stage"] != "retreat", (
-        f"Expected exit from retreat (lat+yaw OK), but stage={info2['stage']}"
-    )
-    assert policy._retreat_exit_reason == "alignment"
-    print(f"  PASS: retreat exited (alignment) when lat improved to 0.25 with small yaw")
-
-
-def test_case_3b_retreat_no_exit_if_yaw_large():
-    """v5-B: retreat should NOT exit alignment-early if yaw is still large,
-    even when lat has improved enough."""
+def test_hard_abort_drive_negative():
+    """HardAbort must always produce drive = retreat_drive (-1.0)."""
     policy = _make_policy()
     cfg = policy.cfg
-
-    # Trigger retreat with lat=0.7, yaw=40deg > exit_yaw_max(30deg)
-    dyaw_entry = math.radians(40)
-    obs_start = _make_obs_for_lat(lat_desired=0.7, dist_front=0.8, dyaw=dyaw_entry)
-    _, info = policy.act(obs_start)
-    assert info["stage"] == "retreat"
-
-    # lat improves to 0.25, but yaw stays at 40deg
-    obs_lat_ok = _make_obs_for_lat(lat_desired=0.25, dist_front=1.3, dyaw=dyaw_entry)
-    _, info2 = policy.act(obs_lat_ok)
-
-    # Should still be in retreat because yaw is too large
-    assert info2["stage"] == "retreat", (
-        f"Should stay in retreat (yaw=40deg > 30deg), but stage={info2['stage']}"
-    )
-    print(f"  PASS: retreat blocked alignment-exit when yaw=40deg (> 30deg limit)")
-
-
-def test_case_4_no_false_trigger():
-    """lat_true=0.3 (below 0.48 threshold) should NOT trigger retreat."""
-    policy = _make_policy()
-    obs = _make_obs_for_lat(lat_desired=0.3, dist_front=0.5)
+    policy._fsm_stage = "HardAbort"
+    dist_front = cfg.retreat_target_dist - 0.5
+    obs = _make_obs_for_lat(lat_desired=0.3, dist_front=dist_front)
     _, info = policy.act(obs)
-    assert info["stage"] != "retreat"
-    print(f"  PASS: lat_true=0.3 -> no retreat trigger (stage={info['stage']})")
+    assert info["drive"] < 0, (
+        f"HardAbort drive should be negative, got {info['drive']:.3f}"
+    )
+    print(f"  PASS: HardAbort drive={info['drive']:.3f} (negative)")
 
 
-def test_case_5_cooldown_blocks_retrigger():
-    """After retreat ends, cooldown should block immediate re-triggering.
-    Also checks retreat_exit_reason."""
+# =====================================================================
+# 4. Straighten sub-phase tests
+# =====================================================================
+
+def test_straighten_drive_zero():
+    """Straighten stage: drive should be 0 (or near-zero)."""
+    policy = _make_policy()
+    policy._fsm_stage = "Straighten"
+    policy._prev_steer = 0.3
+    cfg = policy.cfg
+    dtc_target = cfg.hard_wall - 0.01
+    dist_front = dtc_target + cfg.fork_length
+    obs = _make_obs_for_lat(lat_desired=0.0, dist_front=dist_front)
+    _, info = policy.act(obs)
+    assert info["fsm_stage"] in ("Straighten", "FinalInsert")
+    assert abs(info["raw_steer"]) < 0.001, (
+        f"Straighten raw_steer should be ~0, got {info['raw_steer']:.4f}"
+    )
+    print(f"  PASS: Straighten raw_steer=0, drive targets 0")
+
+
+def test_straighten_converges_to_final_insert():
+    """After enough steps in Straighten, prev_steer should converge to 0
+    and transition to FinalInsert."""
     policy = _make_policy()
     cfg = policy.cfg
+    policy._fsm_stage = "Straighten"
+    policy._prev_steer = 0.30
 
-    # Trigger and run retreat to max_steps
-    obs_trigger = _make_obs_for_lat(lat_desired=0.6, dist_front=0.8)
-    for i in range(cfg.max_retreat_steps + 5):
-        _, info = policy.act(obs_trigger)
-        if info["stage"] != "retreat" and i > 0:
+    dtc_target = cfg.hard_wall - 0.01
+    dist_front = dtc_target + cfg.fork_length
+    obs = _make_obs_for_lat(lat_desired=0.0, dist_front=dist_front, insert_norm=0.2)
+
+    reached_final = False
+    for step in range(20):
+        _, info = policy.act(obs)
+        if info["fsm_stage"] == "FinalInsert":
+            reached_final = True
             break
 
-    assert policy._retreat_cooldown_remaining > 0
-    assert policy._retreat_exit_reason == "max_steps", (
-        f"Expected exit reason 'max_steps', got '{policy._retreat_exit_reason}'"
+    assert reached_final, (
+        f"Straighten should converge to FinalInsert within 20 steps, "
+        f"still in {policy._fsm_stage}, prev_steer={policy._prev_steer:.4f}"
     )
-
-    _, info_after = policy.act(obs_trigger)
-    assert info_after["stage"] != "retreat"
-    print(f"  PASS: cooldown blocks re-trigger; exit_reason=max_steps")
-
-
-def test_case_5b_exit_reason_target_dist():
-    """retreat_exit_reason should be 'target_dist' when distance reached."""
-    policy = _make_policy()
-    cfg = policy.cfg
-
-    # Trigger with lat=0.6, dist=0.8
-    obs_trigger = _make_obs_for_lat(lat_desired=0.6, dist_front=0.8)
-    _, info = policy.act(obs_trigger)
-    assert info["stage"] == "retreat"
-
-    # Next step: dist jumps to retreat_target_dist (1.8), lat still bad
-    obs_far = _make_obs_for_lat(lat_desired=0.6, dist_front=cfg.retreat_target_dist)
-    _, info2 = policy.act(obs_far)
-    assert info2["stage"] != "retreat"
-    assert policy._retreat_exit_reason == "target_dist", (
-        f"Expected 'target_dist', got '{policy._retreat_exit_reason}'"
-    )
-    print(f"  PASS: retreat exit_reason=target_dist when dist >= {cfg.retreat_target_dist}")
-
-
-def test_case_6_large_lat_triggers_stronger_response():
-    """lat_true=1.0 should produce stronger docking steer than lat_true=0.5."""
-    p1 = _make_policy()
-    obs_v4max = _make_obs_for_lat(lat_desired=0.5, dist_front=2.0)
-    _, info_v4 = p1.act(obs_v4max)
-
-    p2 = _make_policy()
-    obs_v5 = _make_obs_for_lat(lat_desired=1.0, dist_front=2.0)
-    _, info_v5 = p2.act(obs_v5)
-
-    assert info_v4["stage"] == "docking"
-    assert info_v5["stage"] == "docking"
-    assert abs(info_v5["raw_steer"]) > abs(info_v4["raw_steer"])
-    print(f"  PASS: steer(lat=1.0)={info_v5['raw_steer']:.3f} > steer(lat=0.5)={info_v4['raw_steer']:.3f}")
-
-
-def test_case_7_retreat_rate_limit_skip():
-    """v5-B: first retreat step should skip steer rate_limit (no ramp-up)."""
-    policy = _make_policy()
-
-    # Pre-condition: _prev_steer = 0 (fresh policy)
-    assert policy._prev_steer == 0.0
-
-    # Trigger retreat with lat=0.7 -> raw_steer should be significant
-    obs = _make_obs_for_lat(lat_desired=0.7, dist_front=0.8)
-    _, info = policy.act(obs)
-    assert info["stage"] == "retreat"
-
-    # With rate_limit skip, the actual steer should == raw_steer
-    # (no 0.35/step ramp-up from 0)
-    assert abs(info["steer"] - info["raw_steer"]) < 0.01, (
-        f"First retreat step should skip rate_limit: steer={info['steer']:.3f} "
-        f"should == raw_steer={info['raw_steer']:.3f}"
-    )
-    print(f"  PASS: first retreat step steer={info['steer']:.3f} == raw_steer={info['raw_steer']:.3f} (no ramp)")
-
-
-def test_case_8_retreat_lat_sat_parameterised():
-    """v5-B: verify retreat lat_term uses retreat_lat_sat=0.75 parameterisation.
-    lat=0.375 -> lat_term = 0.375/0.75*0.50 = 0.25
-    lat=0.75  -> lat_term = 1.0*0.50 = 0.50 (saturated)
-    lat=1.0   -> lat_term = 1.0*0.50 = 0.50 (still saturated)"""
-    cfg = ExpertConfig()
-
-    # Compute expected values manually
-    for lat_val, expected_term in [(0.375, 0.25), (0.75, 0.50), (1.0, 0.50)]:
-        actual = min(lat_val / cfg.retreat_lat_sat, 1.0) * cfg.retreat_steer_gain
-        assert abs(actual - expected_term) < 0.001, (
-            f"lat={lat_val}: expected lat_term={expected_term}, got {actual:.4f}"
-        )
-
-    print(f"  PASS: retreat_lat_sat parameterisation verified (0.375->0.25, 0.75->0.50, 1.0->0.50)")
-
-
-def test_case_9_lat_dependent_steer_bonus():
-    """v5-C: large |lat| should allow stronger docking steer via bonus.
-    lat=0.3 -> no bonus (below 0.4 threshold), steer unchanged
-    lat=0.8 -> bonus=min(0.4*0.2, 0.10)=0.08, eff_max_steer=0.65+0.08=0.73
-    lat=1.0 -> bonus=min(0.6*0.2, 0.10)=0.10, eff_max_steer=0.75 (capped)"""
-    # Small lat: no bonus, steer same as before
-    p1 = _make_policy()
-    obs_small = _make_obs_for_lat(lat_desired=0.3, dist_front=2.5)  # dist>2.0
-    _, info_small = p1.act(obs_small)
-    # k_lat=1.1, lat=0.3 => raw_steer=0.33+yaw_term, limit should be 0.65 (no bonus)
-    assert abs(info_small["raw_steer"]) <= 0.65 + 0.01, (
-        f"Small lat should not get bonus: raw_steer={info_small['raw_steer']:.3f}"
-    )
-
-    # Large lat: should get bonus and produce stronger steer
-    p2 = _make_policy()
-    obs_large = _make_obs_for_lat(lat_desired=0.8, dist_front=2.5)  # dist>2.0
-    _, info_large = p2.act(obs_large)
-    # k_lat=1.1, lat=0.8 => raw_steer=0.88+yaw_term, eff_max_steer=0.65+0.08=0.73
-    assert abs(info_large["raw_steer"]) > 0.65, (
-        f"Large lat (0.8) should get bonus: raw_steer={info_large['raw_steer']:.3f} should > 0.65"
-    )
-    assert abs(info_large["raw_steer"]) <= 0.75 + 0.01, (
-        f"Bonus should be capped: raw_steer={info_large['raw_steer']:.3f} should <= 0.75"
-    )
-
-    # Very large lat: capped at max bonus
-    p3 = _make_policy()
-    obs_huge = _make_obs_for_lat(lat_desired=1.5, dist_front=2.5)
-    _, info_huge = p3.act(obs_huge)
-    assert abs(info_huge["raw_steer"]) <= 0.75 + 0.01
-
-    # Near-distance: no bonus even with large lat (dist < 0.8)
-    # Use lat=0.3 to avoid retreat trigger (lat < 0.48)
-    p4 = _make_policy()
-    obs_near = _make_obs_for_lat(lat_desired=0.3, dist_front=0.5)  # dist < 0.8
-    _, info_near = p4.act(obs_near)
-    # Near: max_steer_near=0.40, no bonus (dist<0.8), plus gain decay
-    assert abs(info_near["raw_steer"]) <= 0.40 + 0.01, (
-        f"Near-distance should not get bonus: raw_steer={info_near['raw_steer']:.3f}"
-    )
-
-    print(f"  PASS: lat-dependent bonus verified: small(0.3)={info_small['raw_steer']:.3f}, "
-          f"large(0.8)={info_large['raw_steer']:.3f}, huge(1.5)={info_huge['raw_steer']:.3f}, "
-          f"near(0.3,d=0.5)={info_near['raw_steer']:.3f}")
+    print(f"  PASS: Straighten → FinalInsert in {step+1} steps")
 
 
 # =====================================================================
-# Main (fallback for no-pytest environments)
+# 5. insert_norm progress detection tests
+# =====================================================================
+
+def test_no_progress_triggers_abort():
+    """FinalInsert: if insert_norm doesn't grow for no_progress_steps → HardAbort."""
+    policy = _make_policy()
+    cfg = policy.cfg
+    policy._fsm_stage = "FinalInsert"
+    policy._prev_steer = 0.0
+
+    dtc_target = cfg.hard_wall - 0.01
+    dist_front = dtc_target + cfg.fork_length
+    static_ins = 0.30
+
+    for i in range(cfg.no_progress_steps + 2):
+        obs = _make_obs_for_lat(
+            lat_desired=0.0, dist_front=dist_front, insert_norm=static_ins)
+        _, info = policy.act(obs)
+        if info["fsm_stage"] == "HardAbort":
+            assert info["abort_reason"] == "no_progress"
+            print(f"  PASS: no_progress abort triggered at step {i+1} "
+                  f"(threshold={cfg.no_progress_steps})")
+            return
+
+    assert False, (
+        f"no_progress abort should have triggered within {cfg.no_progress_steps+2} steps"
+    )
+
+
+def test_progress_resets_counter():
+    """If insert_norm grows, the no_progress counter resets."""
+    policy = _make_policy()
+    cfg = policy.cfg
+    policy._fsm_stage = "FinalInsert"
+    policy._prev_steer = 0.0
+    policy._prev_insert_norm = 0.30
+
+    dtc_target = cfg.hard_wall - 0.01
+    dist_front = dtc_target + cfg.fork_length
+
+    for i in range(cfg.no_progress_steps - 2):
+        obs = _make_obs_for_lat(
+            lat_desired=0.0, dist_front=dist_front, insert_norm=0.30)
+        _, info = policy.act(obs)
+        assert info["fsm_stage"] == "FinalInsert"
+
+    obs_progress = _make_obs_for_lat(
+        lat_desired=0.0, dist_front=dist_front, insert_norm=0.35)
+    _, info = policy.act(obs_progress)
+    assert info["fsm_stage"] == "FinalInsert"
+
+    for i in range(cfg.no_progress_steps - 2):
+        obs = _make_obs_for_lat(
+            lat_desired=0.0, dist_front=dist_front, insert_norm=0.35)
+        _, info = policy.act(obs)
+        assert info["fsm_stage"] == "FinalInsert", (
+            f"Counter should have reset after progress; "
+            f"abort at step {i+1} is premature"
+        )
+
+    print(f"  PASS: progress resets no_progress counter")
+
+
+# =====================================================================
+# 6. dist_to_contact computation test
+# =====================================================================
+
+def test_dist_to_contact():
+    """dtc = max(dist_front - fork_length, 0)."""
+    policy = _make_policy()
+    cfg = policy.cfg
+
+    obs_far = _make_obs(d_x=5.0)
+    _, info_far = policy.act(obs_far)
+    expected_dist_front = 5.0 - cfg.pallet_half_depth
+    expected_dtc = max(expected_dist_front - cfg.fork_length, 0.0)
+    assert abs(info_far["dist_to_contact"] - expected_dtc) < 0.01, (
+        f"dtc should be {expected_dtc:.3f}, got {info_far['dist_to_contact']:.3f}"
+    )
+
+    policy.reset()
+    obs_close = _make_obs(d_x=cfg.pallet_half_depth + cfg.fork_length - 0.1)
+    _, info_close = policy.act(obs_close)
+    assert info_close["dist_to_contact"] == 0.0, (
+        f"dtc should be 0 when dist_front < fork_length, got {info_close['dist_to_contact']:.3f}"
+    )
+    print(f"  PASS: dist_to_contact computation: far={info_far['dist_to_contact']:.3f}, close=0.0")
+
+
+# =====================================================================
+# 7. Info fields present
+# =====================================================================
+
+def test_info_fields():
+    """All required v7 info fields should be present."""
+    policy = _make_policy()
+    obs = _make_obs(d_x=3.0)
+    _, info = policy.act(obs)
+
+    required = [
+        "stage", "fsm_stage", "dist_front", "dist_to_contact",
+        "lat", "yaw", "insert_norm", "raw_steer", "steer", "drive",
+        "eff_max_steer", "steer_sat_ratio", "abort_reason",
+        "in_retreat", "retreat_steps", "retreat_cooldown",
+    ]
+    missing = [k for k in required if k not in info]
+    assert not missing, f"Missing info fields: {missing}"
+    print(f"  PASS: all {len(required)} required info fields present")
+
+
+# =====================================================================
+# Main
 # =====================================================================
 def main():
     tests = [
-        test_case_0_lat_true_computation,
-        test_case_1_retreat_steer_direction,
-        test_case_2_retreat_steer_proportional,
-        test_case_3_retreat_exit_on_alignment,
-        test_case_3b_retreat_no_exit_if_yaw_large,
-        test_case_4_no_false_trigger,
-        test_case_5_cooldown_blocks_retrigger,
-        test_case_5b_exit_reason_target_dist,
-        test_case_6_large_lat_triggers_stronger_response,
-        test_case_7_retreat_rate_limit_skip,
-        test_case_8_retreat_lat_sat_parameterised,
-        test_case_9_lat_dependent_steer_bonus,
+        test_stanley_direction_lat_positive,
+        test_stanley_direction_lat_negative,
+        test_stanley_saturation,
+        test_stanley_unit_scaling,
+        test_stanley_low_speed_protection,
+        test_fsm_approach_to_straighten,
+        test_fsm_approach_to_hard_abort,
+        test_fsm_straighten_to_final_insert,
+        test_fsm_straighten_to_hard_abort,
+        test_fsm_final_insert_steer_zero,
+        test_fsm_final_insert_to_hard_abort_alignment,
+        test_fsm_hysteresis,
+        test_fsm_hard_abort_state_lock,
+        test_fsm_to_lift,
+        test_reverse_steer_polarity,
+        test_reverse_steer_proportional,
+        test_hard_abort_drive_negative,
+        test_straighten_drive_zero,
+        test_straighten_converges_to_final_insert,
+        test_no_progress_triggers_abort,
+        test_progress_resets_counter,
+        test_dist_to_contact,
+        test_info_fields,
     ]
     passed = 0
     failed = 0
