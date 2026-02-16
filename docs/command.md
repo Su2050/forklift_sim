@@ -102,3 +102,11 @@ cd /home/uniubi/projects/forklift_sim/IsaacLab
 # --- Nucleus 托盘资产扫描 (scan_nucleus_pallets.py) ---
 cd /home/uniubi/projects/forklift_sim/IsaacLab
 ./isaaclab.sh -p ../scripts/scan_nucleus_pallets.py --headless
+
+# --- USD 关节轴方向验证 (verify_joint_axes.py) ---
+# 诊断左右对称关节（如转向）的物理轴方向是否镜像，防止控制符号写反。
+# 包含：USD 静态属性检查 + 物理单轴响应测试 + 转向对称性冒烟测试。
+# 任何关节控制代码修改后必须运行此脚本。
+cd /home/uniubi/projects/forklift_sim/IsaacLab
+./isaaclab.sh -p ../scripts/verify_joint_axes.py --headless
+# 正常输出应全为 [PASS]。如果出现 [FAIL]，请检查 env.py 中的 steer_left/right 符号。

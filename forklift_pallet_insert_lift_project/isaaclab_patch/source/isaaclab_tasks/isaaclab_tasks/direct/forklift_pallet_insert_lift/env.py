@@ -656,8 +656,9 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self.robot.set_joint_velocity_target(drive.unsqueeze(-1).repeat(1, len(self._back_wheel_ids)), joint_ids=self._back_wheel_ids)
 
         # steering: position targets by joint name (order-independent)
-        # left rotator needs opposite sign due to mirrored joint axis in USD
-        steer_left = -steer
+        # left rotator needs SAME sign (verified by scripts/verify_joint_axes.py)
+        # Previous assumption of mirrored axis was INCORRECT.
+        steer_left = steer
         steer_right = steer
         self.robot.set_joint_position_target(steer_left.unsqueeze(-1), joint_ids=self._left_rotator_id)
         self.robot.set_joint_position_target(steer_right.unsqueeze(-1), joint_ids=self._right_rotator_id)
