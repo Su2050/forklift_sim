@@ -1050,6 +1050,11 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         prox_excess = torch.clamp(tip_y_err - self.cfg.tip_prox_lat_thresh, min=0.0)
         pen_tip_proximity = -self.cfg.k_tip_proximity_pen * prox_mask * prox_excess
 
+        # S1.0U: tip alignment flags (used by milestones AND hold counter below).
+        is_near = stage_dist_front < self.cfg.tip_align_near_dist
+        tip_align_ok = tip_y_err <= self.cfg.tip_align_entry_m
+        tip_align_violated = tip_y_err > self.cfg.tip_align_exit_m
+
         # ---- 里程碑奖励（一次性）----
         milestone_approach = dist_front <= 0.25
         milestone_coarse_align = (y_err <= 0.20) & (yaw_err_deg <= 10.0)
@@ -1178,12 +1183,7 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         align_exit_exceeded = (y_err > exit_y) | (yaw_err_deg > exit_yaw)
 
         # S1.0U: tip alignment constraint (near-field only).
-        # Only enforced when close enough that fork tip matters.
-        is_near = stage_dist_front < self.cfg.tip_align_near_dist
-        tip_align_ok = tip_y_err <= self.cfg.tip_align_entry_m
-        tip_align_violated = tip_y_err > self.cfg.tip_align_exit_m
-        # Near-field: tighten align_entry and align_exit with tip constraint.
-        # Far-field: no effect (is_near=False -> conditions pass through).
+        # is_near / tip_align_ok / tip_align_violated computed above (before milestones).
         align_entry = align_entry & (~is_near | tip_align_ok)
         align_exit_exceeded = align_exit_exceeded | (is_near & tip_align_violated)
 
