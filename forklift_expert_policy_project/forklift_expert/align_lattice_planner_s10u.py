@@ -79,7 +79,7 @@ class Primitive:
 class PlannerParams:
     # Kinematics
     wheelbase: float = 1.6
-    dt: float = 0.02                 # Isaac commonly runs 50Hz; tune if needed.
+    dt: float = 1.0/30.0            # match env control dt (sim 1/120, decimation 4)
 
     # Primitive set
     max_steer: float = 0.65          # match cfg.max_steer_far by default
@@ -87,7 +87,7 @@ class PlannerParams:
 
     v_fwd: float = 0.25              # m/s, representative approach speed
     v_rev: float = -0.25             # m/s, representative reverse speed
-    durations: Tuple[float, ...] = (0.50, 0.75)  # seconds
+    durations: Tuple[float, ...] = (0.33, 0.50, 0.67)  # shorter options for tight-space maneuvers
 
     # Discretization (for visited / closed set)
     x_res: float = 0.07
@@ -95,14 +95,14 @@ class PlannerParams:
     yaw_bins: int = 72
 
     # Search
-    max_expansions: int = 6000       # Reduced from 20000 for performance budget
+    max_expansions: int = 12000
     w_yaw_h: float = 0.45
-    reverse_penalty: float = 0.9
-    steer_change_penalty: float = 0.12
+    reverse_penalty: float = 1.5
+    steer_change_penalty: float = 0.30
 
     # Bounding window (avoid infinite search); in meters in this pallet-front frame
     x_min: float = 0.0
-    x_max: float = 6.0
+    x_max: float = 3.0
     y_max_abs: float = 3.0
 
     # -------------------------
@@ -247,6 +247,9 @@ def heuristic(p: Pose2D, prm: PlannerParams) -> float:
     dx = p.x - prm.goal_x
     dy = p.y - prm.goal_y
     d = math.hypot(dx, dy)
+    # Soft penalty: discourage backing too far away from goal_x
+    if p.x > prm.goal_x + 0.5:
+        d += 0.3 * (p.x - prm.goal_x - 0.5)
     yaw_pen = prm.w_yaw_h * abs(_wrap_pi(p.yaw))
     return d + yaw_pen
 

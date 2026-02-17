@@ -139,15 +139,30 @@ class ExpertConfig:
     # If enabled, the policy can switch from local PD to a short-horizon
     # primitive plan when it detects repeated bbox_abort or severe misalignment.
     use_align_planner: bool = True
-    align_goal_x: float = 2.50           # default: same as tip_blend_dist (keep in sync)
-    align_goal_dx: float = 0.12
-    align_goal_dy: float = 0.12
+    align_goal_x: float = 2.10           # was 2.50; reduce handover gap to insertion zone
+    align_goal_dx: float = 0.15          # was 0.12; slightly more tolerance
+    align_goal_dy: float = 0.18          # was 0.12; more tolerance for handover
     align_goal_dyaw: float = math.radians(5.0)
+    # Planner-internal goal box (can be looser than handover box to ease search)
+    align_plan_goal_dx: float = 0.20
+    align_plan_goal_dy: float = 0.20
+    align_plan_goal_dyaw: float = math.radians(8.0)
+
     align_trigger_bbox_abort_count: int = 1
-    align_replan_every: int = 12         # steps; replan helps absorb model mismatch
+    align_replan_every: int = 10         # was 12->6; 10 balances MPC freshness vs ARM CPU budget
     align_fwd_drive: float = 0.30        # throttle during planned forward primitives
-    align_rev_drive: float = -0.60       # throttle during planned reverse primitives
-    align_planner_dt: float = 0.02       # must match planner's dt for duration->steps
+    align_rev_drive: float = -0.35       # was -0.60; closer to planner v_rev assumption
+    align_planner_dt: float = 1.0/30.0   # was 0.02; MUST match env control dt (sim 1/120, dec 4)
+    align_x_max_abs: float = 3.0         # hard cap for dist_front to avoid env OOB termination
+    align_x_headroom: float = 0.6        # allow limited reverse headroom from current dist
+    align_trigger_cooldown_steps: int = 24  # after successful align, block re-trigger (anti ping-pong)
+
+    # Planner parameter pass-through
+    align_planner_max_expansions: int = 12000
+    align_planner_v_rev: float = -0.20
+    align_planner_reverse_penalty: float = 1.5
+    align_planner_steer_levels: Tuple[float, ...] = (-1.0, -0.5, 0.0, 0.5, 1.0)
+
     align_max_replan_fails: int = 3      # consecutive fails -> freeze planner this episode
 
     # ---- Retreat ----
@@ -248,6 +263,7 @@ class ForkliftExpertPolicy:
         self._bbox_abort_hold: int = 0       # remaining hold steps for abort retreat
         self._bbox_abort_reason: str = ""    # last abort reason
         self._bbox_abort_count: int = 0      # cumulative abort count (for logging)
+        self._align_armed: bool = False      # S1.0V: armed/disarm hysteresis for planner trigger
         self._passed_hard_wall: bool = False # Schmitt: once passed, use relaxed exit
         self._retreat_is_bbox: bool = False  # current retreat triggered by bbox_abort?
 
@@ -263,6 +279,7 @@ class ForkliftExpertPolicy:
         self._align_cur_steer: float = 0.0
         self._align_replan_cd: int = 0
         self._align_replan_fail_streak: int = 0
+        self._align_trigger_cooldown: int = 0  # S1.0V: post-align cooldown counter
 
         # Validate specs
         assert "fields" in self.obs_spec, "obs_spec missing 'fields'"
@@ -304,6 +321,7 @@ class ForkliftExpertPolicy:
         self._bbox_abort_hold = 0
         self._bbox_abort_reason = ""
         self._bbox_abort_count = 0
+        self._align_armed = False
         self._passed_hard_wall = False
         self._retreat_is_bbox = False
         # Stage-C: clear episode-boundary detector
@@ -318,6 +336,7 @@ class ForkliftExpertPolicy:
         self._align_cur_steer = 0.0
         self._align_replan_cd = 0
         self._align_replan_fail_streak = 0
+        self._align_trigger_cooldown = 0
 
     # -------------------------------------------------------------- helpers
     @staticmethod
@@ -417,6 +436,10 @@ class ForkliftExpertPolicy:
         s = self._decode_obs(obs)
         dist = s["dist_front"]
 
+        # S1.0V: align planner trigger cooldown (prevents align<->docking ping-pong)
+        if self._align_trigger_cooldown > 0:
+            self._align_trigger_cooldown -= 1
+
         # S1.0U Stage-C: Implicit reset on episode boundary.
         # IsaacLab resets the env without calling policy.reset(); detect
         # this by a sudden large increase in dist (new episode spawns far
@@ -486,6 +509,7 @@ class ForkliftExpertPolicy:
                 self._bbox_abort_hold = cfg.bbox_abort_hold_steps
                 self._bbox_abort_reason = "corridor"
                 self._bbox_abort_count += 1
+                self._align_armed = True
 
             # Layer 2: Hard wall gate (Schmitt trigger)
             # Check both tip AND body alignment at the entry boundary.
@@ -503,6 +527,7 @@ class ForkliftExpertPolicy:
                     self._bbox_abort_hold = cfg.bbox_abort_hold_steps
                     self._bbox_abort_reason = "hard_wall"
                     self._bbox_abort_count += 1
+                    self._align_armed = True
 
         # ---- Retreat trigger ----
         # Cooldown prevents rapid retreat-dock cycling that wastes steps.
@@ -709,10 +734,12 @@ class ForkliftExpertPolicy:
                     severe_misalign = (abs(lat) > cfg.align_lat_ok or abs(yaw) > cfg.align_yaw_ok)
                     near_zone = dist <= (cfg.tip_blend_dist + 0.6)
 
-                    trigger = (
-                        (self._bbox_abort_count >= cfg.align_trigger_bbox_abort_count)
+                    # S1.0V Phase-1: triple-gated trigger
+                    within_x = dist <= (cfg.align_x_max_abs - 0.05)
+                    trigger = within_x and (
+                        (self._align_armed and self._bbox_abort_count >= cfg.align_trigger_bbox_abort_count)
                         or (near_zone and severe_misalign)
-                    )
+                    ) and self._align_trigger_cooldown <= 0
 
                     # Enter planner mode
                     if trigger and not self._align_active and self._align_replan_fail_streak < cfg.align_max_replan_fails:
@@ -723,8 +750,9 @@ class ForkliftExpertPolicy:
                         self._align_replan_cd = 0
 
                     # Exit planner mode once parked in the align box
+                    # Single-sided dist check: allow being closer than goal_x (don't force reverse)
                     in_align_box = (
-                        abs(dist - cfg.align_goal_x) <= cfg.align_goal_dx
+                        dist <= (cfg.align_goal_x + cfg.align_goal_dx)
                         and abs(lat) <= cfg.align_goal_dy
                         and abs(yaw) <= cfg.align_goal_dyaw
                     )
@@ -732,6 +760,8 @@ class ForkliftExpertPolicy:
                         self._align_active = False
                         self._align_plan = None
                         self._align_replan_fail_streak = 0
+                        self._align_armed = False
+                        self._align_trigger_cooldown = cfg.align_trigger_cooldown_steps
 
                     # Execute (or refresh) a primitive plan
                     if self._align_active:
@@ -751,10 +781,14 @@ class ForkliftExpertPolicy:
                                 final_lat_ok=cfg.final_lat_ok,
                                 final_yaw_ok=cfg.final_yaw_ok,
                                 goal_x=cfg.align_goal_x,
-                                goal_dx=cfg.align_goal_dx,
-                                goal_dy=cfg.align_goal_dy,
-                                goal_dyaw=cfg.align_goal_dyaw,
-                                x_max=max(6.0, dist + 2.0),
+                                goal_dx=cfg.align_plan_goal_dx,
+                                goal_dy=cfg.align_plan_goal_dy,
+                                goal_dyaw=cfg.align_plan_goal_dyaw,
+                                max_expansions=cfg.align_planner_max_expansions,
+                                steer_levels=cfg.align_planner_steer_levels,
+                                v_rev=cfg.align_planner_v_rev,
+                                reverse_penalty=cfg.align_planner_reverse_penalty,
+                                x_max=min(cfg.align_x_max_abs, dist + cfg.align_x_headroom),
                                 y_max_abs=3.0,
                             )
                             res = _plan_align_primitives(
@@ -777,7 +811,7 @@ class ForkliftExpertPolicy:
                                 prim = self._align_plan[self._align_plan_i]
                                 self._align_plan_i += 1
                                 self._align_steps_left = max(
-                                    1, int(round(prim.duration / cfg.align_planner_dt))
+                                    1, int(math.ceil(prim.duration / cfg.align_planner_dt - 1e-9))
                                 )
                                 self._align_cur_steer = prim.steer
                                 self._align_cur_drive = (
@@ -871,5 +905,7 @@ class ForkliftExpertPolicy:
             "align_plan_len": len(self._align_plan) if self._align_plan else 0,
             "align_plan_i": self._align_plan_i,
             "align_replan_fail_streak": self._align_replan_fail_streak,
+            "align_armed": self._align_armed,
+            "align_trigger_cooldown": self._align_trigger_cooldown,
         }
         return action, info
