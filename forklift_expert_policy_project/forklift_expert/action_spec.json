@@ -10,5 +10,5 @@
     "steer": [-1.0, 1.0],
     "lift": [-1.0, 1.0]
   },
-  "notes": "drive=wheel angular velocity (normalized), steer=front wheel angle (normalized), lift=lift position increment (normalized). env._apply_action() scales by wheel_speed_rad_s / steer_angle_rad / lift_speed_m_s."
+  "notes": "drive=wheel angular velocity (normalized), steer=rear rotator angle (RWS, normalized), lift=lift position increment (normalized). env._apply_action() scales by wheel_speed_rad_s / steer_angle_rad / lift_speed_m_s."
 }

@@ -66,13 +66,25 @@ class ExpertConfig:
     # docs/diagnostic_reports/success_sanity_check_2026-02-10.md L73).
     # Rounded up to 1.87m for safety margin.
     fork_reach: float = 1.87           # root to fork tip forward distance (m)
-    fork_tip_lat_ok: float = 0.10      # max fork tip lateral error at contact (m)
+    fork_tip_lat_ok: float = 0.15      # max fork tip lateral error at contact (m)
+                                       # relaxed 0.10→0.15: pallet opening has margin
 
     # ---- S1.0U: Pre-contact Safety Gates ----
     hard_wall: float = 1.92            # absolute safety line = fork_reach + 5cm
     hard_wall_hyst: float = 0.05       # Schmitt hysteresis for hard wall re-entry
-    pre_insert_dist: float = 2.40      # deceleration zone start (m)
+    pre_insert_dist: float = 2.05      # corridor/decel zone start (m)
+                                       # 2.40→2.05: Ackermann geometry self-aligns tip_lat
+                                       # at hard_wall; corridor at 2.1-2.4 was false-positive
     bbox_abort_hold_steps: int = 8     # min steps to hold abort-triggered retreat
+    bbox_retreat_target_dist: float = 2.7  # retreat target when bbox_abort fires
+                                           # must be > pre_insert_dist to give full approach run
+
+    # ---- S1.0U Stage-B: Near-field tip_lat fusion ----
+    # Blend steering target from body-lat to fork-tip-lat as vehicle approaches.
+    # Ensures controller optimises the SAME lateral error that the safety gate
+    # checks, and produces stronger steer when tip_lat > lat (yaw lever arm).
+    tip_blend_dist: float = 2.5             # start blending at this dist (m)
+                                            # full tip_lat at hard_wall (1.92m)
 
     # ---- S1.0U: Contact boundary alignment (stricter than far-field) ----
     final_lat_ok: float = 0.15         # max root lateral error at hard wall (m)
@@ -83,6 +95,8 @@ class ExpertConfig:
                                 # to prevent lateral overshoot (stress-test: 26% drift pattern)
     k_yaw: float = 0.9          # steering gain for yaw error   — reduced from 1.2
     k_damp: float = 0.20        # NEW: yaw-rate damping to suppress oscillation
+    # ---- Stage-E Step 2: yaw_ref tracking ----
+    k_yaw_ref: float = 2.0      # yaw_ref tracking gain (replaces k_lat+k_yaw coupling)
     k_dist: float = 0.6         # throttle gain for distance
     v_max: float = 0.95         # max forward command — near full speed
     v_min: float = 0.80         # strong forward drive is critical for Ackermann steering
@@ -99,6 +113,16 @@ class ExpertConfig:
     lat_ok: float = 0.20        # 20 cm
     yaw_ok: float = math.radians(15.0)  # 15 deg
 
+    # ---- S1.0U Stage-C: Alignment-based speed modulation ----
+    # Linear lerp from full-speed to crawl based on alignment quality.
+    # When |lat| or |yaw| exceed the "ok" threshold, speed begins to drop;
+    # at the "slow" threshold, speed is fully reduced to crawl.
+    align_lat_ok: float = 0.15                    # |lat| below -> no penalty
+    align_lat_slow: float = 0.50                  # |lat| above -> full penalty (crawl)
+    align_yaw_ok: float = math.radians(5.0)       # |yaw| below -> no penalty (~0.087 rad)
+    align_yaw_slow: float = math.radians(15.0)    # |yaw| above -> full penalty (~0.262 rad)
+    align_crawl_speed: float = 0.15               # floor speed (Ackermann needs some motion)
+
     # ---- Retreat ----
     # Only trigger retreat when VERY close AND severely misaligned.
     # Stress-test showed docking-retreat cycling is the #1 failure mode;
@@ -109,13 +133,14 @@ class ExpertConfig:
     retreat_dist_thresh: float = 2.0    # S1.0U: 1.0 -> 2.0, cover pre-contact zone
     retreat_target_dist: float = 1.8    # was 2.5 → 1.5 too short → 1.8 compromise
     retreat_drive: float = -1.0         # full backward speed
-    retreat_steer_gain: float = 0.50    # was 0.15 — strong proportional correction during retreat
-    retreat_k_yaw: float = 0.30        # NEW: yaw correction gain during retreat
+    retreat_steer_gain: float = 0.40    # Stage-E: restored (0.05→0.40) — sign fix makes
+                                        # lat & yaw terms cooperate, no need to suppress
+    retreat_k_yaw: float = 0.80        # Stage-E: lowered (1.50→0.80) — avoid tire saturation
     retreat_max_steer: float = 0.90    # v5-B: was hardcoded 0.8 — clip limit for retreat steer
     retreat_lat_sat: float = 0.75      # v5-B: lat at which retreat_lat_term saturates (was implicit 0.5)
     retreat_exit_lat_abs: float = 0.40 # v5-B: was 0.30 — abs lat threshold for alignment exit
     retreat_exit_yaw_max: float = math.radians(30)  # v5-B: yaw must also be OK to exit retreat
-    max_retreat_steps: int = 80         # hard cap per single retreat
+    max_retreat_steps: int = 200        # 80→200: allow deeper retreat to fully correct alignment
     retreat_cooldown: int = 150         # was 80 — give docking more time to self-correct
 
     # ---- Insertion ----
@@ -197,6 +222,10 @@ class ForkliftExpertPolicy:
         self._bbox_abort_reason: str = ""    # last abort reason
         self._bbox_abort_count: int = 0      # cumulative abort count (for logging)
         self._passed_hard_wall: bool = False # Schmitt: once passed, use relaxed exit
+        self._retreat_is_bbox: bool = False  # current retreat triggered by bbox_abort?
+
+        # Stage-C: episode-boundary detector
+        self._prev_dist_front: float | None = None
 
         # Validate specs
         assert "fields" in self.obs_spec, "obs_spec missing 'fields'"
@@ -239,6 +268,9 @@ class ForkliftExpertPolicy:
         self._bbox_abort_reason = ""
         self._bbox_abort_count = 0
         self._passed_hard_wall = False
+        self._retreat_is_bbox = False
+        # Stage-C: clear episode-boundary detector
+        self._prev_dist_front = None
 
     # -------------------------------------------------------------- helpers
     @staticmethod
@@ -278,7 +310,7 @@ class ForkliftExpertPolicy:
 
         # Clipped version (from y_err_obs) for reference / logging
         y_err_norm = _r(obs, self._idx_y_err_obs, default=0.0)
-        lat_clipped = y_err_norm * 0.5  # metres, clipped to [-0.5, +0.5]
+        lat_clipped = y_err_norm * 0.8  # metres, clipped to [-0.8, +0.8] (env_cfg.y_err_obs_scale=0.8)
 
         # --- Other scalars --------------------------------------------------
         insert_norm = _r(obs, self._idx_insert_norm, default=0.0)
@@ -337,6 +369,15 @@ class ForkliftExpertPolicy:
         # ---- Decode obs into semantic fields ----
         s = self._decode_obs(obs)
         dist = s["dist_front"]
+
+        # S1.0U Stage-C: Implicit reset on episode boundary.
+        # IsaacLab resets the env without calling policy.reset(); detect
+        # this by a sudden large increase in dist (new episode spawns far
+        # from pallet) and flush stale internal state.
+        if self._prev_dist_front is not None and dist > self._prev_dist_front + 0.5:
+            self.reset()
+        self._prev_dist_front = dist
+
         lat  = s["lat_true"]       # v5-A: use unsaturated pallet-frame lat
         lat_clipped = s["lat_clipped"]  # for logging only
         yaw  = s["yaw_err"]
@@ -349,10 +390,12 @@ class ForkliftExpertPolicy:
 
         # ---- S1.0U: Fork tip lateral projection ----
         # Lever-arm effect: fork tip sweeps laterally when yaw != 0.
-        tip_lat = lat + cfg.fork_reach * math.sin(yaw)
+        # yaw = pallet_yaw - robot_yaw, so robot heading in pallet frame = -yaw.
+        # tip_lat = lat + reach * sin(-yaw) = lat - reach * sin(yaw).
+        tip_lat = lat - cfg.fork_reach * math.sin(yaw)
 
         # Dynamic safety corridor: narrows as forklift approaches contact.
-        safe_corridor = cfg.fork_tip_lat_ok + max(0.0, dist - cfg.fork_reach) * 0.4
+        safe_corridor = cfg.fork_tip_lat_ok + max(0.0, dist - cfg.fork_reach) * 0.8
 
         # Is fork tip aligned at the contact boundary?
         tip_aligned = abs(tip_lat) < cfg.fork_tip_lat_ok
@@ -398,8 +441,9 @@ class ForkliftExpertPolicy:
                 self._bbox_abort_count += 1
 
             # Layer 2: Hard wall gate (Schmitt trigger)
-            # Use hysteresis: once passed inside hard_wall, must retreat
-            # past hard_wall + hyst before being allowed to re-enter.
+            # Check both tip AND body alignment at the entry boundary.
+            # tip_aligned alone can pass a severely yawed body, causing
+            # "diagonal insertion" jam (fork sides hit pallet slot walls).
             wall_enter = cfg.hard_wall
             wall_exit = cfg.hard_wall + cfg.hard_wall_hyst
             if dist <= wall_enter:
@@ -407,7 +451,7 @@ class ForkliftExpertPolicy:
             if self._passed_hard_wall:
                 if dist > wall_exit:
                     self._passed_hard_wall = False
-                elif not (body_aligned and tip_aligned):
+                elif not (tip_aligned and body_aligned):
                     bbox_abort = True
                     self._bbox_abort_hold = cfg.bbox_abort_hold_steps
                     self._bbox_abort_reason = "hard_wall"
@@ -430,12 +474,40 @@ class ForkliftExpertPolicy:
         # S1.0U: bbox_abort also forces retreat (bypass cooldown).
         if bbox_abort and not self._in_retreat:
             need_retreat = True
+            self._retreat_is_bbox = True
 
         # ---- Compute steer (shared across non-retreat stages) ----
-        # SIGN: positive lat (right offset) needs NEGATIVE steer (turn left)
+        # SIGN (Stage-E fix): positive lat (偏左) -> positive steer (向右修正)
+        # RWS Ackermann forward: positive steer rotates vehicle rightward.
         # PD controller: proportional on lat+yaw, derivative (damping) on yaw_rate
         yaw_rate = s["yaw_rate"]
-        raw_steer = -(cfg.k_lat * lat + cfg.k_yaw * yaw + cfg.k_damp * yaw_rate)
+
+        # Stage-E Step 2: yaw_ref tracking architecture.
+        # Replaces tip_lat fusion + coupled PD with a decoupled design:
+        #   1) Compute distance-weighted fork-tip target
+        #   2) Geometrically invert to target heading (yaw_ref)
+        #   3) Track yaw_ref with pure angle PD (no k_lat term → no coupling)
+        #
+        # This eliminates the k_yaw_eff sign-flip that GPT proved occurs
+        # when w_tip > 0.44 in the old linear-blend approach.
+
+        # 1. Distance blending weight: 0 far away, 1 at hard_wall
+        alpha = _clip((cfg.pre_insert_dist - dist)
+                      / (cfg.pre_insert_dist - cfg.hard_wall), 0.0, 1.0)
+
+        # 2. Fork-tip lateral target:
+        #    Far (alpha~0): tip_target~0 → yaw_ref drives lat toward 0
+        #    Near (alpha~1): tip_target relaxes to ±tip_ok, easing final entry
+        tip_target = alpha * _clip(lat, -cfg.fork_tip_lat_ok, cfg.fork_tip_lat_ok)
+
+        # 3. Geometric inverse: what yaw makes tip_lat == tip_target?
+        #    tip_lat = lat - fork_reach * sin(yaw) = tip_target
+        #    → sin(yaw_ref) = (lat - tip_target) / fork_reach
+        sin_yaw_ref = _clip((lat - tip_target) / cfg.fork_reach, -0.999, 0.999)
+        yaw_ref = math.asin(sin_yaw_ref)
+
+        # 4. Pure angle PD tracking (fully decoupled from lat)
+        raw_steer = cfg.k_yaw_ref * (yaw_ref - yaw) - cfg.k_damp * yaw_rate
 
         # Fix C: near-distance gain decay to prevent overshoot
         if dist < 1.0:
@@ -471,6 +543,7 @@ class ForkliftExpertPolicy:
         # ---- Compute drive + lift + steer by stage ----
         drive = 0.0
         lift = 0.0
+        align_penalty = 0.0   # Stage-C diagnostic; overwritten in docking stage
         stage = "docking"
 
         if insert_norm >= cfg.lift_on_insert_norm:
@@ -501,12 +574,21 @@ class ForkliftExpertPolicy:
             # tip_lat to be within corridor before allowing exit.
             if self._bbox_abort_hold > 0:
                 alignment_improved = False  # force hold until counter expires
+            elif self._retreat_is_bbox:
+                # bbox-triggered retreat must reach eff_retreat_target distance;
+                # alignment_improved alone exits too early (lat crosses zero
+                # during retreat), causing bbox_abort re-trigger oscillation.
+                alignment_improved = False
 
             # Determine exit reason
+            # bbox_abort retreats use a longer target distance to allow full re-approach.
+            eff_retreat_target = (cfg.bbox_retreat_target_dist
+                                 if self._retreat_is_bbox
+                                 else cfg.retreat_target_dist)
             if alignment_improved:
                 retreat_done = True
                 self._retreat_exit_reason = "alignment"
-            elif dist >= cfg.retreat_target_dist:
+            elif dist >= eff_retreat_target:
                 retreat_done = True
                 self._retreat_exit_reason = "target_dist"
             elif self._retreat_steps >= cfg.max_retreat_steps:
@@ -518,17 +600,22 @@ class ForkliftExpertPolicy:
             if retreat_done:
                 self._in_retreat = False
                 self._retreat_steps = 0
+                self._retreat_is_bbox = False
                 self._retreat_cooldown_remaining = cfg.retreat_cooldown
             else:
                 stage = "retreat"
                 drive = cfg.retreat_drive
                 # v5-B: parameterised lat_term with retreat_lat_sat
                 # (decouples slope from saturation point)
+                # Stage-E: negated so lat>0 (偏左) produces negative steer
+                # during reverse, making lat & yaw terms cooperate instead of cancel.
                 retreat_lat_term = (
-                    math.copysign(min(abs(lat) / cfg.retreat_lat_sat, 1.0), lat)
+                    -math.copysign(min(abs(lat) / cfg.retreat_lat_sat, 1.0), lat)
                     * cfg.retreat_steer_gain
                 )
-                retreat_yaw_term = yaw * cfg.retreat_k_yaw
+                # Stage-E: negated — during reverse, negative steer increases yaw,
+                # so yaw>0 needs negative steer to push yaw toward zero.
+                retreat_yaw_term = -yaw * cfg.retreat_k_yaw
                 retreat_steer = retreat_lat_term + retreat_yaw_term
                 raw_steer = _clip(retreat_steer,
                                   -cfg.retreat_max_steer, cfg.retreat_max_steer)
@@ -582,21 +669,26 @@ class ForkliftExpertPolicy:
                     v_cap = cfg.v_max * (1.0 - 0.5 * decel_t)  # 0.95 -> ~0.475
                     v = min(v, v_cap)
 
-                misalign = max(
-                    abs(lat) / max(cfg.lat_ok, 1e-6),
-                    abs(yaw) / max(cfg.yaw_ok, 1e-6),
+                # S1.0U Stage-C: Alignment-based speed modulation.
+                # Linearly blend from full speed to crawl based on alignment
+                # severity.  Replaces the old weak 1/(1+k*x) scaling which
+                # capped far-field reduction at only 10%.
+                # When |lat| or |yaw| exceed their "ok" threshold, a penalty
+                # ramps linearly from 0 to 1 (at the "slow" threshold).
+                # Speed = lerp(v, crawl, penalty).
+                lat_p = _clip(
+                    (abs(lat) - cfg.align_lat_ok)
+                    / (cfg.align_lat_slow - cfg.align_lat_ok),
+                    0.0, 1.0,
                 )
-                misalign = _clip(misalign, 0.0, 3.0)
-                # Stronger speed reduction when CLOSE and misaligned
-                # to prevent overshooting the pallet.  When far away,
-                # keep speed high so steering has room to correct.
-                if dist < 1.5:
-                    speed_scale = 1.0 / (1.0 + 0.20 * misalign)
-                    speed_scale = max(speed_scale, 0.65)
-                else:
-                    speed_scale = 1.0 / (1.0 + 0.08 * misalign)
-                    speed_scale = max(speed_scale, 0.90)
-                drive = v * speed_scale
+                yaw_p = _clip(
+                    (abs(yaw) - cfg.align_yaw_ok)
+                    / (cfg.align_yaw_slow - cfg.align_yaw_ok),
+                    0.0, 1.0,
+                )
+                align_penalty = max(lat_p, yaw_p)
+                v = v * (1.0 - align_penalty) + cfg.align_crawl_speed * align_penalty
+                drive = v
 
         # ---- Rate-limit for smoothness ----
         steer = self._rate_limit(
@@ -641,5 +733,7 @@ class ForkliftExpertPolicy:
             "bbox_abort_reason": self._bbox_abort_reason,
             "bbox_abort_count": self._bbox_abort_count,
             "passed_hard_wall": self._passed_hard_wall,
+            # S1.0U Stage-C: alignment speed modulation diagnostic
+            "align_penalty": align_penalty,
         }
         return action, info
