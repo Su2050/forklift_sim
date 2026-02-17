@@ -25,6 +25,18 @@ import math
 import numpy as np
 
 
+# Optional planning layer for ALIGN stage (motion primitives + A*).
+# Safe fallback: if the module is missing, policy behaves exactly as before.
+try:
+    from .align_lattice_planner_s10u import Pose2D as _AlignPose2D
+    from .align_lattice_planner_s10u import PlannerParams as _AlignPlannerParams
+    from .align_lattice_planner_s10u import plan_align as _plan_align_primitives
+except Exception:
+    _AlignPose2D = None
+    _AlignPlannerParams = None
+    _plan_align_primitives = None
+
+
 # ---------------------------------------------------------------------------
 # Small helpers
 # ---------------------------------------------------------------------------
@@ -122,6 +134,21 @@ class ExpertConfig:
     align_yaw_ok: float = math.radians(5.0)       # |yaw| below -> no penalty (~0.087 rad)
     align_yaw_slow: float = math.radians(15.0)    # |yaw| above -> full penalty (~0.262 rad)
     align_crawl_speed: float = 0.15               # floor speed (Ackermann needs some motion)
+
+    # ---- S1.0V: Optional ALIGN planner (motion primitives) ----
+    # If enabled, the policy can switch from local PD to a short-horizon
+    # primitive plan when it detects repeated bbox_abort or severe misalignment.
+    use_align_planner: bool = True
+    align_goal_x: float = 2.50           # default: same as tip_blend_dist (keep in sync)
+    align_goal_dx: float = 0.12
+    align_goal_dy: float = 0.12
+    align_goal_dyaw: float = math.radians(5.0)
+    align_trigger_bbox_abort_count: int = 1
+    align_replan_every: int = 12         # steps; replan helps absorb model mismatch
+    align_fwd_drive: float = 0.30        # throttle during planned forward primitives
+    align_rev_drive: float = -0.60       # throttle during planned reverse primitives
+    align_planner_dt: float = 0.02       # must match planner's dt for duration->steps
+    align_max_replan_fails: int = 3      # consecutive fails -> freeze planner this episode
 
     # ---- Retreat ----
     # Only trigger retreat when VERY close AND severely misaligned.
@@ -227,6 +254,16 @@ class ForkliftExpertPolicy:
         # Stage-C: episode-boundary detector
         self._prev_dist_front: float | None = None
 
+        # S1.0V: ALIGN planner state (optional)
+        self._align_active: bool = False
+        self._align_plan: list | None = None
+        self._align_plan_i: int = 0
+        self._align_steps_left: int = 0
+        self._align_cur_drive: float = 0.0
+        self._align_cur_steer: float = 0.0
+        self._align_replan_cd: int = 0
+        self._align_replan_fail_streak: int = 0
+
         # Validate specs
         assert "fields" in self.obs_spec, "obs_spec missing 'fields'"
         assert "fields" in self.action_spec, "action_spec missing 'fields'"
@@ -271,6 +308,16 @@ class ForkliftExpertPolicy:
         self._retreat_is_bbox = False
         # Stage-C: clear episode-boundary detector
         self._prev_dist_front = None
+
+        # S1.0V: ALIGN planner
+        self._align_active = False
+        self._align_plan = None
+        self._align_plan_i = 0
+        self._align_steps_left = 0
+        self._align_cur_drive = 0.0
+        self._align_cur_steer = 0.0
+        self._align_replan_cd = 0
+        self._align_replan_fail_streak = 0
 
     # -------------------------------------------------------------- helpers
     @staticmethod
@@ -656,39 +703,123 @@ class ForkliftExpertPolicy:
                 # -------- Docking stage --------
                 stage = "docking"
 
-                v = _clip(cfg.k_dist * dist, cfg.v_min, cfg.v_max)
-                if dist <= cfg.slow_dist:
-                    v *= _clip(dist / max(cfg.slow_dist, 1e-3), 0.15, 1.0)
+                # S1.0V: Optional ALIGN planning layer.
+                # Triggered by repeated bbox_abort OR severe misalignment near approach zone.
+                if cfg.use_align_planner and _plan_align_primitives is not None:
+                    severe_misalign = (abs(lat) > cfg.align_lat_ok or abs(yaw) > cfg.align_yaw_ok)
+                    near_zone = dist <= (cfg.tip_blend_dist + 0.6)
 
-                # S1.0U: deceleration zone — linearly reduce speed as
-                # forklift enters pre-contact region.
-                if dist < cfg.pre_insert_dist:
-                    decel_t = _clip((cfg.pre_insert_dist - dist)
-                                    / (cfg.pre_insert_dist - cfg.fork_reach),
-                                    0.0, 1.0)
-                    v_cap = cfg.v_max * (1.0 - 0.5 * decel_t)  # 0.95 -> ~0.475
-                    v = min(v, v_cap)
+                    trigger = (
+                        (self._bbox_abort_count >= cfg.align_trigger_bbox_abort_count)
+                        or (near_zone and severe_misalign)
+                    )
 
-                # S1.0U Stage-C: Alignment-based speed modulation.
-                # Linearly blend from full speed to crawl based on alignment
-                # severity.  Replaces the old weak 1/(1+k*x) scaling which
-                # capped far-field reduction at only 10%.
-                # When |lat| or |yaw| exceed their "ok" threshold, a penalty
-                # ramps linearly from 0 to 1 (at the "slow" threshold).
-                # Speed = lerp(v, crawl, penalty).
-                lat_p = _clip(
-                    (abs(lat) - cfg.align_lat_ok)
-                    / (cfg.align_lat_slow - cfg.align_lat_ok),
-                    0.0, 1.0,
-                )
-                yaw_p = _clip(
-                    (abs(yaw) - cfg.align_yaw_ok)
-                    / (cfg.align_yaw_slow - cfg.align_yaw_ok),
-                    0.0, 1.0,
-                )
-                align_penalty = max(lat_p, yaw_p)
-                v = v * (1.0 - align_penalty) + cfg.align_crawl_speed * align_penalty
-                drive = v
+                    # Enter planner mode
+                    if trigger and not self._align_active and self._align_replan_fail_streak < cfg.align_max_replan_fails:
+                        self._align_active = True
+                        self._align_plan = None
+                        self._align_plan_i = 0
+                        self._align_steps_left = 0
+                        self._align_replan_cd = 0
+
+                    # Exit planner mode once parked in the align box
+                    in_align_box = (
+                        abs(dist - cfg.align_goal_x) <= cfg.align_goal_dx
+                        and abs(lat) <= cfg.align_goal_dy
+                        and abs(yaw) <= cfg.align_goal_dyaw
+                    )
+                    if self._align_active and in_align_box:
+                        self._align_active = False
+                        self._align_plan = None
+                        self._align_replan_fail_streak = 0
+
+                    # Execute (or refresh) a primitive plan
+                    if self._align_active:
+                        need_replan = (
+                            self._align_plan is None
+                            or self._align_plan_i >= len(self._align_plan)
+                            or self._align_replan_cd <= 0
+                        )
+                        if need_replan:
+                            prm = _AlignPlannerParams(
+                                dt=cfg.align_planner_dt,
+                                max_steer=cfg.max_steer_far,
+                                fork_reach=cfg.fork_reach,
+                                fork_tip_lat_ok=cfg.fork_tip_lat_ok,
+                                pre_insert_dist=cfg.pre_insert_dist,
+                                hard_wall=cfg.hard_wall,
+                                final_lat_ok=cfg.final_lat_ok,
+                                final_yaw_ok=cfg.final_yaw_ok,
+                                goal_x=cfg.align_goal_x,
+                                goal_dx=cfg.align_goal_dx,
+                                goal_dy=cfg.align_goal_dy,
+                                goal_dyaw=cfg.align_goal_dyaw,
+                                x_max=max(6.0, dist + 2.0),
+                                y_max_abs=3.0,
+                            )
+                            res = _plan_align_primitives(
+                                _AlignPose2D(dist, lat, yaw), prm
+                            )
+                            if res is not None and len(res.primitives) > 0:
+                                self._align_plan = res.primitives
+                                self._align_plan_i = 0
+                                self._align_replan_cd = cfg.align_replan_every
+                                self._align_replan_fail_streak = 0
+                            else:
+                                self._align_replan_fail_streak += 1
+                                if self._align_replan_fail_streak >= cfg.align_max_replan_fails:
+                                    self._align_active = False
+                                    self._align_plan = None
+
+                        # Load next primitive when needed
+                        if self._align_active and self._align_plan is not None:
+                            if self._align_steps_left <= 0 and self._align_plan_i < len(self._align_plan):
+                                prim = self._align_plan[self._align_plan_i]
+                                self._align_plan_i += 1
+                                self._align_steps_left = max(
+                                    1, int(round(prim.duration / cfg.align_planner_dt))
+                                )
+                                self._align_cur_steer = prim.steer
+                                self._align_cur_drive = (
+                                    cfg.align_fwd_drive if prim.v >= 0.0
+                                    else cfg.align_rev_drive
+                                )
+
+                            if self._align_steps_left > 0:
+                                stage = "align_plan"
+                                drive = self._align_cur_drive
+                                raw_steer = self._align_cur_steer
+                                self._align_steps_left -= 1
+                                self._align_replan_cd -= 1
+
+                # If not in align_plan, use original docking controller
+                if stage != "align_plan":
+                    v = _clip(cfg.k_dist * dist, cfg.v_min, cfg.v_max)
+                    if dist <= cfg.slow_dist:
+                        v *= _clip(dist / max(cfg.slow_dist, 1e-3), 0.15, 1.0)
+
+                    # S1.0U: deceleration zone
+                    if dist < cfg.pre_insert_dist:
+                        decel_t = _clip((cfg.pre_insert_dist - dist)
+                                        / (cfg.pre_insert_dist - cfg.fork_reach),
+                                        0.0, 1.0)
+                        v_cap = cfg.v_max * (1.0 - 0.5 * decel_t)
+                        v = min(v, v_cap)
+
+                    # S1.0U Stage-C: Alignment-based speed modulation
+                    lat_p = _clip(
+                        (abs(lat) - cfg.align_lat_ok)
+                        / (cfg.align_lat_slow - cfg.align_lat_ok),
+                        0.0, 1.0,
+                    )
+                    yaw_p = _clip(
+                        (abs(yaw) - cfg.align_yaw_ok)
+                        / (cfg.align_yaw_slow - cfg.align_yaw_ok),
+                        0.0, 1.0,
+                    )
+                    align_penalty = max(lat_p, yaw_p)
+                    v = v * (1.0 - align_penalty) + cfg.align_crawl_speed * align_penalty
+                    drive = v
 
         # ---- Rate-limit for smoothness ----
         steer = self._rate_limit(
@@ -735,5 +866,10 @@ class ForkliftExpertPolicy:
             "passed_hard_wall": self._passed_hard_wall,
             # S1.0U Stage-C: alignment speed modulation diagnostic
             "align_penalty": align_penalty,
+            # S1.0V: planner diagnostics
+            "align_active": self._align_active,
+            "align_plan_len": len(self._align_plan) if self._align_plan else 0,
+            "align_plan_i": self._align_plan_i,
+            "align_replan_fail_streak": self._align_replan_fail_streak,
         }
         return action, info
