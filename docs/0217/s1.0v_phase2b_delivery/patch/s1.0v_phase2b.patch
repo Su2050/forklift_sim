@@ -1,0 +1,261 @@
+diff --git a/forklift_expert_policy_project/forklift_expert/align_lattice_planner_s10u.py b/forklift_expert_policy_project/forklift_expert/align_lattice_planner_s10u.py
+index 614929e..dc19980 100644
+--- a/forklift_expert_policy_project/forklift_expert/align_lattice_planner_s10u.py
++++ b/forklift_expert_policy_project/forklift_expert/align_lattice_planner_s10u.py
+@@ -80,6 +80,7 @@ class PlannerParams:
+     # Kinematics
+     wheelbase: float = 1.6
+     dt: float = 1.0/30.0            # match env control dt (sim 1/120, decimation 4)
++    steer_angle_rad: float = 0.6    # Phase-2b: env scales action by this to get physical angle
+ 
+     # Primitive set
+     max_steer: float = 0.65          # match cfg.max_steer_far by default
+@@ -210,7 +211,7 @@ def rollout_with_path(p: Pose2D, prim: Primitive, prm: PlannerParams) -> Tuple[P
+     step_i = 0
+     while t < prim.duration - 1e-9:
+         v = prim.v
+-        kappa = math.tan(prim.steer) / prm.wheelbase
++        kappa = math.tan(prim.steer * prm.steer_angle_rad) / prm.wheelbase
+ 
+         # Yaw error dynamics (match s1.0u sign convention)
+         yaw = _wrap_pi(yaw + v * kappa * prm.dt)
+@@ -248,8 +249,9 @@ def heuristic(p: Pose2D, prm: PlannerParams) -> float:
+     dy = p.y - prm.goal_y
+     d = math.hypot(dx, dy)
+     # Soft penalty: discourage backing too far away from goal_x
+-    if p.x > prm.goal_x + 0.5:
+-        d += 0.3 * (p.x - prm.goal_x - 0.5)
++    # Phase-2: tightened threshold (0.5->0.3) and weight (0.3->0.8)
++    if p.x > prm.goal_x + 0.3:
++        d += 0.8 * (p.x - prm.goal_x - 0.3)
+     yaw_pen = prm.w_yaw_h * abs(_wrap_pi(p.yaw))
+     return d + yaw_pen
+ 
+diff --git a/forklift_expert_policy_project/forklift_expert/expert_policy.py b/forklift_expert_policy_project/forklift_expert/expert_policy.py
+index e4af806..4d727c3 100644
+--- a/forklift_expert_policy_project/forklift_expert/expert_policy.py
++++ b/forklift_expert_policy_project/forklift_expert/expert_policy.py
+@@ -88,7 +88,7 @@ class ExpertConfig:
+                                        # 2.40→2.05: Ackermann geometry self-aligns tip_lat
+                                        # at hard_wall; corridor at 2.1-2.4 was false-positive
+     bbox_abort_hold_steps: int = 8     # min steps to hold abort-triggered retreat
+-    bbox_retreat_target_dist: float = 2.7  # retreat target when bbox_abort fires
++    bbox_retreat_target_dist: float = 2.5  # Phase-2b: from 2.7, more OOB margin
+                                            # must be > pre_insert_dist to give full approach run
+ 
+     # ---- S1.0U Stage-B: Near-field tip_lat fusion ----
+@@ -149,22 +149,27 @@ class ExpertConfig:
+     align_plan_goal_dyaw: float = math.radians(8.0)
+ 
+     align_trigger_bbox_abort_count: int = 1
+-    align_replan_every: int = 10         # was 12->6; 10 balances MPC freshness vs ARM CPU budget
+     align_fwd_drive: float = 0.30        # throttle during planned forward primitives
+-    align_rev_drive: float = -0.35       # was -0.60; closer to planner v_rev assumption
++    align_rev_drive: float = -0.25       # Phase-2: from -0.35, limit reverse displacement
+     align_planner_dt: float = 1.0/30.0   # was 0.02; MUST match env control dt (sim 1/120, dec 4)
+-    align_x_max_abs: float = 3.0         # hard cap for dist_front to avoid env OOB termination
+-    align_x_headroom: float = 0.6        # allow limited reverse headroom from current dist
++    align_x_max_abs: float = 2.85        # Phase-2: from 3.0, 0.15m margin before env OOB
++    align_x_headroom: float = 0.3        # Phase-2: from 0.6, tighter reverse leash
+     align_trigger_cooldown_steps: int = 24  # after successful align, block re-trigger (anti ping-pong)
+ 
+     # Planner parameter pass-through
+     align_planner_max_expansions: int = 12000
+     align_planner_v_rev: float = -0.20
+-    align_planner_reverse_penalty: float = 1.5
++    align_planner_reverse_penalty: float = 2.5
+     align_planner_steer_levels: Tuple[float, ...] = (-1.0, -0.5, 0.0, 0.5, 1.0)
+ 
+     align_max_replan_fails: int = 3      # consecutive fails -> freeze planner this episode
+ 
++    # Drift monitoring: periodic check of actual vs predicted pose
++    align_drift_check_every: int = 5    # check every N steps (not replan, just check)
++    align_drift_x_tol: float = 0.15     # x (dist) drift tolerance before replan
++    align_drift_y_tol: float = 0.10     # y (lat) drift tolerance before replan
++    align_drift_yaw_tol: float = 0.10   # yaw drift tolerance (rad) before replan
++
+     # ---- Retreat ----
+     # Only trigger retreat when VERY close AND severely misaligned.
+     # Stress-test showed docking-retreat cycling is the #1 failure mode;
+@@ -206,7 +211,7 @@ class ExpertConfig:
+     backoff_steps: int = 6
+ 
+     # ---- Lift ----
+-    lift_on_insert_norm: float = 0.75
++    lift_on_insert_norm: float = 0.40  # Phase-2b: was 0.75, physical max ~0.477
+     lift_cmd: float = 0.60
+ 
+     # ---- Safety / smoothness ----
+@@ -277,9 +282,14 @@ class ForkliftExpertPolicy:
+         self._align_steps_left: int = 0
+         self._align_cur_drive: float = 0.0
+         self._align_cur_steer: float = 0.0
+-        self._align_replan_cd: int = 0
+         self._align_replan_fail_streak: int = 0
+         self._align_trigger_cooldown: int = 0  # S1.0V: post-align cooldown counter
++        self._align_plan_snapshot: dict | None = None  # S1.0V: one-shot snapshot for logging
++        self._align_predicted_path: list | None = None  # predicted (x,y,yaw) tuples from planner
++        self._align_path_cursor: int = 0        # index into predicted_path for drift check
++        self._align_drift_check_cd: int = 0     # countdown to next drift check
++        self._align_drift: tuple | None = None  # latest (drift_x, drift_y, drift_yaw) or None
++        self._align_replan_reason: str = ""     # why last replan happened
+ 
+         # Validate specs
+         assert "fields" in self.obs_spec, "obs_spec missing 'fields'"
+@@ -334,9 +344,14 @@ class ForkliftExpertPolicy:
+         self._align_steps_left = 0
+         self._align_cur_drive = 0.0
+         self._align_cur_steer = 0.0
+-        self._align_replan_cd = 0
+         self._align_replan_fail_streak = 0
+         self._align_trigger_cooldown = 0
++        self._align_plan_snapshot = None
++        self._align_predicted_path = None
++        self._align_path_cursor = 0
++        self._align_drift_check_cd = 0
++        self._align_drift = None
++        self._align_replan_reason = ""
+ 
+     # -------------------------------------------------------------- helpers
+     @staticmethod
+@@ -621,7 +636,8 @@ class ForkliftExpertPolicy:
+         if insert_norm >= cfg.lift_on_insert_norm:
+             # -------- Lift stage --------
+             stage = "lift"
+-            drive = 0.0
++            drive = 0.15      # Phase-2b: small forward push to prevent physics jitter pullback
++            raw_steer = 0.0   # Phase-2b: suppress lateral force during lift
+             lift = cfg.lift_cmd
+ 
+         elif self._in_retreat or need_retreat:
+@@ -660,6 +676,11 @@ class ForkliftExpertPolicy:
+             if alignment_improved:
+                 retreat_done = True
+                 self._retreat_exit_reason = "alignment"
++            elif dist >= cfg.align_x_max_abs:
++                # Phase-2b: hard OOB guard — env terminates at dist>3.0 for 30 steps,
++                # so stop retreat right at align_x_max_abs (2.85) to prevent accumulation
++                retreat_done = True
++                self._retreat_exit_reason = "oob_guard"
+             elif dist >= eff_retreat_target:
+                 retreat_done = True
+                 self._retreat_exit_reason = "target_dist"
+@@ -677,6 +698,10 @@ class ForkliftExpertPolicy:
+             else:
+                 stage = "retreat"
+                 drive = cfg.retreat_drive
++                # Phase-2b: deceleration band near OOB boundary
++                if dist > 2.3:
++                    fade = min((dist - 2.3) / 0.4, 1.0)  # 2.3->2.7: 0->1
++                    drive = drive * (1.0 - 0.7 * fade)    # -1.0 -> -0.3
+                 # v5-B: parameterised lat_term with retreat_lat_sat
+                 # (decouples slope from saturation point)
+                 # Stage-E: negated so lat>0 (偏左) produces negative steer
+@@ -747,7 +772,6 @@ class ForkliftExpertPolicy:
+                         self._align_plan = None
+                         self._align_plan_i = 0
+                         self._align_steps_left = 0
+-                        self._align_replan_cd = 0
+ 
+                     # Exit planner mode once parked in the align box
+                     # Single-sided dist check: allow being closer than goal_x (don't force reverse)
+@@ -765,14 +789,44 @@ class ForkliftExpertPolicy:
+ 
+                     # Execute (or refresh) a primitive plan
+                     if self._align_active:
+-                        need_replan = (
+-                            self._align_plan is None
+-                            or self._align_plan_i >= len(self._align_plan)
+-                            or self._align_replan_cd <= 0
+-                        )
++                        # --- Event-driven replan decision ---
++                        self._align_drift = None
++                        need_replan = False
++                        replan_reason = ""
++
++                        if self._align_plan is None:
++                            need_replan = True
++                            replan_reason = "init"
++                        elif self._align_plan_i >= len(self._align_plan):
++                            need_replan = True
++                            replan_reason = "plan_done"
++                        elif bbox_abort:
++                            need_replan = True
++                            replan_reason = "bbox_abort"
++
++                        # Drift check: compare actual pose vs predicted path
++                        if not need_replan and self._align_predicted_path:
++                            self._align_drift_check_cd -= 1
++                            if self._align_drift_check_cd <= 0:
++                                self._align_drift_check_cd = cfg.align_drift_check_every
++                                idx = min(self._align_path_cursor,
++                                          len(self._align_predicted_path) - 1)
++                                px, py, pyaw = self._align_predicted_path[idx]
++                                drift_x = abs(dist - px)
++                                drift_y = abs(lat - py)
++                                drift_yaw = abs(_wrap_pi(yaw - pyaw))
++                                self._align_drift = (drift_x, drift_y, drift_yaw)
++                                if (drift_x > cfg.align_drift_x_tol
++                                        or drift_y > cfg.align_drift_y_tol
++                                        or drift_yaw > cfg.align_drift_yaw_tol):
++                                    need_replan = True
++                                    replan_reason = "drift"
++
+                         if need_replan:
++                            self._align_replan_reason = replan_reason
+                             prm = _AlignPlannerParams(
+                                 dt=cfg.align_planner_dt,
++                                steer_angle_rad=0.6,  # Phase-2b: match env steer scaling
+                                 max_steer=cfg.max_steer_far,
+                                 fork_reach=cfg.fork_reach,
+                                 fork_tip_lat_ok=cfg.fork_tip_lat_ok,
+@@ -797,8 +851,23 @@ class ForkliftExpertPolicy:
+                             if res is not None and len(res.primitives) > 0:
+                                 self._align_plan = res.primitives
+                                 self._align_plan_i = 0
+-                                self._align_replan_cd = cfg.align_replan_every
+                                 self._align_replan_fail_streak = 0
++                                self._align_predicted_path = [
++                                    (p.x, p.y, p.yaw) for p in res.predicted_path
++                                ] if res.predicted_path else None
++                                self._align_path_cursor = 0
++                                self._align_drift_check_cd = cfg.align_drift_check_every
++                                self._align_plan_snapshot = {
++                                    "start": (dist, lat, yaw),
++                                    "final": (res.final_pose.x, res.final_pose.y, res.final_pose.yaw),
++                                    "expansions": res.expansions,
++                                    "x_max": prm.x_max,
++                                    "reason": replan_reason,
++                                    "primitives": [
++                                        {"steer": p.steer, "v": p.v, "dur": p.duration}
++                                        for p in res.primitives
++                                    ],
++                                }
+                             else:
+                                 self._align_replan_fail_streak += 1
+                                 if self._align_replan_fail_streak >= cfg.align_max_replan_fails:
+@@ -818,13 +887,13 @@ class ForkliftExpertPolicy:
+                                     cfg.align_fwd_drive if prim.v >= 0.0
+                                     else cfg.align_rev_drive
+                                 )
++                                self._align_path_cursor += self._align_steps_left
+ 
+                             if self._align_steps_left > 0:
+                                 stage = "align_plan"
+                                 drive = self._align_cur_drive
+                                 raw_steer = self._align_cur_steer
+                                 self._align_steps_left -= 1
+-                                self._align_replan_cd -= 1
+ 
+                 # If not in align_plan, use original docking controller
+                 if stage != "align_plan":
+@@ -907,5 +976,9 @@ class ForkliftExpertPolicy:
+             "align_replan_fail_streak": self._align_replan_fail_streak,
+             "align_armed": self._align_armed,
+             "align_trigger_cooldown": self._align_trigger_cooldown,
++            "align_plan_snapshot": self._align_plan_snapshot,
++            "align_drift": self._align_drift,
++            "align_replan_reason": self._align_replan_reason,
+         }
++        self._align_plan_snapshot = None
+         return action, info
