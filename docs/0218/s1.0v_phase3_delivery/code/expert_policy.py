@@ -101,11 +101,6 @@ class ExpertConfig:
     bbox_retreat_exit_tip_abs_cap: float = 0.45  # absolute tip_lat cap (overrides ratio at large dist)
     bbox_retreat_exit_lat_abs: float = 0.40     # |lat| absolute upper limit
     bbox_retreat_exit_yaw_max: float = math.radians(20.0)  # |yaw| upper limit
-    bbox_retreat_max_dist: float = 2.70         # Phase-4: hard ceiling — never retreat beyond this
-
-    # ---- Phase-4: OOB escape speed floor ----
-    oob_escape_dist: float = 2.60       # when dist > this, override crawl with min forward speed
-    oob_escape_speed: float = 0.45      # minimum forward speed in escape zone
 
     # ---- S1.0U Stage-B: Near-field tip_lat fusion ----
     # Blend steering target from body-lat to fork-tip-lat as vehicle approaches.
@@ -150,9 +145,6 @@ class ExpertConfig:
     align_yaw_ok: float = math.radians(5.0)       # |yaw| below -> no penalty (~0.087 rad)
     align_yaw_slow: float = math.radians(15.0)    # |yaw| above -> full penalty (~0.262 rad)
     align_crawl_speed: float = 0.15               # floor speed (Ackermann needs some motion)
-    # Phase-4: distance-dependent fade — relax align_penalty at far distances
-    align_penalty_fade_dist: float = 2.20   # start fading penalty above this dist
-    align_penalty_fade_range: float = 0.40  # full fade at fade_dist + range (2.60m)
 
     # ---- S1.0V: Optional ALIGN planner (motion primitives) ----
     # If enabled, the policy can switch from local PD to a short-horizon
@@ -172,7 +164,7 @@ class ExpertConfig:
     align_rev_drive: float = -0.25       # Phase-2: from -0.35, limit reverse displacement
     align_planner_dt: float = 1.0/30.0   # was 0.02; MUST match env control dt (sim 1/120, dec 4)
     align_x_max_abs: float = 2.85        # Phase-2: from 3.0, 0.15m margin before env OOB
-    align_x_headroom: float = 0.3        # Phase-2: tighter reverse leash (0.6 tested in Phase-4b, regressed)
+    align_x_headroom: float = 0.3        # Phase-2: from 0.6, tighter reverse leash
     align_trigger_cooldown_steps: int = 24  # after successful align, block re-trigger (anti ping-pong)
 
     # Planner parameter pass-through
@@ -241,7 +233,7 @@ class ExpertConfig:
     lift_off_insert_norm: float = 0.32  # Phase-3: hysteresis exit threshold (lower than entry)
     lift_hold_steps: int = 30           # Phase-3: min steps to stay in lift after entry
     lift_drive_cap: float = 0.15        # Phase-3: hard cap on drive after rate-limit (bypass residual)
-    lift_enter_lat_gate: float = 0.25   # Phase-4: relaxed from 0.20 to match ins_stage_lat_gate
+    lift_enter_lat_gate: float = 0.20   # Phase-3: |lat| must be below this to enter lift
     lift_enter_yaw_gate: float = math.radians(14.0)  # Phase-3: |yaw| must be below this (~0.8 × ins_stage_yaw_gate)
     lift_cmd: float = 0.60
 
@@ -749,9 +741,6 @@ class ForkliftExpertPolicy:
             if alignment_improved:
                 retreat_done = True
                 self._retreat_exit_reason = "alignment"
-            elif self._retreat_is_bbox and dist >= cfg.bbox_retreat_max_dist:
-                retreat_done = True
-                self._retreat_exit_reason = "bbox_max_dist"
             elif dist >= cfg.align_x_max_abs:
                 # Phase-2b: hard OOB guard — env terminates at dist>3.0 for 30 steps,
                 # so stop retreat right at align_x_max_abs (2.85) to prevent accumulation
@@ -1014,7 +1003,6 @@ class ForkliftExpertPolicy:
                         v = min(v, v_cap)
 
                     # S1.0U Stage-C: Alignment-based speed modulation
-                    v_before_penalty = v
                     lat_p = _clip(
                         (abs(lat) - cfg.align_lat_ok)
                         / (cfg.align_lat_slow - cfg.align_lat_ok),
@@ -1028,24 +1016,11 @@ class ForkliftExpertPolicy:
                     align_penalty = max(lat_p, yaw_p)
                     v = v * (1.0 - align_penalty) + cfg.align_crawl_speed * align_penalty
 
-                    # Phase-4: fade penalty at far distances (let vehicle correct with speed)
-                    if dist > cfg.align_penalty_fade_dist:
-                        fade = _clip(
-                            (dist - cfg.align_penalty_fade_dist)
-                            / cfg.align_penalty_fade_range,
-                            0.0, 1.0,
-                        )
-                        v = v + fade * (v_before_penalty - v)
-
                     # Phase-3: soft corridor guard
                     if dist < cfg.pre_insert_dist + cfg.corridor_guard_band:
                         corridor_ratio = abs(tip_lat) / max(safe_corridor, 1e-3)
                         if corridor_ratio > cfg.corridor_guard_ratio:
                             v = min(v, cfg.corridor_guard_speed)
-
-                    # Phase-4: OOB escape — far from pallet, override crawl to rush back
-                    if dist > cfg.oob_escape_dist:
-                        v = max(v, cfg.oob_escape_speed)
 
                     drive = v
 
@@ -1113,8 +1088,6 @@ class ForkliftExpertPolicy:
             "align_plan_snapshot": self._align_plan_snapshot,
             "align_drift": self._align_drift,
             "align_replan_reason": self._align_replan_reason,
-            # Phase-4: explicit success marker
-            "outcome": "success" if (stage == "lift" and dist < 1.1) else "running",
         }
         self._align_plan_snapshot = None
         return action, info

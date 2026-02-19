@@ -194,7 +194,6 @@ def main() -> None:
     stage_counts: Dict[str, int] = {}
     ep_min_lat = float("inf")
     ep_max_ins = 0.0
-    ep_outcome = "running"
     ep_init_dist = 0.0
     ep_init_lat = 0.0
     ep_init_yaw = 0.0
@@ -205,11 +204,10 @@ def main() -> None:
     ep_summaries: List[Dict[str, Any]] = []
 
     def _reset_ep_accumulators(dbg: Dict[str, Any]) -> None:
-        nonlocal stage_counts, ep_min_lat, ep_max_ins, ep_step, ep_outcome
+        nonlocal stage_counts, ep_min_lat, ep_max_ins, ep_step
         nonlocal ep_init_dist, ep_init_lat, ep_init_yaw, ep_init_dy, ep_vf_zero_count
         stage_counts = {}
         ep_min_lat = abs(dbg.get("lat", 0.5))
-        ep_outcome = "running"
         ep_max_ins = dbg.get("insert_norm", 0.0)
         ep_init_dist = dbg.get("dist_front", 0.0)
         ep_init_lat = dbg.get("lat", 0.0)
@@ -247,8 +245,6 @@ def main() -> None:
         stage_counts[stage_name] = stage_counts.get(stage_name, 0) + 1
         ep_min_lat = min(ep_min_lat, abs(d["lat"]))
         ep_max_ins = max(ep_max_ins, d["insert_norm"])
-        if d.get("outcome") == "success":
-            ep_outcome = "success"
         if abs(d["v_forward"]) < 0.01:
             ep_vf_zero_count += 1
 
@@ -312,14 +308,12 @@ def main() -> None:
                     "final_lat": d["lat"],
                     "final_yaw": d["yaw"],
                     "final_ins": d["insert_norm"],
-                    "outcome": ep_outcome,
                 }
                 ep_summaries.append(summary)
 
                 log(
                     f"  [EP {ep_done:3d}] {ep_step:4d} steps  "
                     f"reason={reason:10s}  final_stage={final_stage:10s}  "
-                    f"outcome={ep_outcome:7s}  "
                     f"init(d={ep_init_dist:.2f} lat={ep_init_lat:.3f} yaw={ep_init_yaw:.3f} dy={ep_init_dy:.3f})  "
                     f"end(d={d['dist_front']:.2f} lat={d['lat']:.3f} ins={d['insert_norm']:.3f})  "
                     f"min_lat={ep_min_lat:.3f}  max_ins={ep_max_ins:.3f}  "
@@ -356,8 +350,7 @@ def main() -> None:
         avg_max_ins = sum(s["max_ins"] for s in ep_summaries) / n
         avg_min_lat = sum(s["min_lat"] for s in ep_summaries) / n
         n_reached_ins = sum(1 for s in ep_summaries if s["max_ins"] >= 0.1)
-        n_reached_lift = sum(1 for s in ep_summaries if s["stages"].get("lift", 0) > 0)
-        n_success = sum(1 for s in ep_summaries if s.get("outcome") == "success")
+        n_reached_lift = sum(1 for s in ep_summaries if s["max_ins"] >= 0.75)
 
         n_retreat_stuck = 0
         for s in ep_summaries:
@@ -374,8 +367,7 @@ def main() -> None:
         log(f"  avg min |lat|: {avg_min_lat:.3f}")
         log(f"  avg max ins:  {avg_max_ins:.3f}")
         log(f"  reached insertion (ins>=0.1): {n_reached_ins}/{n}")
-        log(f"  reached lift (has lift stage):{n_reached_lift}/{n}")
-        log(f"  success terminated:           {n_success}/{n}")
+        log(f"  reached lift (ins>=0.75):     {n_reached_lift}/{n}")
         log(f"  stuck in retreat (>80%):      {n_retreat_stuck}/{n}")
         log(f"{'='*70}")
 
