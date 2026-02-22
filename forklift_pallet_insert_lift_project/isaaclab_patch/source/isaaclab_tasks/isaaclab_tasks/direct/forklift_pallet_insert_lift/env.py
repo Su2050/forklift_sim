@@ -833,15 +833,20 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         lift_vel = self._joint_vel[:, self._lift_id:self._lift_id + 1]
 
         # insertion depth (normalized)
-        # 注意：tip 是世界坐标，必须用 pallet 的世界坐标计算 front_x，不能用局部坐标标量
+        # S1.0W: 修复观测坐标系与奖励计算不一致的问题 (Bug 1)。使用托盘局部坐标系投影。
         tip = self._compute_fork_tip()
-        pallet_front_x = pallet_pos[:, 0] - self.cfg.pallet_depth_m * 0.5  # (N,) 世界坐标
-        insert_depth = torch.clamp(tip[:, 0] - pallet_front_x, min=0.0)
-        insert_norm = (insert_depth / (self.cfg.pallet_depth_m + 1e-6)).unsqueeze(-1)
-
-        # S1.0N: pallet center line frame 误差（与 _get_rewards 同源几何）
         cp_obs = torch.cos(pallet_yaw)
         sp_obs = torch.sin(pallet_yaw)
+        u_in_obs = torch.stack([cp_obs, sp_obs], dim=-1)
+        rel_tip_obs = tip[:, :2] - pallet_pos[:, :2]
+        s_tip_obs = torch.sum(rel_tip_obs * u_in_obs, dim=-1)
+        s_front_obs = -0.5 * self.cfg.pallet_depth_m
+        insert_depth_obs = torch.clamp(s_tip_obs - s_front_obs, min=0.0)
+        insert_norm = torch.clamp(
+            insert_depth_obs / (self.cfg.pallet_depth_m + 1e-6), 0.0, 1.0
+        ).unsqueeze(-1)
+
+        # S1.0N: pallet center line frame 误差（与 _get_rewards 同源几何）
         v_lat_obs = torch.stack([-sp_obs, cp_obs], dim=-1)
         y_signed_obs = torch.sum((root_pos[:, :2] - pallet_pos[:, :2]) * v_lat_obs, dim=-1)
         # S1.0S Phase-0.5: 使用可配置尺度替代硬编码 0.5（消除 |y|>scale 时观测饱和）
@@ -1082,8 +1087,15 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
              milestone_insert10, milestone_insert30,
              milestone_fine_align, milestone_precise_align], dim=-1
         )
-        new_hits = milestone_hits & (~self._milestone_flags)
-        self._milestone_flags |= milestone_hits
+
+        # S1.0W: 修复里程碑永久剥夺 Bug (Bug 2)。
+        # 死区判定提前：仅在非死区时才记录 flag 并发放奖励，
+        # 死区内的触发不写入 flag，退出死区后仍可重新获得。
+        in_dead_zone_now = (insert_norm > self.cfg.dead_zone_insert_thresh) & \
+                           (y_err > self.cfg.dead_zone_lat_thresh)
+        valid_for_flag = milestone_hits & (~in_dead_zone_now.unsqueeze(-1))
+        new_hits = valid_for_flag & (~self._milestone_flags)
+        self._milestone_flags |= new_hits
 
         milestone_reward = (
             new_hits[:, 0].float() * self.cfg.rew_milestone_approach
@@ -1093,15 +1105,6 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
             + new_hits[:, 4].float() * self.cfg.rew_milestone_insert_30
             + new_hits[:, 5].float() * self.cfg.rew_milestone_fine_align
             + new_hits[:, 6].float() * self.cfg.rew_milestone_precise_align
-        )
-
-        # S1.0Q: 死区内衰减 milestone，防止绕过插入门控（A 组配套）
-        in_dead_zone_now = (insert_norm > self.cfg.dead_zone_insert_thresh) & \
-                           (y_err > self.cfg.dead_zone_lat_thresh)
-        milestone_reward = torch.where(
-            in_dead_zone_now,
-            milestone_reward * self.cfg.milestone_dead_zone_scale,
-            milestone_reward
         )
 
         # ---- S1.0T-fix: 举升里程碑（插入门控 + 阈值穿越触发）----
