@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import os
 from isaaclab.utils import configclass
 import isaaclab.sim as sim_utils
 from isaaclab.actuators import ImplicitActuatorCfg
@@ -363,7 +364,7 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     pallet_cfg: RigidObjectCfg = RigidObjectCfg(
         prim_path="/World/envs/env_.*/Pallet",
         spawn=sim_utils.UsdFileCfg(
-            usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/Pallet/pallet.usd",
+            usd_path=f"{os.environ.get('ISAACLAB_PATH', '/home/uniubi/projects/forklift_sim/IsaacLab')}/../assets/pallet_com_shifted.usd",
             scale=(1.8, 1.8, 1.8),  # 托盘统一缩放（修改后需同步更新相关几何参数）
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 rigid_body_enabled=True,
