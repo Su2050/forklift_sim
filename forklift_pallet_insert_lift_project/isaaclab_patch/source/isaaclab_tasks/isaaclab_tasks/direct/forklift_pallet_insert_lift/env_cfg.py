@@ -79,7 +79,7 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     # 原 2/3 (1.44m) 阈值物理不可达。降低到 0.40 (0.864m)，留 15% 安全余量。
     # 详见 docs/diagnostic_reports/success_sanity_check_2026-02-10.md
     insert_fraction: float = 0.40
-    lift_delta_m: float = 1.0      # S1.0T: 0.25→1.0（工业搬运标准）
+    lift_delta_m: float = 0.3      # S1.0T: 0.25→1.0, 防作弊计划降低门槛 1.0→0.3
     # S1.0M: hold_time_s 从 1.0 降到 0.33（hold_steps: 30→~10）。
     # sanity check A2 显示即使理论成功位姿，hold_counter 最高 4/30 即断，
     # 物理抖动使 30 步连续保持几乎不可能。课程阶段先出 success 再收紧。
@@ -95,6 +95,10 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     lift_exit_epsilon: float = 0.08     # S1.0T: 0.02→0.08 等比放大 (m)
     # S1.0O-C2: hold counter 衰减（越界不清零，改为 *= decay）
     hold_counter_decay: float = 0.8
+    
+    # ---- 防作弊与终局优化 ----
+    max_insert_z_err: float = 0.4       # 最大允许的货叉与托盘高度差（防止隔空飞越作弊）
+    rew_stay_still: float = 0.5         # 成功后保持静止的奖励
 
     # ===== 动作范围（[-1, 1] 的归一化动作会乘以下列缩放）=====
     wheel_speed_rad_s: float = 20.0

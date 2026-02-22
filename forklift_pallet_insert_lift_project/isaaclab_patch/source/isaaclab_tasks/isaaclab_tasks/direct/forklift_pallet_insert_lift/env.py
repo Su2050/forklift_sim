@@ -842,6 +842,14 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         s_tip_obs = torch.sum(rel_tip_obs * u_in_obs, dim=-1)
         s_front_obs = -0.5 * self.cfg.pallet_depth_m
         insert_depth_obs = torch.clamp(s_tip_obs - s_front_obs, min=0.0)
+        
+        # 新增 Z 轴对齐约束（防止隔空飞越作弊）
+        lift_height_obs = tip[:, 2] - self._fork_tip_z0
+        pallet_lift_height_obs = pallet_pos[:, 2] - self.cfg.pallet_cfg.init_state.pos[2]
+        z_err_obs = torch.abs(lift_height_obs - pallet_lift_height_obs)
+        valid_insert_z_obs = z_err_obs < self.cfg.max_insert_z_err
+        insert_depth_obs = torch.where(valid_insert_z_obs, insert_depth_obs, torch.zeros_like(insert_depth_obs))
+        
         insert_norm = torch.clamp(
             insert_depth_obs / (self.cfg.pallet_depth_m + 1e-6), 0.0, 1.0
         ).unsqueeze(-1)
@@ -937,6 +945,11 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         yaw_err_deg = torch.abs(yaw_err) * (180.0 / math.pi)
         yaw_err_rad = torch.abs(yaw_err)
 
+        # 举升
+        lift_height = tip[:, 2] - self._fork_tip_z0
+        delta_lift = lift_height - self._last_lift_pos
+        self._last_lift_pos = lift_height.detach()
+
         # 沿托盘插入轴的标量坐标
         rel_tip = tip[:, :2] - pallet_pos[:, :2]
         s_tip = torch.sum(rel_tip * u_in, dim=-1)
@@ -944,6 +957,13 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
 
         dist_front = torch.clamp(s_front - s_tip, min=0.0)
         insert_depth = torch.clamp(s_tip - s_front, min=0.0)
+        
+        # 新增 Z 轴对齐约束（防止隔空飞越作弊）
+        pallet_lift_height = pallet_pos[:, 2] - self.cfg.pallet_cfg.init_state.pos[2]
+        z_err = torch.abs(lift_height - pallet_lift_height)
+        valid_insert_z = z_err < self.cfg.max_insert_z_err
+        insert_depth = torch.where(valid_insert_z, insert_depth, torch.zeros_like(insert_depth))
+        
         insert_norm = torch.clamp(insert_depth / (self.cfg.pallet_depth_m + 1e-6), 0.0, 1.0)
         # S1.0L: Stage1/2 距离参考点改为 base（插入深度仍基于 tip）。
         rel_base = root_pos[:, :2] - pallet_pos[:, :2]
@@ -953,11 +973,6 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
 
         # 仍需 insert_depth 用于 _apply_action 安全制动
         self._last_insert_depth = insert_depth.detach()
-
-        # 举升
-        lift_height = tip[:, 2] - self._fork_tip_z0
-        delta_lift = lift_height - self._last_lift_pos
-        self._last_lift_pos = lift_height.detach()
 
         # 2D 距离（用于连续距离惩罚）
         d_xy = torch.sqrt(stage_dist_front ** 2 + y_err ** 2)
@@ -1026,7 +1041,8 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
             (insert_norm - self.cfg.premature_hard_thresh)
             / (self.cfg.premature_soft_thresh - self.cfg.premature_hard_thresh + 1e-6)
         )
-        pen_premature = -self.cfg.k_pre * (1.0 - premature_fade) * torch.clamp(delta_lift, min=0.0)
+        # 防作弊修复：从动作惩罚(delta_lift)改为绝对高度惩罚(lift_height)，并加上 clamp 防止负高度变成正奖励
+        pen_premature = -self.cfg.k_pre * (1.0 - premature_fade) * torch.clamp(lift_height, min=0.0)
         pen_premature = torch.where(self._is_first_step, torch.zeros_like(pen_premature), pen_premature)
 
         # ---- 总势函数 & shaping ----
@@ -1310,9 +1326,11 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self._prev_y_err_far = y_err.detach().clone()
 
         # ---- S1.0S Phase-3: 全局进展停滞检测 ----
+        # 增加豁免条件：如果已经到达目标并保持住（still_ok=True），则不计为停滞
         global_stall_cond = (
             (~self._is_first_step)
             & (torch.abs(phi_total - self._prev_phi_total_stall) < self.cfg.global_stall_phi_eps)
+            & (~still_ok)
         )
         self._global_stall_counter = torch.where(
             global_stall_cond,
@@ -1325,13 +1343,16 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
             torch.zeros_like(phi_total)
         )
         self._prev_phi_total_stall = phi_total.detach().clone()
+        
+        # 新增静止奖励：成功后保持不动
+        r_stay_still = self.cfg.rew_stay_still * still_ok.float()
 
         # ---- 总奖励 ----
         rew = (r_pot + pen_premature + pen_dense + r_terminal + milestone_reward
                + r_hold_align + r_lift_progress + early_stop_penalty
                + pen_dead_zone + r_retreat + r_lat_fine
                + r_far_lat_fix + pen_global_stall
-               + pen_tip_proximity)  # S1.0U
+               + pen_tip_proximity + r_stay_still)  # S1.0U + 防作弊修复
 
         # 清除首步标记
         self._is_first_step[:] = False
@@ -1365,6 +1386,7 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         # S1.0S: 新增奖励分量日志
         self.extras["log"]["s0/r_far_lat_fix"] = r_far_lat_fix.mean()
         self.extras["log"]["s0/pen_global_stall"] = pen_global_stall.mean()
+        self.extras["log"]["s0/r_stay_still"] = r_stay_still.mean()
 
         # 门控权重
         self.extras["log"]["s0/w_band"] = w_band.mean()
