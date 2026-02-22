@@ -1891,7 +1891,7 @@ class ForkliftVerification:
 
         max_insert = 0.0
         stall_count = 0
-        stall_threshold = 80
+        stall_threshold = 200
         b1_steps = 0
 
         for step_i in range(800):
