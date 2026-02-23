@@ -13,6 +13,7 @@ LOG_DIR="/home/uniubi/projects/forklift_sim/logs"
 
 export PYTHONUNBUFFERED=1
 export TERM=xterm
+unset CONDA_PREFIX
 
 cd "${ISAACLAB_DIR}"
 
@@ -27,7 +28,7 @@ echo "[$(date)] === Experiment A: resume from 2026-02-22_23-25-38/model_3600.pt,
 
 bash isaaclab.sh -p scripts/reinforcement_learning/rsl_rl/train.py \
     --task Isaac-Forklift-PalletInsertLift-Direct-v0 \
-    --headless --num_envs 1024 --max_iterations 4600 \
+    --headless --num_envs 1024 --max_iterations 1000 \
     --resume \
     --load_run "2026-02-22_23-25-38" \
     --checkpoint "model_3600.pt" \

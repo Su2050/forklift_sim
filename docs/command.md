@@ -57,9 +57,9 @@ cd /home/uniubi/projects/forklift_sim/IsaacLab
 ./isaaclab.sh -p scripts/reinforcement_learning/rsl_rl/play.py \
   --task Isaac-Forklift-PalletInsertLift-Direct-v0 \
   --num_envs 1 \
-  --checkpoint "/home/uniubi/projects/forklift_sim/IsaacLab/logs/rsl_rl/forklift_pallet_insert_lift/2026-02-04_19-42-04_exp_gate_optimization_v1/model_1999.pt" \
+  --checkpoint "/home/uniubi/projects/forklift_sim/IsaacLab/logs/rsl_rl/forklift_pallet_insert_lift/2026-02-22_13-17-59_exp_s1.0v_bugfix/model_1999.pt" \
   --headless \
-  --video --video_length 600
+  --video --video_length 1200
 
 
 
@@ -110,3 +110,9 @@ cd /home/uniubi/projects/forklift_sim/IsaacLab
 cd /home/uniubi/projects/forklift_sim/IsaacLab
 ./isaaclab.sh -p ../scripts/verify_joint_axes.py --headless
 # 正常输出应全为 [PASS]。如果出现 [FAIL]，请检查 env.py 中的 steer_left/right 符号。
+
+
+cd /home/uniubi/projects/forklift_sim/IsaacLab
+
+# 最推荐的命令（带自动对齐功能）
+env TERM=xterm PYTHONUNBUFFERED=1 CONDA_PREFIX="" CONDA_DEFAULT_ENV="" ./isaaclab.sh -p ../scripts/verify_forklift_insert_lift.py --manual --auto-align

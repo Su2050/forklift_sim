@@ -594,7 +594,101 @@ if __name__ == "__main__":
 
 ---
 
-## 10. 参考资料
+## 10. PhysX 碰撞检测流水线与 Cooking 机制
+
+> 本节内容合并自 `physx_collision_deep_dive.md`。
+
+### 10.1 碰撞检测三阶段流水线
+
+物理引擎每一帧的碰撞检测分为三个阶段：
+
+```
+┌─────────────┐    ┌─────────────┐    ┌─────────────┐
+│  Broad Phase │ -> │ Narrow Phase│ -> │  Response   │
+│  (粗筛)      │    │  (精确检测)  │    │  (响应计算)  │
+└─────────────┘    └─────────────┘    └─────────────┘
+     AABB包围盒        几何相交测试       力/位置修正
+```
+
+- **Broad Phase**: 使用轴对齐包围盒 (AABB) 快速排除不可能碰撞的物体对
+- **Narrow Phase**: 对可能碰撞的物体对进行精确的几何相交测试
+- **Response**: 计算碰撞响应（反弹力、摩擦力、位置修正）
+
+Narrow Phase 的计算复杂度直接取决于碰撞体形状：
+
+| 碰撞体类型 | 计算复杂度 | 精度 | 适用场景 |
+|-----------|-----------|------|---------|
+| 球体 (Sphere) | O(1) | 低 | 球形物体 |
+| 胶囊体 (Capsule) | O(1) | 中 | 人物角色 |
+| 盒子 (Box) | O(1) | 低 | 箱子、建筑 |
+| 凸包 (Convex Hull) | O(n) | 中 | 简单实体 |
+| 三角网格 (TriMesh) | O(n²) | 高 | 静态地形 |
+| 凸分解 (Convex Decomposition) | O(k×n) | 高 | 复杂动态物体 |
+
+### 10.2 PhysX Cooking 机制
+
+**Cooking** 是 PhysX 将 USD 几何数据转换为高效碰撞数据结构的过程。
+
+```
+原始 USD 几何数据          Cooking 过程              PhysX 运行时数据
+┌─────────────┐    ┌─────────────────────┐    ┌─────────────────┐
+│  顶点列表    │    │  构建 BVH 树        │    │  优化的碰撞结构  │
+│  面索引      │ -> │  计算凸包           │ -> │  快速查询索引    │
+│  法线        │    │  生成空间哈希       │    │  预计算数据      │
+└─────────────┘    └─────────────────────┘    └─────────────────┘
+```
+
+**关键：Cooking 只在场景加载时执行一次！**
+
+```python
+# 以下代码不会生效！
+def _setup_scene(self):
+    # 场景已经加载完成，Cooking 已经完成
+    mesh_collision_api.GetApproximationAttr().Set("convexDecomposition")
+    # 此时修改 USD 属性，PhysX 不会重新 Cook
+```
+
+加载时序：
+1. Isaac Lab 加载 USD 文件
+2. PhysX 读取 USD 中的碰撞属性
+3. PhysX 执行 Cooking，生成碰撞数据结构
+4. 仿真开始运行
+5. **此时再修改 USD 属性，PhysX 已经使用 Cooking 后的数据，不会重新处理**
+
+> **注意**：本项目的 `env.py` 中 `_setup_pallet_physics()` 在 `clone_environments()` **之前**调用，
+> 即在 PhysX Cooking 之前修改 USD 属性，因此能够生效。这也是为什么补丁代码的调用顺序至关重要。
+
+### 10.3 最佳实践：预处理 USD 文件
+
+```
+预处理阶段（只执行一次）:
+┌──────────────┐     ┌──────────────┐     ┌──────────────┐
+│  原始 USD    │ ->  │  修改碰撞属性 │ ->  │  保存新 USD  │
+│  (Nucleus)   │     │  添加 API     │     │  (本地)      │
+└──────────────┘     └──────────────┘     └──────────────┘
+
+运行阶段（每次训练）:
+┌──────────────┐     ┌──────────────┐     ┌──────────────┐
+│  加载新 USD  │ ->  │  PhysX Cook  │ ->  │  正确碰撞    │
+│  (本地)      │     │  (凸分解)     │     │  (无穿透)    │
+└──────────────┘     └──────────────┘     └──────────────┘
+```
+
+### 10.4 USD 碰撞属性层级结构
+
+```
+Prim: /Root/Xform/Mesh_015
+├── physics:collisionEnabled = true                            (CollisionAPI)
+├── physics:approximation = "convexDecomposition"              (MeshCollisionAPI)
+├── physxConvexDecompositionCollision:maxConvexHulls = 32      (PhysxConvexDecompositionCollisionAPI)
+├── physxConvexDecompositionCollision:hullVertexLimit = 64
+├── physxCollision:contactOffset = 0.02                        (PhysxCollisionAPI)
+└── physxCollision:restOffset = 0.005
+```
+
+---
+
+## 11. 参考资料
 
 - [NVIDIA PhysX 文档 - Collision](https://nvidia-omniverse.github.io/PhysX/physx/5.3.0/docs/Geometry.html)
 - [Isaac Sim 文档 - Physics](https://docs.omniverse.nvidia.com/isaacsim/latest/features/physics.html)
