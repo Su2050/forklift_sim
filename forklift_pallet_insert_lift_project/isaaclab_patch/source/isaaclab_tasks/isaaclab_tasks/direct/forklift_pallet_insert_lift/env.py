@@ -1574,10 +1574,10 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self._write_root_pose(self.pallet, pallet_pos, pallet_quat, env_ids)
 
         # ---- 随机化叉车初始位姿 ----
-        # S1.0h: 调整范围适配 1.8x 缩放 + 修正后的 _pallet_front_x
-        # _pallet_front_x ≈ -1.08m，叉车 fork 前端约超出车体中心 1.5m
-        # x ∈ [-4.0, -2.5] 使 dist_front ∈ [~0.4, ~1.9]m，覆盖 d_close(1.1) ~ d_far(2.6) 的核心区间
-        x = sample_uniform(-4.0, -2.5, (len(env_ids), 1), device=self.device)
+        # _pallet_front_x ≈ -1.08m，fork_forward_offset ≈ 1.87m
+        # x_max 需满足: x_max + 1.87*cos(yaw_max) < -1.08 → x_max < -2.89m
+        # 取 -3.0m 留安全裕度，避免叉齿穿透托盘导致 PhysX 去穿透弹飞托盘
+        x = sample_uniform(-4.0, -3.0, (len(env_ids), 1), device=self.device)
         y = sample_uniform(-0.6, 0.6, (len(env_ids), 1), device=self.device)
         z = torch.full((len(env_ids), 1), 0.03, device=self.device)
         yaw = sample_uniform(-0.25, 0.25, (len(env_ids), 1), device=self.device)
