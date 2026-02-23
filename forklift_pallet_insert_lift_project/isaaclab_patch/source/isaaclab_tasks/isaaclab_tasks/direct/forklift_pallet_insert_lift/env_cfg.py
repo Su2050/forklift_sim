@@ -220,8 +220,8 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     y_err_obs_scale: float = 0.8            # 默认 0.5（原行为）; Phase-0.5 P1/P3 改为 0.8
 
     # 失败早停
-    early_stop_d_xy_max: float = 3.0
-    early_stop_d_xy_steps: int = 30
+    early_stop_d_xy_max: float = 5.0
+    early_stop_d_xy_steps: int = 60
     early_stop_stall_phi_eps: float = 0.001
     early_stop_stall_steps: int = 60
     early_stop_stall_action_eps: float = 0.05
