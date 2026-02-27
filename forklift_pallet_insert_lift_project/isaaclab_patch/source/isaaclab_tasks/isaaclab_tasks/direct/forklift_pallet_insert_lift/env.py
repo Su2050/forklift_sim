@@ -199,6 +199,10 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self._global_stall_counter = torch.zeros((self.num_envs,), dtype=torch.int32, device=self.device)
         self._prev_phi_total_stall = torch.zeros((self.num_envs,), device=self.device)
 
+        # S1.0z: Episode 级别成功率统计
+        self._ep_success_count = 0
+        self._ep_total_count = 0
+
         # ---- 派生常量 ----
         # S1.0h 修复：符号 + → -
         # _pallet_front_x 指向托盘 pocket 开口（近端面，-X 侧），不是远端面
@@ -1435,6 +1439,15 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self.extras["log"]["milestone/lift_50cm_frac"] = self._milestone_lift_50cm.float().mean()
         self.extras["log"]["milestone/lift_75cm_frac"] = self._milestone_lift_75cm.float().mean()
 
+        # Hold 失败诊断日志
+        self.extras["log"]["diag_hold/fail_ins_frac"] = ((~insert_entry) & (self._hold_counter > 0)).float().mean()
+        self.extras["log"]["diag_hold/fail_align_frac"] = ((~align_entry) & (self._hold_counter > 0)).float().mean()
+        self.extras["log"]["diag_hold/fail_lift_frac"] = ((~lift_entry) & (self._hold_counter > 0)).float().mean()
+        self.extras["log"]["diag_hold/ins_margin"] = (insert_depth - self._insert_thresh).mean()
+        self.extras["log"]["diag_hold/y_margin"] = (self.cfg.max_lateral_err_m - y_err).mean()
+        self.extras["log"]["diag_hold/yaw_margin"] = (self.cfg.max_yaw_err_deg - yaw_err_deg).mean()
+        self.extras["log"]["diag_hold/lift_margin"] = (lift_height - self.cfg.lift_delta_m).mean()
+
         # 终止原因
         q = self.robot.data.root_quat_w
         w, x, y, z = q.unbind(-1)
@@ -1451,6 +1464,31 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self.extras["log"]["term/frac_early_fly"] = self._early_stop_fly.float().mean()
         self.extras["log"]["term/frac_early_stall"] = self._early_stop_stall.float().mean()
         self.extras["log"]["term/frac_early_dz_stuck"] = self._early_stop_dz_stuck.float().mean()
+
+        # S1.0z: Episode 级别真实成功率统计
+        reset_mask = self.reset_buf
+        if reset_mask.any():
+            num_resets = reset_mask.sum().item()
+            num_successes = (success & reset_mask).sum().item()
+            
+            self._ep_total_count += num_resets
+            self._ep_success_count += num_successes
+            
+            # 使用 EMA 跟踪最近的成功率 (平滑系数 0.001，约等于过去 1000 次 reset 的平均)
+            # 1024 个环境，每个 episode ~400 步，每步平均 ~2.5 次 reset，1000 次 reset 约等于 400 步 (一个完整周期)
+            batch_rate = num_successes / num_resets
+            if not hasattr(self, "_ep_success_rate_ema"):
+                self._ep_success_rate_ema = batch_rate
+            else:
+                # 动态 alpha，确保批量 reset 时权重正确
+                alpha = min(1.0, num_resets * 0.001)
+                self._ep_success_rate_ema = (1 - alpha) * self._ep_success_rate_ema + alpha * batch_rate
+
+        if hasattr(self, "_ep_success_rate_ema"):
+            self.extras["log"]["episode/success_rate_ema"] = self._ep_success_rate_ema
+        
+        if self._ep_total_count > 0:
+            self.extras["log"]["episode/success_rate_total"] = self._ep_success_count / self._ep_total_count
 
         # ==================================================================
         # S1.0P: 诊断观测指标（不改训练，只改看结果的方式）

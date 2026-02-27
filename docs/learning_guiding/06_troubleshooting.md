@@ -130,3 +130,4 @@ cd <你的IsaacLab目录>
 - 想了解"任务目标/奖励/观测是怎么设计的"：`docs/03_task_design_rl.md`
 - 想给叉车加 RGB 相机、改成图像输入、做进阶迭代：`docs/07_vision_input.md`
 - 想看一次真实排障复盘（Mean episode length 长期=1.00 的定位与修复）：`docs/troubleshooting_cases/2026-02-02_episode_length_reset_postmortem.md`
+- 想看一次真实排障复盘（RSL-RL 日志的 Step 级均值陷阱：0.5% 成功率实为 100%）：`docs/learning_guiding/08_rsl_rl_step_mean_trap.md`
