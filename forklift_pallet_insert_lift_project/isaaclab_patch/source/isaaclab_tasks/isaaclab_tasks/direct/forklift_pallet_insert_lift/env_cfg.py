@@ -275,6 +275,12 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     tip_align_exit_m: float = 0.16         # Schmitt exit: tip_y_err > this breaks hold
     tip_align_near_dist: float = 2.2       # tip constraint only active below this dist
 
+    # ---- S1.0zB: Pallet displacement penalty (Exp-A) ----
+    k_pallet_push_pen: float = 3.0          # 推盘惩罚权重
+    pallet_push_insert_gate: float = 0.15   # insert_norm < 此值时全额惩罚
+    pallet_push_insert_ramp: float = 0.15   # 惩罚从 gate 到 gate+ramp 线性衰减
+    pallet_push_deadband_m: float = 0.02    # 2cm 死区（允许物理微振）
+
     # termination thresholds
     max_roll_pitch_rad: float = 0.45  # ~25 deg
     max_time_s: float = episode_length_s

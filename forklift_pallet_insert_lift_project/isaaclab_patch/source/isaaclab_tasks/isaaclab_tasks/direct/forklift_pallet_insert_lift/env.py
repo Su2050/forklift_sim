@@ -1075,6 +1075,16 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         prox_excess = torch.clamp(tip_y_err - self.cfg.tip_prox_lat_thresh, min=0.0)
         pen_tip_proximity = -self.cfg.k_tip_proximity_pen * prox_mask * prox_excess
 
+        # ---- S1.0zB: 托盘位移惩罚 (Exp-A) ----
+        # 惩罚在未插稳前推走托盘的行为
+        pallet_init_pos_xy = torch.tensor(self.cfg.pallet_cfg.init_state.pos[:2], device=self.device)
+        pallet_disp_xy = torch.norm(pallet_pos[:, :2] - pallet_init_pos_xy, dim=-1)
+        push_excess = torch.clamp(pallet_disp_xy - self.cfg.pallet_push_deadband_m, min=0.0)
+        push_gate = 1.0 - smoothstep(
+            (insert_norm - self.cfg.pallet_push_insert_gate) / self.cfg.pallet_push_insert_ramp
+        )
+        pen_pallet_push = -self.cfg.k_pallet_push_pen * push_gate * push_excess
+
         # S1.0U: tip alignment flags (used by milestones AND hold counter below).
         is_near = stage_dist_front < self.cfg.tip_align_near_dist
         tip_align_ok = tip_y_err <= self.cfg.tip_align_entry_m
@@ -1356,7 +1366,7 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
                + r_hold_align + r_lift_progress + early_stop_penalty
                + pen_dead_zone + r_retreat + r_lat_fine
                + r_far_lat_fix + pen_global_stall
-               + pen_tip_proximity + r_stay_still)  # S1.0U + 防作弊修复
+               + pen_tip_proximity + pen_pallet_push + r_stay_still)  # S1.0zB + S1.0U + 防作弊修复
 
         # 清除首步标记
         self._is_first_step[:] = False
@@ -1391,6 +1401,7 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self.extras["log"]["s0/r_far_lat_fix"] = r_far_lat_fix.mean()
         self.extras["log"]["s0/pen_global_stall"] = pen_global_stall.mean()
         self.extras["log"]["s0/r_stay_still"] = r_stay_still.mean()
+        self.extras["log"]["s0/pen_pallet_push"] = pen_pallet_push.mean()
 
         # 门控权重
         self.extras["log"]["s0/w_band"] = w_band.mean()
@@ -1411,6 +1422,8 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self.extras["log"]["err/dist_front_mean"] = dist_front.mean()
         self.extras["log"]["err/dist_front_base_mean"] = dist_front_base.mean()
         self.extras["log"]["err/stage_dist_front_mean"] = stage_dist_front.mean()
+        self.extras["log"]["diag/pallet_disp_xy_mean"] = pallet_disp_xy.mean()
+        self.extras["log"]["diag/pallet_disp_xy_max"] = pallet_disp_xy.max()
         self.extras["log"]["err/d_xy_mean"] = d_xy.mean()
 
         # 阶段命中率
