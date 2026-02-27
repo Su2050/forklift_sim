@@ -4,7 +4,22 @@
 
 ---
 
-## 1. 叉车插入与举升任务 (Pallet Insert & Lift) - 2026-02-27
+## 1. 叉车插入与举升任务 (Pallet Insert & Lift) - 2026-02-27 (s1.0zB)
+
+* **实验版本**: Exp-A2 (基于 s1.0zB，解决推盘问题)
+* **Run ID**: `2026-02-27_17-43-22`
+* **最佳 Checkpoint**: `model_1999.pt`
+* **模型绝对路径**: `/home/uniubi/projects/forklift_sim/logs/rsl_rl/forklift_pallet_insert_lift/2026-02-27_17-43-22/model_1999.pt`
+
+**为什么它是最好的？**
+* **真实 Episode 成功率**: 88% ~ 90%
+* **核心突破**: 完美解决了接近阶段“货叉未对准就推着托盘走”的物理交互缺陷。
+* **Hold 阶段稳定性**: `fail_ins_frac` 和 `fail_align_frac` 均为 0.0000。
+* **视觉验证**: 动作平滑，接近托盘时会主动减速并精准对齐，插入全程托盘几乎无位移。
+
+---
+
+## 2. 叉车插入与举升任务 (Pallet Insert & Lift) - 2026-02-27 (s1.0zA)
 
 * **实验版本**: Exp-A (基于 s1.0zA)
 * **Run ID**: `2026-02-27_13-13-32`
