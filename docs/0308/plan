@@ -1,0 +1,1542 @@
+叉车自动插托盘 — 单相机 RGB + easy8 混合输入端到端视觉控制训练方案
+
+
+---
+
+第 1 部分：总体可行性判断
+
+1.1 这条路线在技术上是否可行？
+
+明确结论：可行，值得作为正式实验路线。
+
+理由如下：
+
+支撑因素
+说明
+任务已被 low-dim teacher 证明可学
+reward/done/action space 已验证，意味着 MDP 本身是良定义的
+easy8 保底了车体动力学感知
+actor 不必从图像中推断自身速度、举升位置等，大幅降低视觉编码器负担
+visual7 的语义对应关系明确
+图像中包含的信息本质上就是 d_x, d_y, dyaw, insert_norm, y_err, yaw_err 的超集
+asymmetric critic 已有大量成功先例
+OpenAI Dexterous Hand、Legged Locomotion (ETH)、DriveGAN 等均采用此范式
+单相机 + proprioception → action 是 sim2real 主流路线之一
+不是新范式，工程上有成熟参考
+
+关键假设（必须成立）：
+- 单相机安装位置能同时观测到托盘口和叉尖（至少在近场和中场阶段）；如果存在严重遮挡，方案需要调整相机位置或视角，而非加第二个相机（第一版）。
+- Isaac Sim 渲染的 RGB 图像质量足以区分托盘口位置和叉尖相对关系。
+- 训练并行环境数（带相机渲染）在当前 GPU 上至少能跑 64～256 个。
+  
+1.2 三条路线对比
+
+维度
+路线 A：low-dim teacher (15-dim)
+路线 B：teacher-student (image→visual7→拼15-dim)
+路线 C：混合输入端到端 (image+easy8→action)
+学习难度
+最低（全真值）
+中等（分两步，各自难度可控）
+中偏高（从零 RL 学视觉策略）
+sim2real 潜力
+极差（visual7 实车拿不到）
+中等偏上（student 学 visual7 预测器，但 sim2real gap 集中在 visual7 预测精度）
+最高（actor 直接看图像，与实车部署一致）
+训练效率
+最快（几千万步级别）
+较快（teacher 已有，student 是监督学习）
+较慢（图像渲染开销 + RL 探索）
+流水线复杂度
+最简单
+中等（需维护 teacher + student 两套）
+中等偏低（一套端到端流水线）
+对 reward shaping 的依赖
+高（同路线 C）
+低（student 用 MSE 监督）
+高（需精心 reward + curriculum）
+泛化 / 鲁棒性上限
+低（过拟合真值）
+中（受限于 visual7 瓶颈）
+最高（端到端学到的特征可能更丰富）
+debug 难度
+最低
+中（可单独诊断预测器 vs 策略）
+中偏高（需同时 debug 视觉+策略）
+第一版风险
+几乎无
+低
+中等
+
+总结判断：
+- 路线 A 是 baseline / oracle，不能落地但必须作为参照。
+- 路线 B 是稳妥的中间路线，如果路线 C 失败可以回退。
+- 路线 C 是 sim2real 上限最高的路线，值得优先尝试，但必须配合 curriculum + asymmetric critic + 合理的模型结构才能训起来。
+  
+1.3 每个子任务阶段的学习难度分析
+
+阶段
+对视觉 actor 的难度
+主要挑战
+接近（approach）
+⭐⭐ 中低
+托盘在远处占像素少，但此阶段不需要精确对齐，方向大致对即可。easy8 中的速度信息可以辅助。风险：远场托盘太小，CNN 提取不到有效特征。
+航向对齐（yaw align）
+⭐⭐⭐ 中等
+需要从图像中感知 dyaw（偏航误差），而 dyaw 在图像中表现为托盘口的透视形变。中等难度，single frame 一般够用。
+横向对中（lateral centering）
+⭐⭐⭐ 中等
+需要从图像中感知 y_err。通常表现为托盘口在图像中的水平偏移。中等难度。
+插入（insertion）
+⭐⭐⭐⭐ 高
+最难环节。 近场遮挡严重——叉尖插入过程中托盘口逐渐被叉尖本身遮挡。同时需要非常精确的横向和航向控制。对图像特征质量要求最高。
+深插（deep insertion）
+⭐⭐⭐⭐ 高
+需要从图像中感知 insert_norm（插入深度归一化值）。此时视野内几乎全是托盘底部，深度信息难以从单帧 RGB 中直接读取。这是单帧方案最可能需要时序辅助的环节。
+举升（lift）
+⭐⭐ 中低
+一旦插入到位，举升本身是对 lift_pos / lift_vel 的控制，easy8 中已有。视觉线索主要用于判断"是否已插入到位可以开始举"。
+稳定保持
+⭐ 低
+基本靠 easy8 就够。视觉此时只需要确认货物在位。
+
+结论：第一版最应该集中攻克的是对齐 + 插入阶段。这也是为什么 curriculum 应从近场开始。
+
+1.4 为什么 easy8 不该丢
+
+如果丢掉 easy8 会怎样
+分析
+丢掉 v_x_r, v_y_r, yaw_rate
+actor 必须从连续帧光流中隐式推断自身运动状态。这需要时序模型，显著增加学习难度和模型复杂度。而且实车上这些量可以从轮速计/IMU 低成本获取。
+丢掉 lift_pos, lift_vel
+举升控制变成开环猜测。无意义的难度增加。实车有编码器。
+丢掉 prev_drive, prev_steer, prev_lift
+失去动作连续性先验。策略不知道自己上一步做了什么，容易产生振荡。
+
+核心论点：easy8 是实车部署时确定可以获得的低成本传感器信号（轮速计、IMU、编码器）。将其显式提供给 actor 是符合 sim2real 的工程正确做法。丢掉它只是人为增加不必要的学习难度。
+
+
+---
+
+第 2 部分：观测设计（Observation Design）
+
+2.1 Actor 输入 — 单相机 RGB
+
+2.1.1 相机安装位置建议
+
+第一版建议安装位置：叉车车体前端偏上方，向前下方俯视。
+
+理由：
+- 需要同时看到叉尖和前方地面上的托盘
+- 俯视角可以减少近场遮挡（叉尖在画面下部，托盘在画面中上部）
+- 避免纯正视角（会导致插入过程中托盘口完全被叉尖遮挡）
+  
+具体参数建议（需在 Isaac Sim 中实验确定最终值）：
+- 安装高度：叉车顶部或驾驶室前沿，距地面约 1.5m-2.0m
+- 俯仰角（pitch）：向下 15°~30°
+- 水平视场角（HFOV）：60°~90°
+- 确保在初始对齐距离（约 1m-3m）时，托盘口和叉尖同时在画面内
+  
+2.1.2 分辨率建议
+
+分辨率
+评估
+64×64
+第一版首选。 训练吞吐高，PPO 可跑较多并行环境。对于近场叉盘相对关系，64×64 已能提供足够的空间结构信息。先用这个验证路线可行性。
+84×84
+备选。如果 64×64 信息不足（表现为策略横向对中精度差），升级到此。
+128×128
+第二版考虑。第一版不要上，训练变慢且不一定有帮助。
+更高
+第一版不考虑。
+
+2.1.3 通道格式与预处理
+
+输入格式：RGB, 3 通道, float32, 归一化到 [0, 1]
+预处理流程：
+  1. Isaac Sim camera output → uint8 RGB (H, W, 3)
+  2. Resize to target resolution (e.g., 64×64) — 在 sim 中直接设置渲染分辨率
+  3. 转 float32
+  4. 除以 255.0 → [0, 1]
+  5. (可选) 减均值除标准差 — 第一版不做，保持简单
+
+2.1.4 是否裁 ROI
+
+第一版不裁。 原因：
+- 裁 ROI 需要先知道 ROI 在哪，这本身是个感知问题
+- 直接让 CNN 学会 attention 到感兴趣区域
+- 如果后续分析发现 CNN 关注区域不对（通过 Grad-CAM 等可视化），再考虑裁切
+  
+2.1.5 图像增强（Domain Randomization）
+
+第一版加入基础增强，不要太重：
+
+增强类型
+第一版是否加
+说明
+亮度随机
+✅ 是
+±20% 范围，每 episode reset 时随机
+对比度随机
+✅ 是
+±15% 范围
+颜色抖动
+❌ 先不加
+第二版考虑
+高斯噪声
+❌ 先不加
+第二版考虑
+模糊
+❌ 先不加
+第二版考虑
+托盘纹理随机
+✅ 建议加
+Isaac Sim 中可以随机化托盘材质/颜色。对 sim2real 有帮助。
+地面纹理随机
+✅ 建议加
+同上
+光源位置/方向随机
+✅ 建议加
+每次 reset 随机化场景光源。成本低、效果大。
+相机位姿微扰
+❌ 先不加
+第二版 sim2real 阶段再加
+
+2.2 Actor 输入 — easy8 详细讨论
+
+2.2.1 逐项分析
+
+维度
+含义
+第一版是否保留
+理由
+v_x_r
+车体纵向速度
+✅ 保留
+接近阶段必需。实车可从轮速计获取。
+v_y_r
+车体横向速度
+✅ 保留
+横向对中时有用。实车可从 IMU+轮速计融合获取。
+yaw_rate
+偏航角速度
+✅ 保留
+对齐/转向控制必需。实车 IMU 可提供。
+lift_pos
+举升位置
+✅ 保留
+举升控制必需。实车有编码器。即使第一阶段不训举升，也建议保留此输入——让 actor 知道叉尖当前高度，有助于理解图像中叉尖的视觉位置。
+lift_vel
+举升速度
+⚠️ 可选保留
+举升控制时有用。第一版保留不会有坏处。如果后续实车获取困难，可通过 lift_pos 差分近似。训练时保留。
+prev_drive
+上一步纵向动作
+✅ 强烈保留
+对动作平滑至关重要。缺少它策略容易震荡。实车部署时自然可得。
+prev_steer
+上一步转向动作
+✅ 强烈保留
+同上。
+prev_lift
+上一步举升动作
+✅ 保留
+同上。
+
+结论：第一版 easy8 全部保留，不做删减。
+
+2.2.2 归一化方式
+
+# easy8 归一化方案
+obs_easy8 = {
+    "v_x_r":      clip(v_x_r / v_x_max, -1, 1),       # v_x_max ≈ 叉车最大前进速度
+    "v_y_r":      clip(v_y_r / v_y_max, -1, 1),       # v_y_max ≈ 最大横向速度
+    "yaw_rate":   clip(yaw_rate / yaw_rate_max, -1, 1),
+    "lift_pos":   (lift_pos - lift_mid) / lift_range,   # 归一化到 [-1, 1] 或 [0, 1]
+    "lift_vel":   clip(lift_vel / lift_vel_max, -1, 1),
+    "prev_drive": prev_drive,                           # 已经是 [-1, 1] 的动作
+    "prev_steer": prev_steer,                           # 同上
+    "prev_lift":  prev_lift,                            # 同上
+}
+# -> 8 维向量, 每一维大致在 [-1, 1] 范围
+
+关键原则：所有维度都归一化到大致相同量级（[-1, 1] 或附近），避免某些维度因为量纲差异主导 MLP 梯度。
+
+2.3 Actor 输入融合方式
+
+                    ┌─────────────────┐
+  RGB 64×64×3  ──►│  CNN Backbone    │──► img_feat (e.g., 64-dim)
+                    └─────────────────┘            │
+                                                   ├── concat ──► MLP Policy Head ──► 3 actions
+                    ┌─────────────────┐            │
+  easy8 (8-dim) ──►│  小 MLP (1-2层)  │──► prop_feat (e.g., 32-dim)
+                    └─────────────────┘
+
+详细说明：
+
+1. CNN backbone 将 64×64×3 编码为一个固定长度向量 img_feat
+2. Proprioception MLP 将 easy8 (8-dim) 编码为 prop_feat
+  - 为什么 easy8 不直接 concat？因为给它一个小 MLP（例如 8 → 32 → 32）可以让它先提取自身的特征表示，避免被图像特征的尺度/梯度主导
+3. Concat [img_feat, prop_feat]，进入 policy head MLP
+4. Policy head MLP 输出 3 维高斯分布的均值（和可学习的 log_std）
+  
+这种双支路 + concat 是第一版最推荐的融合方式。 不需要 cross-attention、FiLM conditioning 等花式操作。
+
+2.4 Critic 输入 — Asymmetric Critic
+
+2.4.1 Critic 应该看什么
+
+Critic 看 privileged full state，不看图像。
+
+critic_obs = {
+    # ===== easy8 全部包含 =====
+    "v_x_r": ...,
+    "v_y_r": ...,
+    "yaw_rate": ...,
+    "lift_pos": ...,
+    "lift_vel": ...,
+    "prev_drive": ...,
+    "prev_steer": ...,
+    "prev_lift": ...,
+    
+    # ===== 原 visual7 真值 =====
+    "d_x": ...,              # 归一化后的纵向距离
+    "d_y": ...,              # 归一化后的横向距离
+    "cos_dyaw": ...,         # 偏航误差的 cos
+    "sin_dyaw": ...,         # 偏航误差的 sin
+    "insert_norm": ...,      # 归一化插入深度
+    "y_err_obs": ...,        # 横向对中误差
+    "yaw_err_obs": ...,      # 偏航对齐误差
+    
+    # ===== 额外 privileged 信息 =====
+    "pallet_rel_x": ...,     # 托盘相对车体的精确 x 位置
+    "pallet_rel_y": ...,     # 托盘相对车体的精确 y 位置
+    "pallet_rel_yaw": ...,   # 托盘相对车体的精确偏航角
+    "insert_depth_raw": ..., # 原始插入深度（未归一化）
+    "fork_tip_height": ...,  # 叉尖距地面高度
+    "is_contact": ...,       # 叉尖是否接触托盘 (0/1)
+    "task_phase": ...,       # 当前任务阶段编码 (one-hot 或 int)
+}
+# 总维度约 20-25 维
+
+2.4.2 Critic 是否应看原 15 维真值
+
+是的，原 15 维应完整包含在 critic_obs 中。 这保证 critic 的 value estimation 质量不低于 low-dim teacher 训练时的水平。
+
+2.4.3 为什么 asymmetric critic 在这条路线上极其重要
+
+原因
+说明
+降低 value estimation 方差
+如果 critic 也只看图像，value function 的估计噪声大，PPO 的 advantage estimation 不准，策略更新信号质量差。让 critic 看真值可以得到更准确的 baseline，使 actor 的梯度更有意义。
+解耦感知与决策的学习难度
+Critic 不需要学习"从图像中理解场景"，它只负责"给定真实状态，评估好坏"。Actor 负责"从图像中提取信息并做决策"。两者各司其职。
+加速训练
+大量文献表明，asymmetric critic 在视觉 RL 中通常能将训练效率提升 2-5 倍。
+稳定训练
+避免 actor 和 critic 共享图像编码器时的梯度冲突。Critic loss 的梯度不会回传到视觉编码器，不会干扰 actor 的特征学习。
+
+工程实现要点：
+- Actor network 和 Critic network 完全独立，不共享任何参数
+- Actor: CNN + prop_MLP → concat → policy_head
+- Critic: MLP-only（输入是 privileged state vector）→ value_head
+  
+
+---
+
+第 3 部分：模型结构设计
+
+3.1 最小 baseline（Minimal）
+
+======== Actor ========
+CNN Backbone (NatureCNN-mini):
+  Conv2d(3, 16, 5, stride=2)  → ReLU → 30×30×16
+  Conv2d(16, 32, 3, stride=2) → ReLU → 14×14×32
+  Conv2d(32, 32, 3, stride=2) → ReLU → 6×6×32
+  Flatten → 1152
+  Linear(1152, 64) → ReLU
+  → img_feat: 64-dim
+
+Prop MLP:
+  Linear(8, 32) → ReLU
+  Linear(32, 32) → ReLU
+  → prop_feat: 32-dim
+
+Fusion:
+  concat(img_feat, prop_feat) → 96-dim
+  Linear(96, 64) → ReLU
+  Linear(64, 64) → ReLU
+  Linear(64, 3)  → action_mean (3-dim)
+  log_std: 可学习参数 (3-dim)
+
+Total Actor params: ~110K
+
+======== Critic (Asymmetric, MLP-only) ========
+Input: privileged state (~22-dim)
+  Linear(22, 128) → ReLU
+  Linear(128, 128) → ReLU
+  Linear(128, 64) → ReLU
+  Linear(64, 1) → value
+
+Total Critic params: ~22K
+
+特点：
+- CNN 非常轻，三层卷积
+- Actor 总参数约 110K，可以快速迭代
+- Critic 更轻，纯 MLP
+- 适合第一版快速验证
+  
+3.2 稍强 baseline（Moderate）
+
+======== Actor ========
+CNN Backbone (类 NatureCNN):
+  Conv2d(3, 32, 8, stride=4)  → ReLU → 15×15×32   (如果输入 64×64)
+  Conv2d(32, 64, 4, stride=2) → ReLU → 6×6×64
+  Conv2d(64, 64, 3, stride=1) → ReLU → 4×4×64
+  Flatten → 1024
+  Linear(1024, 128) → ReLU
+  → img_feat: 128-dim
+
+Prop MLP:
+  Linear(8, 64) → ReLU
+  Linear(64, 64) → ReLU
+  → prop_feat: 64-dim
+
+Fusion:
+  concat(img_feat, prop_feat) → 192-dim
+  Linear(192, 128) → ReLU
+  Linear(128, 64) → ReLU
+  Linear(64, 3)  → action_mean
+  log_std: 可学习参数
+
+Total Actor params: ~220K
+
+======== Critic ========
+Input: privileged state (~22-dim)
+  Linear(22, 256) → ReLU
+  Linear(256, 256) → ReLU
+  Linear(256, 128) → ReLU
+  Linear(128, 1) → value
+
+Total Critic params: ~100K
+
+与 minimal 的区别：
+- CNN 通道数翻倍，特征更丰富
+- img_feat 128-dim（vs 64-dim）
+- Critic MLP 宽度增加，value estimation 更准
+- 总参数约 320K，仍然很轻量
+  
+3.3 时序建模讨论
+
+方案
+复杂度
+第一版推荐度
+分析
+单帧
+⭐
+✅ 第一版用这个
+配合 easy8 中的 prev_actions，单帧已经包含了一定的"隐式时序"。先验证空间特征是否足够。
+2 帧堆叠
+⭐⭐
+备选
+如果单帧方案在插入深度判断上明显不行，第一个升级选项。将 2 帧 RGB 沿 channel 维度堆叠为 6 通道输入。对 backbone 改动最小。
+4 帧堆叠
+⭐⭐
+二选
+适用于需要光流/运动信息的场景。但 4 帧会让输入 channels=12，backbone 第一层参数翻 4 倍。
+小 GRU
+⭐⭐⭐
+第二版考虑
+在 img_feat 后接 GRU(hidden=64)。需要在 PPO 中正确处理 hidden state 的 rollout 和 truncation。Implementation 复杂度较高。
+ConvLSTM
+⭐⭐⭐⭐
+不推荐第一版
+在卷积层中间加 LSTM，太重。
+
+第一版结论：用单帧。如果遇到插入深度判断瓶颈，升级到 2 帧堆叠。
+
+为什么先别上复杂时序模型：
+1. 增加超参调优维度（sequence length, hidden size, BPTT length）
+2. PPO 中处理 RNN hidden state 有额外工程成本（需要在 rollout buffer 中存储 hidden state，batch 采样需要保持时序连续性）
+3. 在"路线是否可行"尚未明确之前，加入时序模型会增加 debug 难度——你不知道是视觉不行还是时序不行
+4. Easy8 中的 prev_actions（3 维）已经提供了一阶马尔可夫信息
+  
+3.4 Actor 输出设计
+
+方案
+评估
+直接输出 3 个连续动作（drive, steer, lift）
+✅ 第一版用这个。 与 low-dim teacher 一致，万事简单。
+多头：action + progress head
+不推荐第一版。Progress prediction 是个 auxiliary task，可能有助于特征学习，但增加调参项。
+多头：action + phase head
+不推荐第一版。同上。而且 phase 的监督信号来自 privileged info，破坏了端到端的简洁性。
+Auxiliary geometry head（预测 visual7）
+⚠️ 值得考虑但第一版不加。如果第一版 actor 的视觉特征学不好，第二版可以加一个 auxiliary head 预测 visual7，让 CNN 在 RL 信号之外获得几何监督。这本质上是在路线 C 中混入路线 B 的思想作为 regularizer。
+
+结论：第一版 actor 直接输出 3 动作。如果视觉特征学不好，第二版加 auxiliary visual7 prediction head。
+
+3.5 参数量与复杂度指南
+
+范围
+Actor params
+评估
+太小
+<50K
+CNN 太弱，无法从 64×64 中提取有效空间特征
+第一版推荐
+100K-300K
+甜区。CNN 3-4 层，MLP 2-3 层。训练快，可快速迭代。
+第二版
+300K-1M
+更深 backbone 或更宽 MLP。已验证路线可行后再考虑。
+太重
+>2M
+ResNet-18 起步。第一版完全不需要。会显著拖慢训练。
+
+
+---
+
+第 4 部分：训练方式设计
+
+4.1 训练方式选择与排序
+
+路线
+排序
+理由
+D. 先近场阶段 PPO + asymmetric critic，再扩展到全流程
+🥇 第一推荐
+将任务难度和感知难度同时分解。Asymmetric critic 保证了 value estimation 质量。近场先行确保视觉编码器先学会"看得懂插入场景"。
+C. 先近场阶段 PPO，再全流程 PPO（不用 asymmetric critic）
+🥈
+Curriculum 思路正确，但没有 asymmetric critic，value estimation 质量差，训练会更慢更不稳定。只在 asymmetric critic 实现有困难时考虑。
+E. 先少量 imitation warm start，再 PPO
+🥉
+有道理但增加了流水线复杂度。需要先用 low-dim teacher 生成 expert demo 的 (image, easy8, action) 数据集，然后预训练 actor 的 CNN+MLP，最后切换到 PPO。如果路线 D 实在训不起来，这是兜底方案。
+B. 从零 PPO + asymmetric critic（不分阶段）
+第 4
+理论上可行但效率差。全流程从零探索，actor 需要同时处理远场（接近）和近场（插入），学习负担大。
+A. 完全从零 PPO（不分阶段，不 asymmetric）
+第 5
+最难。不推荐。
+
+明确结论：第一版采用路线 D。
+
+4.2 Curriculum Learning 详细讨论
+
+为什么先近场再全流程
+
+1. 近场是核心价值区域。 插入动作的精度要求远高于接近。先把最难最关键的学好。
+2. 近场图像信息量最大。 托盘占画面比例大，叉尖可见，CNN 有东西可学。
+3. 远场图像信息稀疏。 托盘在远处只有几个像素，CNN 很难学到有效特征。先跳过这个阶段，等近场策略稳定后再展。
+4. 减少初始探索空间。 如果从远场开始，单纯接近到近场就需要大量探索步数，大部分 reward 信号都在"走对方向"上，视觉编码器得不到足够的"插入相关"训练信号。
+5. 低效训练信号浪费 GPU。 远场阶段的 episode 长，成功率低，训练信号稀疏。
+  
+近场阶段应覆盖的初始条件
+
+# Stage 1 初始条件（近场对齐 + 插入）
+init_config_stage1 = {
+    "d_x_range": [0.3, 1.5],     # 纵向距离 0.3m ~ 1.5m（叉尖到托盘口）
+    "d_y_range": [-0.3, 0.3],    # 横向偏移 ±0.3m
+    "dyaw_range": [-15°, 15°],   # 偏航角误差 ±15°
+    "lift_pos": "叉尖在托盘口高度附近（小范围随机）",
+    "v_init": "零速或接近零速",
+}
+
+何时扩展
+
+- Stage 1 → Stage 2 的条件： Stage 1 成功率 > 70%，并且连续多个 checkpoint 稳定不掉。
+- Stage 2 → Stage 3 的条件： Stage 2（含举升）成功率 > 60%。
+- Stage 3 → Stage 4 的条件： Stage 3 中距离接近+插入成功率 > 50%。
+  
+4.3 奖励函数处理
+
+可直接复用的 Reward 项
+
+Reward 项
+是否复用
+说明
+接近奖励（d_x 减小）
+✅ 复用
+激励车辆向托盘移动
+对齐奖励（dyaw → 0）
+✅ 复用
+激励航向对齐
+对中奖励（y_err → 0）
+✅ 复用
+激励横向对中
+插入深度奖励（insert_norm 增加）
+✅ 复用
+激励深插
+插入成功奖励（大的 sparse bonus）
+✅ 复用
+关键成功信号
+举升奖励
+✅ 复用
+举升阶段
+稳定保持奖励
+✅ 复用
+最终阶段
+动作平滑惩罚
+✅ 复用
+惩罚动作突变
+碰撞惩罚
+✅ 复用
+惩罚叉尖撞击托盘
+
+需要针对视觉 actor 调整的 Reward 项
+
+调整项
+原因
+建议
+增大动作平滑惩罚权重
+视觉策略比低维策略更容易产生动作抖动（图像噪声→特征抖动→动作抖动）。需要更强的 smoothing penalty。
+权重提高 2-3 倍，并观察是否足够。
+降低接近阶段 reward 密度
+全流程时，接近阶段的 reward 不应主导梯度。
+在 Stage 1/2 中不涉及。Stage 3/4 中将接近 reward 的权重设为插入 reward 的 1/3~1/5。
+考虑阶段性 reward 权重
+不同 curriculum stage 中，reward 的重点不同。
+Stage 1 重对齐+插入；Stage 2 加重举升；Stage 3 加入接近 reward。
+插入成功前后的 reward 权重可以不同
+插入成功后进入举升阶段，reward 结构切换。
+可以用 insert_norm > threshold 作为分界点，插入前重对齐/插入 reward，插入后重举升/稳定 reward。这个逻辑在 reward function 中用条件语句实现即可。
+
+建议新增的 Reward 项（针对视觉策略）
+
+新增项
+目的
+steer rate penalty
+r_steer_rate = -w * abs(steer - prev_steer)。惩罚转向角速度过大，防止视觉噪声引起的转向振荡。
+episode length bonus（可选）
+小的 per-step survival bonus，鼓励在近场保持存活而非快速 diverge。第一版可以不加，观察是否需要。
+
+4.4 终止条件处理
+
+复用的 Done 条件
+
+Done 条件
+是否复用
+说明
+横向偏差过大 (|d_y| > threshold)
+✅ 复用
+防止无效探索
+偏航角过大 (|dyaw| > threshold)
+✅ 复用
+同上
+叉尖碰撞非插入区域
+✅ 复用
+安全终止
+超时 (max_episode_steps)
+✅ 复用
+必须
+任务完成（举升+稳定成功）
+✅ 复用
+成功终止
+后退过远
+✅ 复用
+防止策略学会逃跑
+
+调整建议
+
+调整
+说明
+近场 curriculum 和全流程 curriculum 的超时步数不同
+Stage 1 近场：max_steps ≈ 150-300（只需对齐+插入）。Stage 4 全流程：max_steps ≈ 500-800。
+近场阶段的偏差终止阈值可以先放宽
+初期训练时适当放宽 d_y 和 dyaw 的终止阈值，让 actor 有更多探索空间。随训练进度逐渐收紧。
+Stage 1/2 不终止于"远离托盘"
+因为初始就在近场，不需要接近。如果策略后退超过初始距离 + 0.5m，则终止。
+
+4.5 动作约束设计
+
+约束
+建议
+理由
+动作限幅
+✅ 必须有。drive ∈ [-1, 1], steer ∈ [-1, 1], lift ∈ [-1, 1]。用 tanh 输出层。
+基本约束。
+Action smoothing (EMA)
+✅ 强烈建议。 a_t = α * a_raw + (1-α) * a_{t-1}，α ≈ 0.5-0.8。
+视觉策略对图像噪声敏感，raw action 容易抖。EMA 是最简单有效的平滑。
+Steer rate limit
+✅ 建议。`
+steer_t - steer_{t-1}
+Lift rate limit
+✅ 建议。类似 steer rate limit。
+举升液压缸有速度极限。
+Drive rate limit
+⚠️ 可选。
+比 steer 和 lift 优先级低。如果加速度过大可加。
+
+为什么这些对视觉策略尤其重要：
+- 低维 teacher 的输入（15-dim 真值）是稳定的、无噪声的。低维策略的动作自然平滑。
+- 视觉策略的输入（图像）帧间有渲染噪声、光照变化、亚像素级变化。即使场景变化很小，CNN 输出的特征可能帧间波动较大。这些波动直接传导到动作输出。
+- 没有 smoothing / rate limit，视觉策略很容易出现高频振荡，导致：
+  - 真实叉车机构磨损
+  - 插入过程中叉尖左右颤动导致失败
+  - 看 episode 视频时动作完全不可用
+    
+
+---
+
+第 5 部分：课程学习（Curriculum）详细设计
+
+Stage 1：近场对齐 + 插入
+
+项目
+设置
+目标
+actor 学会：从近场出发，对齐偏航和横向偏差，完成叉尖插入。
+初始位置分布
+d_x ∈ [0.3, 1.5]m，d_y ∈ [-0.3, 0.3]m，dyaw ∈ [-15°, 15°]
+初始速度
+v_x = v_y = yaw_rate ≈ 0（±小噪声）
+lift 初始
+lift_pos 在"叉尖在托盘口高度"附近（±2cm 随机）
+Reward 重点
+对齐 reward（dyaw→0, y_err→0）权重高；插入 reward（insert_norm↑）权重高；动作平滑 penalty。
+Lift 动作
+第一子阶段可以锁 lift（不输出 lift 动作或 lift 动作被忽略），只训 drive + steer。在 Stage 1 后期再放开 lift，让策略学会"到位再微调高度"。
+Done 条件
+超时（200 steps）；|d_y| > 0.5m；|dyaw| > 30°；碰撞；插入成功。
+成功定义
+insert_norm > 0.8（插入深度达到 80%+）
+进入 Stage 2 条件
+连续 3 个 evaluation checkpoint 成功率 > 70%
+典型训练量预估
+50M-200M env steps（依 GPU 并行度而定）
+卡住时优先调什么
+① 检查图像中是否能清晰看到托盘口和叉尖关系（可视化）；② 检查 reward scale——对齐 reward 是否给得太小；③ 检查初始分布是否太难（先缩小到 d_x ∈ [0.3, 0.8]m 试试）；④ 检查 CNN 输出特征是否有区分性（t-SNE 可视化）。
+
+Stage 2：近场插入 + 举升
+
+项目
+设置
+目标
+在 Stage 1 的基础上，插入到位后完成举升和短暂稳定保持
+初始条件
+与 Stage 1 相同，或略扩大（d_x ∈ [0.3, 2.0]m，dyaw ∈ [-20°, 20°]）
+Reward 调整
+新增举升 reward 和稳定保持 reward。插入后 reward 切换到以举升为主。
+Lift 动作
+放开。策略需要学习"插入到位后触发举升"。
+Done 条件
+在 Stage 1 基础上新增：举升超时（插入成功后 100 steps 内未举升到位则终止）。
+成功定义
+insert_norm > 0.8 且 lift_pos > target_lift 且保持 20 steps
+进入 Stage 3 条件
+连续 3 个 eval checkpoint 成功率 > 60%
+是否继承 Stage 1 权重
+✅ 是的。 从 Stage 1 最优 checkpoint 开始 warmstart Stage 2。
+卡住时优先调什么
+① 策略是否知道"什么时候该开始举"——检查 insert_norm 到达阈值后 lift 动作是否触发；② 举升 reward 是否足够大。
+
+Stage 3：中距离接近 + 对齐 + 插入
+
+项目
+设置
+目标
+从中距离出发（2m-5m），接近、对齐、插入（不一定需要再训举升，可沿用 Stage 2 能力）
+初始条件
+d_x ∈ [1.5, 5.0]m，d_y ∈ [-0.8, 0.8]m，dyaw ∈ [-30°, 30°]
+Reward 调整
+新增接近 reward（d_x 减小→正 reward）。注意权重设低于插入 reward。
+Done 条件
+超时 400 steps；偏差过大终止阈值放宽（|d_y| > 1.0m, |dyaw| > 45°）
+关键挑战
+远场时托盘在图像中占比小。策略需要从小目标中识别方向。
+是否继承 Stage 2 权重
+✅ 是的。
+卡住时优先调什么
+① 检查远场图像：托盘在 64×64 中是否可见（如果只有 2-3 像素，需要提升分辨率到 84×84 或调整相机 FOV）；② 考虑在远场阶段给更大的 d_x 对齐 reward；③ 考虑接近阶段是否需要单帧→2 帧堆叠（获取运动方向信息）。
+
+Stage 4：全流程
+
+项目
+设置
+目标
+完整链路：接近 + 对齐 + 插入 + 举升 + 稳定保持
+初始条件
+d_x ∈ [1.0, 6.0]m（或更大），d_y ∈ [-1.0, 1.0]m，dyaw ∈ [-40°, 40°]
+初始分布策略
+采用混合分布：50% 近场（复习）+ 50% 中远场（强化）。防止远场训练导致近场遗忘。
+Reward
+全部 reward 项启用。权重与之前各 stage 保持一致，必要时微调。
+Done 条件
+超时 600-800 steps；偏差过大终止。
+成功定义
+完整流程完成（举升+稳定保持）
+是否继承 Stage 3 权重
+✅ 是的。
+Domain Randomization
+此阶段开始加入更多视觉 DR（亮度/对比度/噪声范围扩大、托盘外观随机、地面纹理随机、光照方向随机）。
+
+阶段间关键决策总结
+
+Stage 1 ──(suc>70%)──► Stage 2 ──(suc>60%)──► Stage 3 ──(suc>50%)──► Stage 4
+   |                       |                       |                       |
+   继承权重               继承权重               继承权重               最终策略
+   锁 lift               放开 lift              加接近 reward           全部启用
+
+每一阶段"学会"的判断准则
+
+阶段
+判断指标
+Stage 1
+成功率 >70%，y_err 和 yaw_err 在插入时刻 < 阈值，动作无明显振荡。
+Stage 2
+成功率 >60%，插入成功→举升触发的延迟 < 20 steps。
+Stage 3
+成功率 >50%，从 3m 远处能稳定接近并插入。
+Stage 4
+成功率 >50%，全流程完成时间在合理范围内，动作曲线平滑。
+
+
+---
+
+第 6 部分：Isaac Lab / Isaac Sim 工程接入建议
+
+6.1 需要改动的模块
+
+模块
+改动内容
+工作量估计
+Scene / Sensor Config
+在叉车上新增一个 Camera sensor，设置分辨率 64×64、FOV、位姿。确保 camera 随叉车运动更新。
+中等（1-2 天）
+Env Config
+新增 use_camera: True 开关。配置 actor_obs / critic_obs 分别的 obs space。
+小（半天）
+Actor Observation Pipeline
+新增 image_obs 处理管线：camera raw → resize → normalize → tensor。新增 easy8_obs 提取管线。两者分路组织。
+中等（1-2 天）
+Critic Observation Pipeline
+新增 privileged_obs 组装逻辑，将原 15-dim 真值 + 额外 privileged info 打包为 critic_obs。
+小（半天）
+Curriculum Manager
+新增或修改 curriculum 逻辑：根据成功率自动切换 stage、调整初始分布、调整超时步数。如果之前没有 curriculum manager，需要新建。
+中等偏大（2-3 天）
+Reward Config
+在现有 reward function 中新增 steer_rate_penalty、action_smoothing_penalty。可能新增阶段性 reward 权重切换逻辑。
+小（半天-1 天）
+Policy Network Definition
+新建 VisualActorCritic 类，包含 CNN backbone、prop MLP、policy head、value head。需要与 PPO 算法适配（Isaac Lab 通常使用 RSL-RL 或 rl_games，需确认接口）。
+中等偏大（2-3 天）
+Logging / Metrics
+新增 image logging（保存关键帧/episode 视频）。新增 per-stage 成功率、插入深度、对齐误差等 metric 的 tensorboard 记录。
+中等（1-2 天）
+
+总估计工作量：第一版基础框架搭建约 1.5-2 周。
+
+6.2 Actor 和 Critic 的 Observation 分离组织
+
+Isaac Lab (RSL-RL 风格) 中的典型 obs group 定义：
+
+@configclass
+class ObservationsCfg:
+    """Observation specifications."""
+    
+    @configclass
+    class PolicyCfg(ObsGroup):
+        """Actor observations: image + easy8"""
+        # 注意：image 和 low-dim 需要在 obs buffer 中分开存储
+        
+        # easy8 (flat vector)
+        proprioception = ObsTerm(
+            func=mdp.get_easy8,  # 返回 (N, 8) tensor
+            scale=1.0,
+        )
+        
+        # image (需要特殊处理，通常作为单独的 obs key)
+        # 具体实现取决于 Isaac Lab 版本
+        # 可能需要自定义 ObsTerm 来返回 (N, 3, 64, 64) tensor
+    
+    @configclass
+    class CriticCfg(ObsGroup):
+        """Critic observations: privileged full state"""
+        privileged_state = ObsTerm(
+            func=mdp.get_privileged_obs,  # 返回 (N, ~22) tensor
+            scale=1.0,
+        )
+    
+    policy: PolicyCfg = PolicyCfg()
+    critic: CriticCfg = CriticCfg()
+
+关键工程点：
+- Isaac Lab 中 ObsGroup 通常输出 flat vector。图像输入不能简单 flatten 成一维后拼在 flat obs 里（太长且失去空间结构）。
+- 推荐做法：在 obs_dict 中将图像和低维分开存储。Policy network 从 obs_dict["image"] 和 obs_dict["proprioception"] 分别取数。
+- 如果使用 RSL-RL，需要修改 ActorCritic 类的 forward 方法，使其接受 dict 类型的 obs 而非单一 tensor。
+- 如果使用 rl_games，PPO agent 默认支持多种 obs space，可用 Dict space。
+- 这是第一版实现工作量最大的模块之一，建议优先完成。
+  
+6.3 控制单相机训练负担
+
+手段
+建议
+说明
+环境数量
+64-256 个
+有相机渲染后，每个 env 的 GPU 显存和渲染开销增大。先从 64 个开始，观察 GPU 占用。如果显存允许，扩大到 128-256。
+分辨率
+64×64
+如前所述。不要一开始就上 128×128。
+渲染频率
+与 control step 对齐
+即每个 control step 渲染一帧。不要做"每 N 步渲染一次"——这会引入观测延迟，增加训练设计复杂度。
+渲染后端
+使用 Isaac Sim 的 GPU 加速渲染管线
+确保 camera data 直接在 GPU 上产生并留在 GPU 上，不要 CPU-GPU 拷贝。
+图像传输优化
+图像 tensor 保持在 GPU 上
+camera.data.output 直接产生 GPU tensor。整个 pipeline 不落 CPU。
+不使用 depth / segmentation
+第一版只用 RGB
+不要额外开 depth camera 或 semantic segmentation，节省渲染开销。
+控制 physics step vs render step
+如果当前设计是 physics step 10x faster than control step，那渲染只在 control step 时触发
+不要每个 physics sub-step 都渲染。
+
+吞吐量预估（粗略）：
+- Low-dim 训练（无相机）：1024-4096 envs，~50K-200K steps/sec
+- 有相机 64×64 RGB：64-256 envs，~2K-10K steps/sec（差一个量级）
+- 这意味着如果 low-dim teacher 需要 100M steps 收敛，视觉版本在同等 wallclock time 下只能跑 10-50M steps。因此需要 curriculum + asymmetric critic 来提高样本效率。
+  
+6.4 数据记录与可视化
+
+记录项
+方式
+频率
+关键帧保存
+每个 episode 的初始帧、插入开始帧、插入成功帧、episode 结束帧。保存为 PNG。
+每 N 个 episode（如 N=100）保存一次
+Episode 视频
+将整个 episode 的 camera frames 拼接为 mp4。
+每 eval episode 保存。training 期间抽样保存（如每 10K step 保存 5 个 episode）
+成功/失败 case 区分
+在 logging 中标记每个 episode 的结局：success / timeout / collision / out_of_bounds / etc。
+每个 episode
+动作曲线
+记录 drive, steer, lift 随 step 的变化曲线。
+每个 eval episode 保存完整曲线。Tensorboard 中画 mean/std。
+关键误差曲线
+记录 d_x, d_y, dyaw, insert_norm, y_err, yaw_err 随 step 的变化（这些是 privileged info，只用于 logging）。
+同上
+Tensorboard Metrics
+成功率、平均 return、平均 episode length、各 reward 分项均值、action mean/std、插入成功率、举升成功率。
+每个 PPO 更新
+CNN 特征可视化
+每隔一段时间（如每 50K steps），对 eval episode 的几帧做 Grad-CAM 或 feature map 可视化，观察 CNN 注意力区域。
+低频
+
+Tensorboard 推荐的 metric panel 组织：
+
+Panel 1: Task Performance
+  - success_rate (per stage)
+  - mean_episode_return
+  - mean_episode_length
+
+Panel 2: Alignment Quality
+  - mean_y_err_at_insertion
+  - mean_yaw_err_at_insertion
+  - mean_insert_norm_at_success
+
+Panel 3: Action Smoothness
+  - mean_abs_delta_steer
+  - mean_abs_delta_drive
+  - steer_saturation_ratio
+  - action_std (each dim)
+
+Panel 4: Training Diagnostics
+  - policy_loss
+  - value_loss
+  - entropy
+  - KL divergence
+  - explained_variance
+
+Panel 5: Curriculum
+  - current_stage
+  - init_distance_range
+
+
+---
+
+第 7 部分：评估与对照实验设计
+
+7.1 对照实验列表
+
+编号
+实验名称
+Actor 输入
+Critic 输入
+目的
+E0
+Low-dim Oracle
+15-dim 真值
+同 actor
+oracle baseline，性能上限参照
+E1
+主实验：Image + easy8
+64×64 RGB + easy8
+privileged (~22-dim)
+本方案核心实验
+E2
+去掉 easy8（pure image）
+64×64 RGB only
+privileged
+退化对照：验证 easy8 的价值
+E3
+去掉 prev_actions
+64×64 RGB + easy5（去掉 prev_drive/steer/lift）
+privileged
+退化对照：验证 prev_actions 的价值
+E4
+2 帧堆叠
+64×64×6 (2帧 RGB) + easy8
+privileged
+时序消融：验证多帧是否有帮助
+E5
+不用 asymmetric critic
+64×64 RGB + easy8
+同 actor（image + easy8）
+架构消融：验证 asymmetric critic 的价值
+
+优先级： E0 和 E1 必做。E2、E3 在 E1 表现稳定后作为消融必做。E4、E5 根据 E1 结果酌情做。
+
+7.2 评估指标
+
+闭环任务指标
+
+指标
+定义
+目标值（参照 E0 oracle）
+成功率
+完成全流程的 episode 比例
+E1 达到 E0 的 70%+
+完成时间
+成功 episode 的平均步数
+E1 不超过 E0 的 2 倍
+插入成功率
+insert_norm > 0.8 的 episode 比例
+E1 > 70%
+举升成功率
+在已插入的 episode 中，举升成功的比例
+E1 > 80%（举升本身不难）
+稳定保持成功率
+在已举升的 episode 中，稳定保持 > 20 steps 的比例
+E1 > 90%
+平均 episode return
+所有 episode 的平均总 reward
+越高越好
+
+过程质量指标
+
+指标
+定义
+插入时刻 y_err
+插入开始时的横向误差
+插入时刻 yaw_err
+插入开始时的偏航误差
+最大 insert_norm
+episode 中达到的最大插入深度
+接近阶段 steer 标准差
+衡量接近过程是否抖动
+Mean |Δsteer|
+相邻步 steer 变化量的均值，衡量转向平滑度
+Mean |Δdrive|
+同上，纵向
+Action saturation ratio
+动作值达到上限 (|a|>0.95) 的时间步比例
+Failure breakdown
+timeout / collision / out_of_bounds / other 各占多少
+
+训练效率指标
+
+指标
+说明
+收敛步数
+达到目标成功率所需的 env steps
+Wall-clock time
+达到目标成功率所需的实际训练时间
+Steps/sec
+训练吞吐（含渲染）
+GPU 内存占用
+峰值显存
+图像渲染是否为瓶颈
+观察 GPU util：如果 GPU util 低但 CPU util 高，说明有数据搬运瓶颈
+
+7.3 失败分析与调参优先级
+
+如果 E1 失败，最可能的失败环节排序：
+
+1. 近场插入对齐精度不够 → 策略能接近但无法对齐到足够精度完成插入
+  - 调参：检查图像是否提供了足够的对齐线索；增大对齐 reward；缩小初始 d_y / dyaw 范围先训简单的
+    
+2. CNN 没学到有效特征 → 策略行为随机或退化为某种固定动作序列
+  - 调参：可视化 CNN 特征 / Grad-CAM；检查图像预处理是否正确；尝试换 backbone
+    
+3. 训练不稳定 → reward 曲线上下跳动，无收敛趋势
+  - 调参：检查 PPO 超参（lr, clip_range, entropy_bonus）；检查 reward scale；检查 critic 是否收敛
+    
+4. 训练太慢 → 200M steps 还没有明显进展
+  - 调参：开启 asymmetric critic（如果没开）；缩小 curriculum 初始范围；增大 reward shaping 密度
+    
+
+---
+
+第 8 部分：风险与排查路径
+
+第一优先级排查项（上线 MVP 前必须确认）
+
+风险
+排查方法
+解法
+1. 图像中是否能看到关键信息
+在 Isaac Sim 中手动放置叉车到不同 stage 的典型位置，截图检查：是否能同时看到叉尖和托盘口？近场插入时遮挡有多严重？远场时托盘有多大？
+调整相机位姿 / FOV。如果近场遮挡太严重，将相机上移或加大俯视角。如果远场托盘太小，增大 FOV 或将 Stage 3 起始距离拉近。
+2. 图像 pipeline 是否正确
+打印 actor 实际收到的 image tensor：shape 是否正确 (N, 3, 64, 64)？值域是否在 [0, 1]？是否有 NaN？渲染出来的图像是否合理（保存几帧看看）？
+Debug 逐步排查。
+3. Asymmetric critic obs 是否正确
+打印 critic_obs 的内容：是否包含了所有 privileged info？归一化是否正确？
+Debug 逐步排查。
+4. Reward 在视觉流水线下的数值是否合理
+跑几个 random policy episode，打印 reward 各分项。与 low-dim env 下 random policy 的 reward 分布对比。
+如果某些 reward 项恒为 0 或 NaN，说明对应的 ground truth info 传递有误。
+
+第二优先级排查项（MVP 能跑后的首轮 debug）
+
+风险
+排查方法
+解法
+5. Backbone 太弱看不懂叉尖-托盘关系
+训练 50M steps 后做 Grad-CAM 可视化。如果注意力分散在无关区域，说明 backbone 不够。
+升级到 moderate backbone；或加 auxiliary visual7 prediction head 引导特征学习。
+6. 训练吞吐太差
+监控 steps/sec。如果 <1K/sec（64 envs），图像渲染是瓶颈。
+降低分辨率到 48×48；检查是否有 GPU→CPU 拷贝；减少 env 数量。
+7. Easy8 使用不当
+做消融实验 E2（去掉 easy8）。如果去掉后完全训不起来，说明当前 actor 过度依赖 easy8。如果去掉后性能接近，说明图像部分在起作用。
+正常情况下 easy8 应该有帮助但不至完全替代图像。如果连 E2 (pure image) 都完全不行，先检查图像质量。
+8. Prev_actions 缺失导致控制抖动
+做消融实验 E3。比较 action 曲线平滑度。
+通常 prev_actions 的帮助是"显而易见"级别的。
+
+第三优先级排查项（基本能训后的优化）
+
+风险
+排查方法
+解法
+9. Critic 太强 / Actor 太弱导致训练信号失衡
+观察 explained_variance。如果 critic 很快收敛（explained_var > 0.9）但 actor 不动，说明 critic 给的 advantage 信号虽然准确但 actor 无法利用。
+增大 actor 的学习率或网络容量。或加 entropy bonus 鼓励探索。
+10. 近场遮挡严重
+观察 Stage 1 中 insert_norm > 0.3 后的成功率是否骤降。保存此阶段图像查看遮挡情况。
+调整相机角度；考虑在 Stage 1 中加入 insert_norm 在 [0.3, 0.5] 区间的短程 curriculum；或接受"插入靠惯性+easy8"，图像主要负责前期对齐。
+11. Curriculum 设计不合理导致遗忘
+升阶后早期 stage 的成功率是否大幅下降。
+在高阶 stage 中混入一部分低阶初始条件（如 50% 近场 / 50% 中场）。
+12. 单帧缺乏时序信息导致插入深度判断不稳
+分析失败 case 中 insert_norm 的分布：是否策略在"几乎插入到位"时犹豫不决、反复前后？
+升级到 2 帧堆叠，或在 easy8 中尝试加入 Δd_x（上一步与当前步的距离变化）。
+13. Reward 过度依赖低维几何状态
+检查 reward function 中是否仍然在用 actor 看不到的真值来计算 reward。
+这其实没关系——reward 只在 sim 中用，不需要 actor 看到。但如果 reward 结构导致 actor 在"看不到 reward 相关状态"时无法学习有效策略，需要调整 reward dense 化程度或加更强的 shaping。
+
+
+---
+
+第 9 部分：最终推荐方案
+
+9.1 第一版最推荐配置
+
+============================================
+       MVP 配置（第一版最小可行方案）
+============================================
+
+【相机方案】
+  - 单相机 RGB
+  - 安装于叉车前端偏上方，向前下方俯视 20°-25°
+  - 分辨率：64×64
+  - FOV：70°-80°
+  - 渲染频率：每 control step 一帧
+
+【输入方案】
+  Actor:
+    - image:  (3, 64, 64) float32, [0, 1]
+    - easy8:  (8,) float32, 各维归一化到 [-1, 1]
+  Critic:
+    - privileged state: (~22,) float32
+      含原 15-dim 真值 + 额外 privileged info
+
+【Actor 结构】
+  CNN backbone (NatureCNN-mini, 3 层 conv):
+    Conv2d(3, 16, 5, s=2) → ReLU
+    Conv2d(16, 32, 3, s=2) → ReLU
+    Conv2d(32, 32, 3, s=2) → ReLU
+    Flatten → Linear(→64) → ReLU
+    → img_feat (64-dim)
+  
+  Prop MLP:
+    Linear(8→32) → ReLU → Linear(32→32) → ReLU
+    → prop_feat (32-dim)
+  
+  Policy Head:
+    concat(img_feat, prop_feat) → 96-dim
+    Linear(96→64) → ReLU
+    Linear(64→64) → ReLU
+    Linear(64→3) → action_mean
+    learnable log_std (3-dim)
+  
+  Total: ~110K params
+
+【Critic 结构】
+  MLP:
+    Linear(22→128) → ReLU
+    Linear(128→128) → ReLU
+    Linear(128→1) → value
+  
+  Total: ~22K params
+
+【训练算法】
+  PPO + Asymmetric Critic
+  - lr_actor: 3e-4
+  - lr_critic: 3e-4 (可独立调)
+  - clip_range: 0.2
+  - entropy_coef: 0.005~0.01
+  - gamma: 0.99
+  - lam (GAE): 0.95
+  - mini_batch_size: 根据 env 数和 rollout_length 调整
+  - n_epochs_per_update: 4-8
+  - max_grad_norm: 0.5-1.0
+
+【Curriculum 顺序】
+  Stage 1 → Stage 2 → Stage 3 → Stage 4
+  (如第 5 部分所述)
+
+【Reward / Done 复用策略】
+  - 直接复用 low-dim teacher 的全部 reward/done 逻辑
+  - 新增 steer_rate_penalty 和 action_smoothing_penalty
+  - 新增 Stage 1 锁 lift 逻辑
+
+【是否加时序】
+  - 第一版不加。单帧 + easy8 (含 prev_actions)。
+  - 如果插入深度判断成为瓶颈，第二版升级到 2 帧堆叠。
+
+【是否做 imitation warm start】
+  - 第一版不做。直接 PPO from scratch + curriculum。
+  - 如果 Stage 1 经过 100M steps 还完全不收敛，第二版考虑用 low-dim teacher 的 rollout 做行为克隆预热 actor 的 CNN+MLP（约 10K episodes 的 image-action 对）。
+
+【动作约束】
+  - tanh 输出 + action clipping [-1, 1]
+  - EMA smoothing α=0.6
+  - steer rate limit Δ=0.15/step
+  - lift rate limit Δ=0.1/step
+
+【Domain Randomization（第一版）】
+  - 亮度 ±20%, 对比度 ±15%
+  - 托盘纹理/颜色随机（3-5 种）
+  - 地面纹理随机（3-5 种）
+  - 光源方向随机
+
+9.2 三周推进计划
+
+第 1 周：搭框架 + Stage 1 开始训练
+
+天
+任务
+验收标准
+Day 1-2
+相机配置与验证。 在 Isaac Sim 中配置好单相机，手动驾驶叉车到不同位置，截图验证图像质量。确认近场（0.5m）、中场（2m）、远场（5m）的图像信息是否充足。
+产出：10-20 张不同距离/角度的截图，标注关键区域可见性。确认相机位姿参数。
+Day 2-3
+Observation pipeline 改造。 实现 actor_obs（image + easy8）和 critic_obs（privileged state）的分离。确保 tensor shape 和数值范围正确。
+产出：random policy 下跑一个 episode，打印并验证所有 obs tensor 的 shape / 值域 / 无 NaN。保存几帧 actor 实际看到的图像。
+Day 3-4
+Network 定义与 PPO 适配。 实现 VisualActorCritic，确保与 RSL-RL / rl_games 的 PPO 接口兼容。跑通一次完整的 training loop（哪怕只跑 100 steps，不管性能）。
+产出：跑通训练，tensorboard 能看到 loss 曲线在动。
+Day 4-5
+Stage 1 Curriculum 配置。 设置初始分布（d_x ∈ [0.3, 1.5]m, d_y ∈ [-0.3, 0.3]m, dyaw ∈ [-15°, 15°]），锁 lift，配置对应 reward 权重和 done 条件。开始正式训练。
+产出：Stage 1 正式训练开始，64 envs 跑起来，steps/sec 可接受（>1K/sec）。
+Day 5-7
+Stage 1 训练 + 监控。 持续训练，每天检查 tensorboard。保存 eval episode 视频观察行为。
+周末验收：Stage 1 是否有收敛趋势？成功率是否从 0% 开始往上走？动作是否开始有结构性（而非随机）？
+
+第 1 周关键里程碑：
+- ✅ 图像管线跑通
+- ✅ PPO + asymmetric critic 跑通
+- ✅ Stage 1 训练开始
+- ✅ 初步判断：成功率曲线是否 >0（即使只有 5%，也说明有学习信号）
+  
+第 2 周：Stage 1 调优 + Stage 2 开始
+
+天
+任务
+验收标准
+Day 1-2
+Stage 1 精调。 根据第 1 周末的观察结果调整：reward 权重、初始分布范围、learning rate、entropy bonus。如果完全不收敛，执行排查路径（第 8 部分）。
+Stage 1 成功率 > 30%。
+Day 2-3
+可视化分析。 对 Stage 1 的 eval episodes 做详细分析：保存成功/失败 case 视频；画 y_err / yaw_err 曲线；做 Grad-CAM 可视化。
+产出：一份 Stage 1 行为分析报告（可以是 markdown+截图）。
+Day 3-4
+Stage 1 继续训练 至成功率 >70%。如果卡在某个成功率水平，根据分析报告调整。
+Stage 1 成功率 > 70%。
+Day 4-5
+开始 Stage 2。 从 Stage 1 最优 checkpoint warmstart Stage 2。放开 lift，加入举升 reward。
+Stage 2 训练开始。观察插入成功后是否开始尝试举升。
+Day 5-7
+Stage 2 训练 + 监控。
+周末验收：Stage 2 成功率（插入+举升+短暂稳定）> 30%？
+
+第 2 周关键里程碑：
+- ✅ Stage 1 成功率 > 70%
+- ✅ Stage 2 开始训练
+- ✅ 策略展示出"对齐→插入→举升"的完整行为序列
+- ✅ 产出 Grad-CAM 分析
+  
+第 3 周：Stage 2 完成 + Stage 3 开始 + 消融实验
+
+天
+任务
+验收标准
+Day 1-2
+Stage 2 调优至成功率 > 60%。
+Stage 2 成功率稳定 > 60%。
+Day 2-3
+开始 Stage 3。 从 Stage 2 checkpoint warmstart。初始距离拉到 1.5-5m。加入接近 reward。
+Stage 3 训练开始。
+Day 3-5
+开始消融实验。 并行启动 E2（去 easy8）和 E3（去 prev_actions）的 Stage 1 训练。作为对照。
+消融实验开始跑。
+Day 5-7
+综合评估。 产出 E0 / E1 / E2 / E3 的 Stage 1 成功率对比表。分析 easy8 和 prev_actions 的贡献。
+周末验收：Stage 3 有收敛趋势？消融实验有初步结论？
+
+第 3 周关键里程碑：
+- ✅ Stage 2 成功率 > 60%
+- ✅ Stage 3 开始训练
+- ✅ 消融实验初步结论
+- ✅ 产出："这条路线值不值得继续投入"的明确结论
+  
+9.3 最小可执行版本（MVP）
+
+MVP 定义：回答"这条路线是否值得继续投入"所需的最小实验。
+
+MVP 目标：
+  在 Stage 1（近场对齐+插入）上，用 image + easy8 端到端 PPO 训练，
+  成功率从 0 训到 >30% 以上。
+
+MVP 配置：
+  - 64×64 RGB 单相机
+  - easy8 全保留
+  - NatureCNN-mini actor (~110K params)
+  - Asymmetric MLP critic (~22K params)
+  - Stage 1 初始分布：d_x ∈ [0.5, 1.0]m (缩窄！), d_y ∈ [-0.2, 0.2]m, dyaw ∈ [-10°, 10°]
+  - 锁 lift
+  - 64 envs
+  - PPO from scratch
+
+MVP 所需工作量：
+  - 约 5-7 天（含框架搭建、调试、首轮训练）
+
+MVP 成功标准：
+  - 成功率 > 30%：路线可行，值得继续投入
+  - 成功率 > 10% 但 < 30%：有希望，需要调参 / 加 curriculum / 调 backbone
+  - 成功率 ≈ 0%（100M steps 后）：需要排查根本问题
+    —— 检查图像是否提供了有效信息
+    —— 检查 CNN 是否学到了特征
+    —— 如果图像线索确实不足，考虑回退到路线 B 或加 auxiliary geometry head
+
+MVP 失败后的兜底：
+  - 方案 1：加 auxiliary visual7 prediction head（在路线 C 中混入路线 B 的监督信号）
+  - 方案 2：行为克隆预热 actor（从 low-dim teacher 的 rollout 中收集 image-action 对）
+  - 方案 3：回退到路线 B（teacher-student）
+
+
+---
+
+附录：关键脚本 / 配置模板（伪代码参考）
+
+A1. VisualActorCritic 网络定义
+
+import torch
+import torch.nn as nn
+
+class VisualActor(nn.Module):
+    def __init__(self, img_channels=3, easy8_dim=8, action_dim=3,
+                 img_feat_dim=64, prop_feat_dim=32):
+        super().__init__()
+        
+        # CNN backbone
+        self.cnn = nn.Sequential(
+            nn.Conv2d(img_channels, 16, 5, stride=2), nn.ReLU(),
+            nn.Conv2d(16, 32, 3, stride=2), nn.ReLU(),
+            nn.Conv2d(32, 32, 3, stride=2), nn.ReLU(),
+            nn.Flatten(),
+        )
+        # 计算 CNN 输出维度 (取决于输入分辨率)
+        # 对于 64x64 输入: 30->14->6, flatten=32*6*6=1152
+        self.cnn_fc = nn.Sequential(
+            nn.Linear(1152, img_feat_dim), nn.ReLU()
+        )
+        
+        # Proprioception MLP
+        self.prop_mlp = nn.Sequential(
+            nn.Linear(easy8_dim, prop_feat_dim), nn.ReLU(),
+            nn.Linear(prop_feat_dim, prop_feat_dim), nn.ReLU(),
+        )
+        
+        # Policy head
+        fused_dim = img_feat_dim + prop_feat_dim
+        self.policy_head = nn.Sequential(
+            nn.Linear(fused_dim, 64), nn.ReLU(),
+            nn.Linear(64, 64), nn.ReLU(),
+            nn.Linear(64, action_dim),  # action mean
+        )
+        
+        # Learnable log_std
+        self.log_std = nn.Parameter(torch.zeros(action_dim))
+    
+    def forward(self, obs_dict):
+        """
+        obs_dict: {
+            "image": (B, 3, 64, 64),
+            "proprioception": (B, 8),
+        }
+        """
+        img = obs_dict["image"]
+        prop = obs_dict["proprioception"]
+        
+        img_feat = self.cnn_fc(self.cnn(img))
+        prop_feat = self.prop_mlp(prop)
+        
+        fused = torch.cat([img_feat, prop_feat], dim=-1)
+        action_mean = self.policy_head(fused)
+        action_mean = torch.tanh(action_mean)  # bound to [-1, 1]
+        
+        return action_mean, self.log_std.expand_as(action_mean)
+
+
+class AsymmetricCritic(nn.Module):
+    def __init__(self, privileged_dim=22):
+        super().__init__()
+        
+        self.mlp = nn.Sequential(
+            nn.Linear(privileged_dim, 128), nn.ReLU(),
+            nn.Linear(128, 128), nn.ReLU(),
+            nn.Linear(128, 64), nn.ReLU(),
+            nn.Linear(64, 1),
+        )
+    
+    def forward(self, privileged_obs):
+        """
+        privileged_obs: (B, 22)
+        """
+        return self.mlp(privileged_obs)
+
+
+class VisualActorCritic(nn.Module):
+    """Combined module for PPO training."""
+    def __init__(self):
+        super().__init__()
+        self.actor = VisualActor()
+        self.critic = AsymmetricCritic()
+    
+    def act(self, obs_dict):
+        action_mean, log_std = self.actor(obs_dict)
+        # ... sample from Gaussian, compute log_prob, etc.
+        return action, log_prob, value
+    
+    def evaluate(self, obs_dict, privileged_obs, actions):
+        action_mean, log_std = self.actor(obs_dict)
+        value = self.critic(privileged_obs)
+        # ... compute log_prob, entropy for given actions
+        return log_prob, entropy, value
+
+A2. Stage 1 Curriculum 配置（伪代码）
+
+class Stage1Config:
+    # Initial conditions
+    d_x_range = (0.3, 1.5)       # meters
+    d_y_range = (-0.3, 0.3)      # meters
+    dyaw_range = (-15, 15)       # degrees
+    v_init_range = (-0.05, 0.05) # near-zero
+    lift_pos_noise = 0.02        # meters around target height
+    
+    # Episode
+    max_episode_steps = 200
+    
+    # Done conditions
+    d_y_fail_threshold = 0.5     # meters
+    dyaw_fail_threshold = 30     # degrees
+    
+    # Reward weights (relative)
+    w_align_yaw = 2.0
+    w_align_y = 2.0
+    w_insert_progress = 5.0
+    w_insert_success_bonus = 50.0
+    w_action_smooth = -0.5
+    w_steer_rate = -1.0
+    
+    # Lock lift
+    lock_lift = True
+    
+    # Promotion criteria
+    promote_success_rate = 0.70
+    promote_eval_count = 3       # consecutive evals above threshold
+
+A3. Action Smoothing 实现
+
+class ActionSmoother:
+    def __init__(self, alpha=0.6, steer_rate_limit=0.15, lift_rate_limit=0.1):
+        self.alpha = alpha
+        self.steer_rate_limit = steer_rate_limit
+        self.lift_rate_limit = lift_rate_limit
+        self.prev_action = None
+    
+    def smooth(self, raw_action):
+        """
+        raw_action: (B, 3) — [drive, steer, lift]
+        """
+        if self.prev_action is None:
+            self.prev_action = raw_action.clone()
+            return raw_action
+        
+        # EMA smoothing
+        smoothed = self.alpha * raw_action + (1 - self.alpha) * self.prev_action
+        
+        # Rate limiting on steer
+        delta_steer = smoothed[:, 1] - self.prev_action[:, 1]
+        delta_steer = torch.clamp(delta_steer, 
+                                   -self.steer_rate_limit, 
+                                   self.steer_rate_limit)
+        smoothed[:, 1] = self.prev_action[:, 1] + delta_steer
+        
+        # Rate limiting on lift
+        delta_lift = smoothed[:, 2] - self.prev_action[:, 2]
+        delta_lift = torch.clamp(delta_lift, 
+                                  -self.lift_rate_limit, 
+                                  self.lift_rate_limit)
+        smoothed[:, 2] = self.prev_action[:, 2] + delta_lift
+        
+        self.prev_action = smoothed.clone()
+        return smoothed
+    
+    def reset(self, env_ids):
+        """Call on episode reset."""
+        if self.prev_action is not None:
+            self.prev_action[env_ids] = 0.0
+
+
+---
+
+总结
+
+这条 单相机 RGB + easy8 → action 的混合输入端到端路线在技术上是可行且值得投入的。它在 sim2real 潜力上优于 low-dim teacher 和 teacher-student 路线，但需要通过以下三个关键措施来保证可训练性：
+
+1. Asymmetric critic — 让 value estimation 保持高质量，不受图像噪声影响
+2. 分阶段 curriculum — 从近场插入开始，逐步扩展到全流程，避免一开始就面对超大探索空间
+3. 动作平滑约束 — 弥补视觉策略天然的动作抖动倾向
+  
+MVP 预计 5-7 天出结果，三周内可给出"路线是否可行"的明确结论。
