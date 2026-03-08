@@ -60,6 +60,12 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     # Stage 1 课程只训练“接近 + 对齐 + 插入”，默认不要求举升进入 success。
     # 这样可以避免“动作层锁 lift，但成功判定仍要求 lift”导致 success 永远为 0。
     stage1_success_without_lift: bool = True
+    # Stage 1 初始随机化范围，默认保持当前课程难度不变。
+    # 这些字段主要给控制变量实验用，便于直接从命令行 override。
+    stage1_init_y_min_m: float = -0.2
+    stage1_init_y_max_m: float = 0.2
+    stage1_init_yaw_deg_min: float = -10.0
+    stage1_init_yaw_deg_max: float = 10.0
 
     # 相机参数：
     # - 训练默认 64x64，降低渲染和显存开销

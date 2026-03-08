@@ -1767,8 +1767,18 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         # ---- 随机化叉车初始位姿 ----
         if self._stage_1_mode:
             x = sample_uniform(-2.5, -2.0, (len(env_ids), 1), device=self.device)
-            y = sample_uniform(-0.2, 0.2, (len(env_ids), 1), device=self.device)
-            yaw = sample_uniform(-10.0 * math.pi / 180.0, 10.0 * math.pi / 180.0, (len(env_ids), 1), device=self.device)
+            y = sample_uniform(
+                self.cfg.stage1_init_y_min_m,
+                self.cfg.stage1_init_y_max_m,
+                (len(env_ids), 1),
+                device=self.device,
+            )
+            yaw = sample_uniform(
+                self.cfg.stage1_init_yaw_deg_min * math.pi / 180.0,
+                self.cfg.stage1_init_yaw_deg_max * math.pi / 180.0,
+                (len(env_ids), 1),
+                device=self.device,
+            )
         else:
             # _pallet_front_x ≈ -1.08m，fork_forward_offset ≈ 1.87m
             # x_max 需满足: x_max + 1.87*cos(yaw_max) < -1.08 → x_max < -2.89m
