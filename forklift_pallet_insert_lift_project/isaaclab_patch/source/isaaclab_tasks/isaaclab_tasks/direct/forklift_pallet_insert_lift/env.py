@@ -131,6 +131,15 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         # _setup_scene() 会在 super().__init__() 内被调用，因此相机状态必须先初始化。
         self._camera_enabled = bool(getattr(cfg, "use_camera", False))
         self._asym_enabled = bool(getattr(cfg, "use_asymmetric_critic", False))
+        self._stage_1_mode = bool(getattr(cfg, "stage_1_mode", False))
+        if self._camera_enabled:
+            cfg.observation_space = {
+                "image": [3, int(cfg.camera_height), int(cfg.camera_width)],
+                "proprio": int(cfg.easy8_dim),
+            }
+        else:
+            cfg.observation_space = 15
+        cfg.state_space = int(cfg.privileged_dim) if self._asym_enabled else 0
         self._camera_initialized = False
         self._camera = None
         self._warned_camera_fallback = False
@@ -707,6 +716,9 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         steer = self.actions[:, 1] * self.cfg.steer_angle_rad
         lift_v = self.actions[:, 2] * self.cfg.lift_speed_m_s
 
+        if self._stage_1_mode:
+            lift_v = torch.zeros_like(lift_v)
+
         # two-stage safety: if already inserted enough, suppress driving and let it lift
         inserted = self._last_insert_depth >= self._insert_thresh
         drive = torch.where(inserted, torch.zeros_like(drive), drive)
@@ -859,7 +871,7 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         return torch.cat([v_xy_r, yaw_rate, lift_pos, lift_vel, prev_actions], dim=-1)
 
     def _get_privileged_obs(self, policy_obs: torch.Tensor) -> torch.Tensor:
-        """Step-1: 先用 policy 向量观测作为 privileged 占位，后续再扩展到完整 ~22 维。"""
+        """返回 critic 使用的 15 维低维状态。"""
         return policy_obs
 
     def _get_observations(self) -> dict[str, torch.Tensor]:
@@ -984,11 +996,17 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         )
         # Isaac Lab direct workflow expects a dict with at least the "policy" key.
         if self._camera_enabled:
+            image = self._get_camera_image()
+            proprio = self._get_easy8()
             obs_dict: dict[str, torch.Tensor | dict[str, torch.Tensor]] = {
                 "policy": {
-                    "image": self._get_camera_image(),
-                    "proprio": self._get_easy8(),
-                }
+                    "image": image,
+                    "proprio": proprio,
+                },
+                # rsl_rl 的 obs_groups / rollout storage 在 update 阶段直接按顶层 group 取值，
+                # 因此这里显式暴露 image/proprio，避免只在 reset 阶段能访问嵌套结构。
+                "image": image,
+                "proprio": proprio,
             }
         else:
             obs_dict = {"policy": obs}
@@ -1738,13 +1756,18 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self._write_root_pose(self.pallet, pallet_pos, pallet_quat, env_ids)
 
         # ---- 随机化叉车初始位姿 ----
-        # _pallet_front_x ≈ -1.08m，fork_forward_offset ≈ 1.87m
-        # x_max 需满足: x_max + 1.87*cos(yaw_max) < -1.08 → x_max < -2.89m
-        # 取 -3.0m 留安全裕度，避免叉齿穿透托盘导致 PhysX 去穿透弹飞托盘
-        x = sample_uniform(-4.0, -3.0, (len(env_ids), 1), device=self.device)
-        y = sample_uniform(-0.6, 0.6, (len(env_ids), 1), device=self.device)
+        if self._stage_1_mode:
+            x = sample_uniform(-2.5, -2.0, (len(env_ids), 1), device=self.device)
+            y = sample_uniform(-0.2, 0.2, (len(env_ids), 1), device=self.device)
+            yaw = sample_uniform(-10.0 * math.pi / 180.0, 10.0 * math.pi / 180.0, (len(env_ids), 1), device=self.device)
+        else:
+            # _pallet_front_x ≈ -1.08m，fork_forward_offset ≈ 1.87m
+            # x_max 需满足: x_max + 1.87*cos(yaw_max) < -1.08 → x_max < -2.89m
+            # 取 -3.0m 留安全裕度，避免叉齿穿透托盘导致 PhysX 去穿透弹飞托盘
+            x = sample_uniform(-4.0, -3.0, (len(env_ids), 1), device=self.device)
+            y = sample_uniform(-0.6, 0.6, (len(env_ids), 1), device=self.device)
+            yaw = sample_uniform(-0.25, 0.25, (len(env_ids), 1), device=self.device)
         z = torch.full((len(env_ids), 1), 0.03, device=self.device)
-        yaw = sample_uniform(-0.25, 0.25, (len(env_ids), 1), device=self.device)
 
         pos = torch.cat([x, y, z], dim=1)
         half = yaw * 0.5

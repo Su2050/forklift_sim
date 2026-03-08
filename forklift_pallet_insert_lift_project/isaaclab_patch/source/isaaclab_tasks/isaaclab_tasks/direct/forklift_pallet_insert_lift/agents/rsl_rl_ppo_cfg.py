@@ -24,19 +24,22 @@ class ForkliftInsertLiftPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     seed = 42  # 随机种子，保证可复现
     device = "cuda:0"  # 训练设备
     num_steps_per_env = 64  # 每个环境每次 rollout 的步数
+    obs_groups = {
+        "policy": ["image", "proprio"],
+        "critic": ["critic"],
+    }
     max_iterations = 2000  # 最大训练迭代次数（iteration）
     save_interval = 50  # 保存模型与日志的间隔（iteration）
     experiment_name = "forklift_pallet_insert_lift"  # 训练实验名称（用于日志目录）
 
-    # policy network：Actor-Critic 网络结构与归一化
-    # S1.0N: 使用 ClampedActorCritic 子类，clamp log_std >= ln(0.05) 防止 std 塌缩
+    # policy network：中等强度视觉 actor + 低维 critic
     policy = RslRlPpoActorCriticCfg(
-        class_name="rsl_rl.modules.ClampedActorCritic",
-        init_noise_std=0.5,  # S1.0M: 1.0→0.5，保持不变（有 std_min 兜底）
-        noise_std_type="log",  # S1.0k: scalar→log，log 空间梯度更新为乘法式，防止 std 线性膨胀
-        actor_obs_normalization=True,  # Actor 观测归一化
+        class_name="rsl_rl.modules.VisionActorCritic",
+        init_noise_std=0.4,
+        noise_std_type="log",
+        actor_obs_normalization=False,  # 图像已归一化，只保留 proprio encoder
         critic_obs_normalization=True,  # Critic 观测归一化
-        actor_hidden_dims=[256, 256, 128],  # Actor MLP 隐藏层
+        actor_hidden_dims=[256, 256, 128],  # fusion actor head
         critic_hidden_dims=[256, 256, 128],  # Critic MLP 隐藏层
         activation="elu",  # 激活函数
     )

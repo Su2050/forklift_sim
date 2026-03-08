@@ -47,21 +47,22 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     # actions: [drive, steer, lift]（驾驶、转向、举升）
     action_space = 3
 
-    # observations: 向量观测，具体构成见 env._get_observations()
-    # S1.0N: 13→15（新增 y_err_obs / yaw_err_obs）
-    observation_space = 15
+    # 默认走视频端到端训练：
+    # - actor 观测是 image + proprio
+    # - critic 观测是 15 维低维 privileged state
+    observation_space = {"image": [3, 64, 64], "proprio": 8}
+    state_space = 15
 
-    # no separate privileged state in this minimal patch（不使用特权观测）
-    state_space = 0
+    # ===== Video-e2e defaults =====
+    use_camera: bool = True
+    use_asymmetric_critic: bool = True
+    stage_1_mode: bool = True
 
-    # ===== Step-1 (video-e2e): camera + asymmetric critic scaffolding =====
-    # 默认关闭，确保与当前 low-dim 基线行为完全一致
-    use_camera: bool = False
-    use_asymmetric_critic: bool = False
-
-    # 相机参数（按 2026-03-08 已验证方案）
-    camera_width: int = 320
-    camera_height: int = 320
+    # 相机参数：
+    # - 训练默认 64x64，降低渲染和显存开销
+    # - camera_eval.py 会显式覆盖到 320x320 做可视化验收
+    camera_width: int = 64
+    camera_height: int = 64
     camera_hfov_deg: float = 90.0
     camera_mount_body: str = "body"
     # forklift_c.usd 使用 cm 单位；TiledCamera offset 也需使用挂载 prim 的局部单位。
@@ -72,7 +73,7 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
 
     # easy8 + privileged 维度（供 obs 组装使用）
     easy8_dim: int = 8
-    privileged_dim: int = 22
+    privileged_dim: int = 15
 
     # 跟随挂载相机（strict: 必须挂在 Robot/<mount_body> 下，不做 world fallback）
     # rot 会在 env._setup_scene() 中根据 camera_rpy_local_deg 运行时覆盖。

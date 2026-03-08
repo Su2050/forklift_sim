@@ -13,11 +13,13 @@ import gymnasium as gym
 
 from . import agents  # noqa: F401
 
-# S1.0N: 将 ClampedActorCritic 注册到 rsl_rl.modules 命名空间，
-# 使 OnPolicyRunner 的 eval(class_name) 能通过 "rsl_rl.modules.ClampedActorCritic" 找到它。
+# 将自定义 ActorCritic 注册到 rsl_rl.modules 命名空间，
+# 使 OnPolicyRunner 的 eval(class_name) 能通过 "rsl_rl.modules.*" 找到它们。
 from .clamped_actor_critic import ClampedActorCritic as _ClampedActorCritic
+from .vision_actor_critic import VisionActorCritic as _VisionActorCritic
 import rsl_rl.modules as _rsl_modules
 _rsl_modules.ClampedActorCritic = _ClampedActorCritic
+_rsl_modules.VisionActorCritic = _VisionActorCritic
 
 # 注册 Gym 环境：id 是对外统一入口，entry_point 指向环境类，kwargs 指向配置入口
 gym.register(
