@@ -59,27 +59,29 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     use_camera: bool = False
     use_asymmetric_critic: bool = False
 
-    # 相机参数（第一版推荐）
-    camera_width: int = 64
-    camera_height: int = 64
-    camera_hfov_deg: float = 75.0
-    camera_mount_body: str = "base_link"
-    # 相机相对挂载 body 的位姿 (x, y, z) / (roll, pitch, yaw)
-    camera_pos_local: tuple[float, float, float] = (0.8, 0.0, 1.7)
-    camera_rpy_local_deg: tuple[float, float, float] = (0.0, -20.0, 0.0)
+    # 相机参数（按 2026-03-08 已验证方案）
+    camera_width: int = 320
+    camera_height: int = 320
+    camera_hfov_deg: float = 90.0
+    camera_mount_body: str = "body"
+    # forklift_c.usd 使用 cm 单位；TiledCamera offset 也需使用挂载 prim 的局部单位。
+    # 这里的值等价于前方 1.3m、上方 2.5m。
+    camera_pos_local: tuple[float, float, float] = (130.0, 0.0, 250.0)
+    # 在 world 约定下，pitch=+45° 表示相机向下俯视 45°。
+    camera_rpy_local_deg: tuple[float, float, float] = (0.0, 45.0, 0.0)
 
     # easy8 + privileged 维度（供 obs 组装使用）
     easy8_dim: int = 8
     privileged_dim: int = 22
 
     # 跟随挂载相机（strict: 必须挂在 Robot/<mount_body> 下，不做 world fallback）
-    # 默认 pitch=-20°，四元数(w,x,y,z) ≈ (0.9848, 0, -0.1736, 0)
+    # rot 会在 env._setup_scene() 中根据 camera_rpy_local_deg 运行时覆盖。
     tiled_camera: TiledCameraCfg = TiledCameraCfg(
         prim_path=f"/World/envs/env_.*/Robot/{camera_mount_body}/Camera",
         offset=TiledCameraCfg.OffsetCfg(
             pos=camera_pos_local,
-            rot=(0.9848078, 0.0, -0.1736482, 0.0),
-            convention="ros",
+            rot=(0.9238795, 0.0, 0.3826834, 0.0),
+            convention="world",
         ),
         data_types=["rgb"],
         spawn=sim_utils.PinholeCameraCfg(

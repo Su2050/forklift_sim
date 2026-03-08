@@ -128,6 +128,12 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
     cfg: ForkliftPalletInsertLiftEnvCfg
 
     def __init__(self, cfg: ForkliftPalletInsertLiftEnvCfg, render_mode: str | None = None, **kwargs):
+        # _setup_scene() 会在 super().__init__() 内被调用，因此相机状态必须先初始化。
+        self._camera_enabled = bool(getattr(cfg, "use_camera", False))
+        self._asym_enabled = bool(getattr(cfg, "use_asymmetric_critic", False))
+        self._camera_initialized = False
+        self._camera = None
+        self._warned_camera_fallback = False
         super().__init__(cfg, render_mode, **kwargs)
 
         self.robot: Articulation = self.scene.articulations["robot"]
@@ -142,13 +148,6 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self._right_rotator_id, _ = self.robot.find_joints(["right_rotator_joint"], preserve_order=True)
         self._lift_id, _ = self.robot.find_joints(["lift_joint"], preserve_order=True)
         self._lift_id = self._lift_id[0]
-
-        # ---- Step-1: camera/asymmetric scaffolding ----
-        self._camera_enabled = bool(getattr(self.cfg, "use_camera", False))
-        self._asym_enabled = bool(getattr(self.cfg, "use_asymmetric_critic", False))
-        self._camera_initialized = False
-        self._camera = None
-        self._warned_camera_fallback = False
 
         # ---- 基础缓存 ----
         # actions: 当前步动作缓存（归一化动作）
@@ -620,11 +619,40 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
 
         # strict body-follow camera: body 不存在则直接失败（不做 fallback）
         if self._camera_enabled:
-            mount_body = str(getattr(self.cfg, "camera_mount_body", "base_link"))
-            if mount_body not in self.robot.body_names:
+            mount_body = str(getattr(self.cfg, "camera_mount_body", "body"))
+            mount_prim = f"/World/envs/env_0/Robot/{mount_body}"
+            stage = self.sim.stage
+            if not stage.GetPrimAtPath(mount_prim).IsValid():
+                robot_prim = stage.GetPrimAtPath("/World/envs/env_0/Robot")
+                candidates = [child.GetName() for child in robot_prim.GetChildren()] if robot_prim.IsValid() else []
                 raise RuntimeError(
-                    f"[camera] mount body '{mount_body}' not found in robot.body_names={self.robot.body_names}"
+                    f"[camera] mount body prim not found: {mount_prim}. available={candidates}"
                 )
+
+            # @configclass 中嵌套的 tiled_camera 不会随着 camera_* 字段自动同步，必须运行时显式覆盖。
+            self.cfg.tiled_camera.prim_path = f"/World/envs/env_.*/Robot/{mount_body}/Camera"
+            self.cfg.tiled_camera.offset.pos = self.cfg.camera_pos_local
+            self.cfg.tiled_camera.width = int(self.cfg.camera_width)
+            self.cfg.tiled_camera.height = int(self.cfg.camera_height)
+
+            hfov_rad = math.radians(float(self.cfg.camera_hfov_deg))
+            horizontal_aperture = float(self.cfg.tiled_camera.spawn.horizontal_aperture)
+            focal_length = horizontal_aperture / (2.0 * math.tan(hfov_rad / 2.0))
+            self.cfg.tiled_camera.spawn.focal_length = focal_length
+
+            roll_deg, pitch_deg, yaw_deg = self.cfg.camera_rpy_local_deg
+            cr = math.cos(math.radians(roll_deg) * 0.5)
+            sr = math.sin(math.radians(roll_deg) * 0.5)
+            cp = math.cos(math.radians(pitch_deg) * 0.5)
+            sp = math.sin(math.radians(pitch_deg) * 0.5)
+            cy = math.cos(math.radians(yaw_deg) * 0.5)
+            sy = math.sin(math.radians(yaw_deg) * 0.5)
+            w = cr * cp * cy + sr * sp * sy
+            x = sr * cp * cy - cr * sp * sy
+            y = cr * sp * cy + sr * cp * sy
+            z = cr * cp * sy - sr * sp * cy
+            self.cfg.tiled_camera.offset.rot = (w, x, y, z)
+
             self._camera = TiledCamera(self.cfg.tiled_camera)
             self._camera_initialized = True
 
