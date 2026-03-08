@@ -57,6 +57,9 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     use_camera: bool = True
     use_asymmetric_critic: bool = True
     stage_1_mode: bool = True
+    # Stage 1 课程只训练“接近 + 对齐 + 插入”，默认不要求举升进入 success。
+    # 这样可以避免“动作层锁 lift，但成功判定仍要求 lift”导致 success 永远为 0。
+    stage1_success_without_lift: bool = True
 
     # 相机参数：
     # - 训练默认 64x64，降低渲染和显存开销

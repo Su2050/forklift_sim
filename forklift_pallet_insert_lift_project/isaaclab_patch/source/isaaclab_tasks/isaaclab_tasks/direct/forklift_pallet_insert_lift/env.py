@@ -1359,9 +1359,18 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         lift_entry = lift_height >= self.cfg.lift_delta_m
         lift_exit_exceeded = lift_height < (self.cfg.lift_delta_m - self.cfg.lift_exit_epsilon)
 
+        # Stage 1 课程默认只考察“插入 + 对齐”，不要求举升。
+        require_lift_for_success = not (
+            self._stage_1_mode and bool(getattr(self.cfg, "stage1_success_without_lift", False))
+        )
+
         # 三段式更新 + S1.0O-C2 越界衰减
-        still_ok = insert_entry & align_entry & lift_entry
-        any_exit_exceeded = align_exit_exceeded | insert_exit_exceeded | lift_exit_exceeded
+        if require_lift_for_success:
+            still_ok = insert_entry & align_entry & lift_entry
+            any_exit_exceeded = align_exit_exceeded | insert_exit_exceeded | lift_exit_exceeded
+        else:
+            still_ok = insert_entry & align_entry
+            any_exit_exceeded = align_exit_exceeded | insert_exit_exceeded
         grace_zone = (~still_ok) & (~any_exit_exceeded)
 
         # S1.0O-C2: 越界时衰减而非清零（float counter）
