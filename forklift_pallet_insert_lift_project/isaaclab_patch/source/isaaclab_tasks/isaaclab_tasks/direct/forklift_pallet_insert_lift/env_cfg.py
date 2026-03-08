@@ -438,4 +438,5 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     )
 
     # ===== 地面 =====
-    ground_cfg: GroundPlaneCfg = GroundPlaneCfg()
+    # 使用偏亮的蓝灰色地面，和深色货叉形成更明显的视觉对比，先降低视频策略的识别难度。
+    ground_cfg: GroundPlaneCfg = GroundPlaneCfg(color=(0.62, 0.70, 0.78))

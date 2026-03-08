@@ -1,0 +1,8 @@
+Background stability (avg diff 0-10): 4.63
+Frames captured: 150
+Camera pos (cm): 130.0, 0.0, 250.0
+Camera rpy (deg): 0.0, 45.0, 0.0
+Camera hfov: 90.0
+Camera mount: body
+First robot root pos: (-3.464872360229492, 0.1275736391544342, 0.023388147354125977)
+Last robot root pos: (-2.9145054817199707, 0.012288197875022888, -0.0003605484962463379)
