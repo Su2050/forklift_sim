@@ -1,0 +1,39 @@
+---
+description: 修改叉车任务代码时，先改 patch 源目录，再通过 install_into_isaaclab.sh 同步到 IsaacLab
+alwaysApply: true
+---
+
+# IsaacLab Patch 工作流
+
+当任务代码涉及 `forklift_pallet_insert_lift` 时，修改必须先落在项目内的 patch 源目录，而不是直接改 `IsaacLab` 里的副本。
+
+## 正确修改位置
+
+- 应优先修改：
+  - `forklift_pallet_insert_lift_project/isaaclab_patch/source/isaaclab_tasks/isaaclab_tasks/direct/forklift_pallet_insert_lift/`
+- 不要直接把改动只写到：
+  - `IsaacLab/source/isaaclab_tasks/isaaclab_tasks/direct/forklift_pallet_insert_lift/`
+
+## 同步要求
+
+如果改了 `forklift_pallet_insert_lift_project` 下的任务代码，后续运行训练、验证、诊断、采集脚本前，都应先执行：
+
+```bash
+bash /home/uniubi/projects/forklift_sim/forklift_pallet_insert_lift_project/scripts/install_into_isaaclab.sh /home/uniubi/projects/forklift_sim/IsaacLab
+```
+
+这样才能把 patch 源同步到 `IsaacLab` 中实际运行的任务目录。
+
+## 适用文件示例
+
+- `env.py`
+- `env_cfg.py`
+- `vision_actor_critic.py`
+- `clamped_actor_critic.py`
+- `agents/rsl_rl_ppo_cfg.py`
+- `__init__.py`
+
+## 禁止
+
+- 不要只改 `IsaacLab/.../forklift_pallet_insert_lift/` 而不回写 patch 源目录
+- 不要在修改任务代码后跳过 `install_into_isaaclab.sh` 就直接开始训练或验证
