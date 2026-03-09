@@ -9,6 +9,8 @@ from torch.distributions import Normal
 from rsl_rl.networks import MLP, EmpiricalNormalization
 from rsl_rl.utils import resolve_nn_activation
 
+from .vision_backbone import MobileNetVisionBackbone, freeze_module, load_backbone_checkpoint
+
 LOG_STD_MIN = math.log(0.05)
 LOG_STD_MAX = math.log(1.5)
 
@@ -36,6 +38,10 @@ class VisionActorCritic(nn.Module):
         activation="elu",
         init_noise_std=1.0,
         noise_std_type: str = "scalar",
+        pretrained_backbone_path: str | None = None,
+        freeze_backbone: bool = False,
+        freeze_backbone_updates: int = 0,
+        imagenet_backbone_init: bool = False,
         **kwargs,
     ):
         if kwargs:
@@ -48,22 +54,18 @@ class VisionActorCritic(nn.Module):
         self.obs_groups = obs_groups
         self.noise_std_type = noise_std_type
 
-        activation_mod = resolve_nn_activation(activation)
         sample_image, sample_proprio = self._extract_policy_terms(obs)
         sample_critic = obs["critic"]
 
         proprio_dim = int(sample_proprio.shape[-1])
         critic_dim = int(sample_critic.shape[-1])
 
-        self.image_encoder = nn.Sequential(
-            nn.Conv2d(3, 32, kernel_size=8, stride=4),
-            activation_mod,
-            nn.Conv2d(32, 64, kernel_size=4, stride=2),
-            activation_mod,
-            nn.Conv2d(64, 128, kernel_size=3, stride=1),
-            activation_mod,
-            nn.Flatten(),
-        )
+        self.pretrained_backbone_path = pretrained_backbone_path
+        self.freeze_backbone_updates = int(freeze_backbone_updates or 0)
+        self._backbone_is_frozen = False
+        self._backbone_update_calls = 0
+
+        self.image_encoder = MobileNetVisionBackbone(imagenet_init=bool(imagenet_backbone_init))
 
         with torch.no_grad():
             image_feat_dim = int(self.image_encoder(sample_image[:1].detach().cpu()).shape[-1])
@@ -89,6 +91,15 @@ class VisionActorCritic(nn.Module):
             self.critic_obs_normalizer = EmpiricalNormalization(critic_dim)
         else:
             self.critic_obs_normalizer = nn.Identity()
+
+        if self.pretrained_backbone_path:
+            missing, unexpected = load_backbone_checkpoint(self.image_encoder, self.pretrained_backbone_path)
+            print(
+                f"Loaded pretrained backbone from {self.pretrained_backbone_path}; "
+                f"missing={len(missing)}, unexpected={len(unexpected)}"
+            )
+        if freeze_backbone or self.freeze_backbone_updates > 0:
+            self._set_backbone_frozen(True)
 
         print(f"Vision image encoder: {self.image_encoder}")
         print(f"Vision image projection: {self.image_proj}")
@@ -157,6 +168,19 @@ class VisionActorCritic(nn.Module):
         proprio_feat = self.proprio_encoder(proprio)
         return torch.cat([image_feat, proprio_feat], dim=-1)
 
+    def _set_backbone_frozen(self, frozen: bool) -> None:
+        freeze_module(self.image_encoder, frozen)
+        self._backbone_is_frozen = frozen
+        state = "frozen" if frozen else "trainable"
+        print(f"Vision backbone is now {state}")
+
+    def _maybe_unfreeze_backbone(self) -> None:
+        if not self._backbone_is_frozen or self.freeze_backbone_updates <= 0:
+            return
+        self._backbone_update_calls += 1
+        if self._backbone_update_calls >= self.freeze_backbone_updates:
+            self._set_backbone_frozen(False)
+
     def update_distribution(self, obs):
         mean = self.actor(self._encode_policy_obs(obs))
         if self.noise_std_type == "scalar":
@@ -190,6 +214,7 @@ class VisionActorCritic(nn.Module):
         return self.distribution.log_prob(actions).sum(dim=-1)
 
     def update_normalization(self, obs):
+        self._maybe_unfreeze_backbone()
         if self.actor_obs_normalization:
             _, proprio = self._extract_policy_terms(obs)
             self.actor_obs_normalizer.update(proprio.float())

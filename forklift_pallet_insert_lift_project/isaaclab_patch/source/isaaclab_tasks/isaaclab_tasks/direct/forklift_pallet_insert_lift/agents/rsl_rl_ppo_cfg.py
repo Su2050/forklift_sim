@@ -10,6 +10,17 @@ from __future__ import annotations
 from isaaclab.utils import configclass
 from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, RslRlPpoAlgorithmCfg
 
+
+@configclass
+class ForkliftVisionActorCriticCfg(RslRlPpoActorCriticCfg):
+    """ActorCritic config with extra knobs for backbone pretraining transfer."""
+
+    pretrained_backbone_path: str | None = None
+    freeze_backbone: bool = False
+    freeze_backbone_updates: int = 0
+    imagenet_backbone_init: bool = False
+
+
 @configclass
 class ForkliftInsertLiftPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     """Reasonable PPO defaults to get a working policy overnight.
@@ -33,7 +44,7 @@ class ForkliftInsertLiftPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     experiment_name = "forklift_pallet_insert_lift"  # 训练实验名称（用于日志目录）
 
     # policy network：中等强度视觉 actor + 低维 critic
-    policy = RslRlPpoActorCriticCfg(
+    policy = ForkliftVisionActorCriticCfg(
         class_name="rsl_rl.modules.VisionActorCritic",
         init_noise_std=0.4,
         noise_std_type="log",
@@ -42,6 +53,10 @@ class ForkliftInsertLiftPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         actor_hidden_dims=[256, 256, 128],  # fusion actor head
         critic_hidden_dims=[256, 256, 128],  # Critic MLP 隐藏层
         activation="elu",  # 激活函数
+        pretrained_backbone_path=None,
+        freeze_backbone=False,
+        freeze_backbone_updates=0,
+        imagenet_backbone_init=False,
     )
 
     # PPO algorithm：优化与损失相关超参数

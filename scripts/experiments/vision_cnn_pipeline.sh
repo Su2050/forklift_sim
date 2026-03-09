@@ -39,7 +39,8 @@ OUTPUT_DIR="${PROJECT_DIR}/outputs/vision_cnn"
 REPORT_DIR="${PROJECT_DIR}/docs/diagnostic_reports/vision_cnn"
 
 TASK_NAME="${TASK_NAME:-Isaac-Forklift-PalletInsertLift-Direct-v0}"
-NUM_ENVS="${NUM_ENVS:-1024}"
+NUM_ENVS="${NUM_ENVS:-128}"
+COLLECT_NUM_ENVS="${COLLECT_NUM_ENVS:-32}"
 SEED="${SEED:-42}"
 MODE="${MODE:-smoke}"
 VERSION="${VERSION:-}"
@@ -86,7 +87,8 @@ Options:
   --mode <smoke|formal>         Default: smoke
   --from-phase <phase>          Required for resume
   --seed <int>                  Default: 42
-  --num-envs <int>              Default: 1024
+  --num-envs <int>              Default: 128
+  --collect-num-envs <int>      Default: 32 (collect-data only)
   --max-iterations <int>        Override RL train iterations
   --sanity-iterations <int>     Override sanity iterations
   --pretrained-ckpt <path>      Backbone checkpoint used by finetune stage
@@ -390,10 +392,10 @@ default_sanity_command() {
   iters="$(default_sanity_iterations)"
   cat <<EOF
 export PYTHONUNBUFFERED=1
-export TERM=\${TERM:-xterm}
+export TERM=xterm
 CONDA_PREFIX="" bash isaaclab.sh -p scripts/reinforcement_learning/rsl_rl/train.py \
   --task "${TASK_NAME}" \
-  --headless --num_envs "${NUM_ENVS}" --max_iterations "${iters}" \
+  --headless --enable_cameras --num_envs "${NUM_ENVS}" --max_iterations "${iters}" \
   --seed "${SEED}"
 EOF
 }
@@ -403,10 +405,10 @@ default_scratch_command() {
   iters="$(default_train_iterations)"
   cat <<EOF
 export PYTHONUNBUFFERED=1
-export TERM=\${TERM:-xterm}
+export TERM=xterm
 CONDA_PREFIX="" bash isaaclab.sh -p scripts/reinforcement_learning/rsl_rl/train.py \
   --task "${TASK_NAME}" \
-  --headless --num_envs "${NUM_ENVS}" --max_iterations "${iters}" \
+  --headless --enable_cameras --num_envs "${NUM_ENVS}" --max_iterations "${iters}" \
   --seed "${SEED}"
 EOF
 }
@@ -426,11 +428,11 @@ default_finetune_command() {
 
   cat <<EOF
 export PYTHONUNBUFFERED=1
-export TERM=\${TERM:-xterm}
+export TERM=xterm
 echo "[TODO] Replace placeholder RL finetune flags if your training entrypoint uses different option names."
 CONDA_PREFIX="" bash isaaclab.sh -p scripts/reinforcement_learning/rsl_rl/train.py \
   --task "${TASK_NAME}" \
-  --headless --num_envs "${NUM_ENVS}" --max_iterations "${iters}" \
+  --headless --enable_cameras --num_envs "${NUM_ENVS}" --max_iterations "${iters}" \
   --seed "${SEED}" \
   ${pretrained_arg}
 EOF
@@ -446,7 +448,11 @@ default_collect_command() {
 
   if [[ -f "${default_script}" ]]; then
     cat <<EOF
-python "${default_script}" --output-dir "${DATA_DIR}" --version "${VERSION}"
+export PYTHONUNBUFFERED=1
+export TERM=xterm
+CONDA_PREFIX="" bash "${ISAACLAB_DIR}/isaaclab.sh" -p "${default_script}" \
+  --output-dir "${DATA_DIR}" --version "${VERSION}" \
+  --headless --enable_cameras --num-envs "${COLLECT_NUM_ENVS}" --seed "${SEED}"
 EOF
     return 0
   fi
@@ -653,6 +659,10 @@ parse_args() {
         NUM_ENVS="${2:?missing value for --num-envs}"
         shift 2
         ;;
+      --collect-num-envs)
+        COLLECT_NUM_ENVS="${2:?missing value for --collect-num-envs}"
+        shift 2
+        ;;
       --max-iterations)
         MAX_ITERATIONS="${2:?missing value for --max-iterations}"
         shift 2
@@ -726,6 +736,7 @@ main() {
   append_registry "MODE" "${MODE}"
   append_registry "SEED" "${SEED}"
   append_registry "NUM_ENVS" "${NUM_ENVS}"
+  append_registry "COLLECT_NUM_ENVS" "${COLLECT_NUM_ENVS}"
   append_registry "MAX_ITERATIONS" "${MAX_ITERATIONS}"
   append_registry "SANITY_ITERATIONS" "${SANITY_ITERATIONS}"
   append_registry "PRETRAINED_CKPT" "${PRETRAINED_CKPT}"
