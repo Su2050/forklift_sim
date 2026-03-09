@@ -534,3 +534,47 @@ Next action:
 - Keep `max_yaw_err_deg=8.0`.
 - Keep `hold_time_s=0.33`.
 - Run a longer formal confirmation for `max_yaw_err_deg=8.0 + k_lat_fine=0.8`.
+
+### `max_yaw_err_deg=8.0 + k_lat_fine=0.8` (`yawKLat_formal`)
+
+- Log: `/home/uniubi/projects/forklift_sim/logs/20260309_173735_train_s1.0zc.log`
+- Window used for comparison: tail 50 iterations
+- `success_rate_ema`: `0.6627`
+- `success_rate_total`: `0.6807`
+- `Mean episode length`: `378.6566`
+- `phase/frac_inserted`: `0.2030`
+- `phase/frac_aligned`: `0.0821`
+- `phase/hold_counter_mean`: `0.1517`
+- `phase/hold_counter_max`: `8.7800`
+- `err/yaw_deg_near_success`: `4.1827`
+- `err/lateral_near_success`: `0.1196`
+
+Relative to `yawRelax_formal` tail 50:
+
+- `success_rate_ema`: slightly lower
+- `success_rate_total`: slightly lower
+- `Mean episode length`: slightly longer
+- `phase/frac_inserted`: lower
+- `phase/frac_aligned`: slightly lower
+- `phase/hold_counter_mean`: better
+- `phase/hold_counter_max`: slightly better
+- `err/yaw_deg_near_success`: better
+- `err/lateral_near_success`: slightly better
+
+Relative to first combo confirmation tail 50:
+
+- `success_rate_ema`: clearly better
+- `success_rate_total`: clearly better
+- `Mean episode length`: shorter
+- `phase/frac_inserted`: lower
+- `phase/frac_aligned`: better
+- `phase/hold_counter_mean`: slightly lower
+- `phase/hold_counter_max`: roughly flat
+- `err/yaw_deg_near_success`: much better
+- `err/lateral_near_success`: much better
+
+Conclusion:
+
+- Adding `k_lat_fine=0.8` on top of `max_yaw_err_deg=8.0` improves some process-quality metrics, especially hold statistics and near-success alignment quality.
+- However, those process gains do not convert into a higher final success rate than `yawRelax_formal`.
+- On the current branch, `max_yaw_err_deg=8.0` remains the best logic-side default, while `k_lat_fine=0.8` should be treated as a secondary optional enhancer rather than a promoted new default.

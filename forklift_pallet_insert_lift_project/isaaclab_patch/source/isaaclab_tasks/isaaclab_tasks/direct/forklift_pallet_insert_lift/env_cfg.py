@@ -257,7 +257,7 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     ins_lat_gate_sigma: float = 1e6         # B0=无穷大（不生效）; B1b 改为 0.20
 
     # ---- S1.0Q: 横向精调 (C1) ----
-    k_lat_fine: float = 0.8                 # Stage1 logic smoke 3: enable lateral fine shaping
+    k_lat_fine: float = 0.0                 # Freeze current best default; keep lateral fine shaping as optional candidate
     lat_fine_sigma: float = 0.15            # 横向高斯尺度 (m)
     lat_fine_ins_thresh: float = 0.05       # 激活门槛（归一化 insert_norm）
 
