@@ -47,6 +47,7 @@ VERSION="${VERSION:-}"
 MAX_ITERATIONS="${MAX_ITERATIONS:-}"
 SANITY_ITERATIONS="${SANITY_ITERATIONS:-}"
 FROM_PHASE="${FROM_PHASE:-}"
+UNTIL_PHASE="${UNTIL_PHASE:-}"
 DRY_RUN="${DRY_RUN:-0}"
 NOHUP_MODE="${NOHUP_MODE:-0}"
 ALLOW_DIRTY="${ALLOW_DIRTY:-0}"
@@ -86,6 +87,7 @@ Options:
   --version <name>              Required. Experiment version, e.g. s1.0zd
   --mode <smoke|formal>         Default: smoke
   --from-phase <phase>          Required for resume
+  --until-phase <phase>         Stop after this phase (inclusive)
   --seed <int>                  Default: 42
   --num-envs <int>              Default: 128
   --collect-num-envs <int>      Default: 32 (collect-data only)
@@ -119,6 +121,7 @@ Examples:
   bash scripts/experiments/vision_cnn_pipeline.sh full --version s1.0zd --mode formal
   bash scripts/experiments/vision_cnn_pipeline.sh full --version s1.0zd --mode formal --nohup
   bash scripts/experiments/vision_cnn_pipeline.sh resume --from-phase finetune-rl --version s1.0zd --nohup
+  bash scripts/experiments/vision_cnn_pipeline.sh resume --from-phase scratch-rl --until-phase scratch-rl --version s1.0zd --mode formal
 EOF
 }
 
@@ -651,6 +654,10 @@ parse_args() {
         FROM_PHASE="${2:?missing value for --from-phase}"
         shift 2
         ;;
+      --until-phase)
+        UNTIL_PHASE="${2:?missing value for --until-phase}"
+        shift 2
+        ;;
       --seed)
         SEED="${2:?missing value for --seed}"
         shift 2
@@ -732,17 +739,27 @@ main() {
     : > "$(registry_file)"
   fi
 
+  if [[ -n "${UNTIL_PHASE}" ]]; then
+    phase_index "${UNTIL_PHASE}" >/dev/null || die "Unknown --until-phase: ${UNTIL_PHASE}"
+    stop_index="$(phase_index "${UNTIL_PHASE}")"
+    (( stop_index >= start_index )) || die "--until-phase must not be earlier than the first phase to run"
+  else
+    stop_index=$((${#STAGES[@]} - 1))
+  fi
+
   append_registry "VERSION" "${VERSION}"
   append_registry "MODE" "${MODE}"
   append_registry "SEED" "${SEED}"
   append_registry "NUM_ENVS" "${NUM_ENVS}"
   append_registry "COLLECT_NUM_ENVS" "${COLLECT_NUM_ENVS}"
+  append_registry "FROM_PHASE" "${FROM_PHASE}"
+  append_registry "UNTIL_PHASE" "${UNTIL_PHASE}"
   append_registry "MAX_ITERATIONS" "${MAX_ITERATIONS}"
   append_registry "SANITY_ITERATIONS" "${SANITY_ITERATIONS}"
   append_registry "PRETRAINED_CKPT" "${PRETRAINED_CKPT}"
 
   for idx in "${!STAGES[@]}"; do
-    if (( idx < start_index )); then
+    if (( idx < start_index || idx > stop_index )); then
       continue
     fi
 
