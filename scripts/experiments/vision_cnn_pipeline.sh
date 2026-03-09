@@ -338,11 +338,13 @@ default_finetune_command() {
   local pretrained_arg=""
   iters="$(default_train_iterations)"
 
-  [[ -n "${PRETRAINED_CKPT}" ]] || die "finetune-rl requires --pretrained-ckpt or PRETRAINED_CKPT"
-  require_file "${PRETRAINED_CKPT}"
+  load_registry
+  local ckpt="${PRETRAINED_CKPT:-}"
+  [[ -n "${ckpt}" ]] || die "finetune-rl requires PRETRAINED_CKPT to be set (either via arg or previous stage registry)"
+  require_file "${ckpt}"
 
   # Placeholder flags below should be replaced once RL entrypoint supports them.
-  pretrained_arg="--vision_backbone_ckpt \"${PRETRAINED_CKPT}\" --freeze_backbone_iters \"${FREEZE_BACKBONE_ITERS}\""
+  pretrained_arg="--vision_backbone_ckpt \"${ckpt}\" --freeze_backbone_iters \"${FREEZE_BACKBONE_ITERS}\""
 
   cat <<EOF
 export PYTHONUNBUFFERED=1
@@ -385,6 +387,9 @@ default_pretrain_command() {
   if [[ -f "${default_script}" ]]; then
     cat <<EOF
 python "${default_script}" --data-dir "${DATA_DIR}" --output-dir "${RUN_DIR}/pretrain" --version "${VERSION}"
+# TODO: The pretrain script should output the final ckpt path to a known location or stdout
+# For now, we mock the registry update so the pipeline doesn't break if the user manually sets it
+echo "PRETRAINED_CKPT=${RUN_DIR}/pretrain/model_best.pt" >> "\$(registry_file)"
 EOF
     return 0
   fi
@@ -438,6 +443,7 @@ run_scratch_rl() {
 
 run_collect_data() {
   checkout_branch "${BRANCH_PRETRAIN}"
+  install_patch_into_isaaclab
   run_logged_stage "collect-data" "sanity_check" "${PROJECT_DIR}" "$(default_collect_command)"
 }
 
@@ -495,7 +501,7 @@ run_compare_report() {
 - collect-data log: ${COLLECT_DATA_LOG:-TBD}
 - pretrain log: ${PRETRAIN_CNN_LOG:-TBD}
 - finetune log: ${FINETUNE_RL_LOG:-TBD}
-- pretrained ckpt: ${PRETRAINED_CKPT:-TBD}
+- pretrained ckpt: ${PRETRAINED_CKPT:-TBD} (freeze iters: ${FREEZE_BACKBONE_ITERS})
 
 ## Manual Comparison Checklist
 
