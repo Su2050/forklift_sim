@@ -65,7 +65,7 @@ parser.add_argument("--experiment_name", type=str, default="unknown",
                     help="Experiment label for output")
 parser.add_argument("--output_dir", type=str, default="../data/s1.0s_eval",
                     help="Base output directory")
-args = parser.parse_args()
+args, hydra_args = parser.parse_known_args()
 
 # Resolve seed list
 if args.seeds is not None:
@@ -75,8 +75,8 @@ elif args.seed_start is not None and args.seed_end is not None:
 else:
     SEED_LIST = [args.seed]
 
-# Clear sys.argv for Hydra
-sys.argv = [sys.argv[0]]
+# Preserve Hydra overrides such as env.max_yaw_err_deg=5.0 for eval-only strict criteria.
+sys.argv = [sys.argv[0]] + hydra_args
 
 app_launcher = AppLauncher(args)
 simulation_app = app_launcher.app

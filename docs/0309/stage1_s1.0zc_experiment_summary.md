@@ -578,3 +578,83 @@ Conclusion:
 - Adding `k_lat_fine=0.8` on top of `max_yaw_err_deg=8.0` improves some process-quality metrics, especially hold statistics and near-success alignment quality.
 - However, those process gains do not convert into a higher final success rate than `yawRelax_formal`.
 - On the current branch, `max_yaw_err_deg=8.0` remains the best logic-side default, while `k_lat_fine=0.8` should be treated as a secondary optional enhancer rather than a promoted new default.
+
+## Strict-Criterion Re-Evaluation
+
+Purpose:
+
+- Answer the most important open question directly: is `yawRelax_formal` actually stronger, or does it only look better because the success criterion was relaxed from `max_yaw_err_deg=5.0` to `8.0`?
+- To avoid retraining bias, evaluate the same best checkpoint under stricter success criteria only.
+
+Evaluation setup:
+
+- Checkpoint: `/home/uniubi/projects/forklift_sim/IsaacLab/logs/rsl_rl/forklift_pallet_insert_lift/2026-03-09_16-37-38_vision_stage1_cv_logic_yawRelax_formal/model_299.pt`
+- Fixed config during evaluation:
+  - `hold_time_s=0.33`
+  - `k_lat_fine=0.0`
+  - `num_envs=256`
+  - single seed `1`
+  - `max_steps=1600`
+- Only evaluation criterion was changed:
+  - relaxed reference: `max_yaw_err_deg=8.0`
+  - original stricter standard: `max_yaw_err_deg=5.0`
+  - extra stricter stress test: `max_yaw_err_deg=4.0`
+
+### Same checkpoint under `max_yaw_err_deg=8.0`
+
+- Summary: `/home/uniubi/projects/forklift_sim/outputs/strict_eval/s1.0s_strict_eval_yawRelax_ckpt_yaw8_n256_s1_summary.json`
+- `n_episodes`: `539`
+- `success_rate_ep`: `52.50%`
+- `success_rate_ci`: `[48.42%, 56.77%]`
+- `mean_ep_len`: `547`
+- `timeout_frac`: `47.50%`
+- `P_ever_both_ok`: `92.58%`
+
+### Same checkpoint under `max_yaw_err_deg=5.0`
+
+- Summary: `/home/uniubi/projects/forklift_sim/outputs/strict_eval/s1.0s_strict_eval_yawRelax_ckpt_yaw5_n256_s1_summary.json`
+- `n_episodes`: `474`
+- `success_rate_ep`: `46.20%`
+- `success_rate_ci`: `[41.77%, 50.63%]`
+- `mean_ep_len`: `611`
+- `timeout_frac`: `53.80%`
+- `P_ever_both_ok`: `77.22%`
+
+Relative to the same checkpoint under `8.0`:
+
+- `success_rate_ep`: `-6.30pp`
+- `mean_ep_len`: longer
+- `timeout_frac`: worse
+- `P_ever_both_ok`: clearly lower
+
+### Same checkpoint under `max_yaw_err_deg=4.0`
+
+- Summary: `/home/uniubi/projects/forklift_sim/outputs/strict_eval/s1.0s_strict_eval_yawRelax_ckpt_yaw4_n256_s1_summary.json`
+- `n_episodes`: `424`
+- `success_rate_ep`: `39.86%`
+- `success_rate_ci`: `[35.37%, 44.58%]`
+- `mean_ep_len`: `681`
+- `timeout_frac`: `60.14%`
+- `P_ever_both_ok`: `68.16%`
+
+Relative to the same checkpoint under `8.0`:
+
+- `success_rate_ep`: `-12.64pp`
+- `mean_ep_len`: much longer
+- `timeout_frac`: clearly worse
+- `P_ever_both_ok`: much lower
+
+Conclusion:
+
+- The gain from `yawRelax_formal` is **not** explained purely by “lowering the standard”.
+- When the exact same checkpoint is re-evaluated under the old stricter standard `max_yaw_err_deg=5.0`, success rate drops from `52.50%` to `46.20%`, which is a real decline but not a collapse.
+- This means the model has genuinely become stronger in the near-success region, while the relaxed `8.0` criterion still contributes an extra layer of visible success-rate boost.
+- Under the extra-strict `4.0` criterion, success still remains `39.86%`, confirming the policy retains substantial task-closing ability even after the criterion is tightened.
+- The fairest reading of the current branch is:
+  - `max_yaw_err_deg=8.0` is still the best **training/default** setting on this branch.
+  - But its observed gain should be interpreted as:
+    - part real policy improvement
+    - part additional benefit from a looser success gate
+  - Therefore, future reporting should distinguish:
+    - training/default criterion
+    - strict re-evaluation criterion
