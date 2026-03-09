@@ -62,6 +62,8 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     stage1_success_without_lift: bool = True
     # Stage 1 初始随机化范围，默认保持当前课程难度不变。
     # 这些字段主要给控制变量实验用，便于直接从命令行 override。
+    stage1_init_x_min_m: float = -2.5
+    stage1_init_x_max_m: float = -2.0
     stage1_init_y_min_m: float = -0.2
     stage1_init_y_max_m: float = 0.2
     stage1_init_yaw_deg_min: float = -10.0
