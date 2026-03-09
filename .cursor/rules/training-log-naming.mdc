@@ -31,7 +31,7 @@ logs/YYYYMMDD_HHMMSS_<type>_<version>.log
 ```bash
 nohup bash isaaclab.sh -p scripts/reinforcement_learning/rsl_rl/train.py \
   --task Isaac-Forklift-PalletInsertLift-Direct-v0 \
-  --headless --num_envs 1024 --max_iterations 2000 \
+  --headless --num_envs 256 --max_iterations 2000 \
   > /home/uniubi/projects/forklift_sim/logs/$(date +%Y%m%d_%H%M%S)_train_<version>.log 2>&1 &
 ```
 
