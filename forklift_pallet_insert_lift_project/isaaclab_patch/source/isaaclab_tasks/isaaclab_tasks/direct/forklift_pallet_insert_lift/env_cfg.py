@@ -139,7 +139,7 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     # 当前 lateral≈0.25m（需 ≤0.03m，差 8 倍），yaw≈7.5°（需 ≤3.0°，差 2.5 倍）。
     # 先让 success 出现，后续逐步收紧。
     max_lateral_err_m: float = 0.15
-    max_yaw_err_deg: float = 5.0        # StageB3 课程收紧: 8→5
+    max_yaw_err_deg: float = 8.0        # Stage1 logic smoke 1: relax hold yaw gate 5→8
     # S1.0N: hold counter 全维度 Schmitt trigger（抗物理抖动）
     hysteresis_ratio: float = 1.2       # 对齐 exit 阈值 = entry × 1.2
     insert_exit_epsilon: float = 0.02   # 插入深度 exit 容差（与 insert_depth 同单位）
@@ -257,7 +257,7 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     ins_lat_gate_sigma: float = 1e6         # B0=无穷大（不生效）; B1b 改为 0.20
 
     # ---- S1.0Q: 横向精调 (C1) ----
-    k_lat_fine: float = 0.0                 # B0=0（不激活）; C1 改为 0.8
+    k_lat_fine: float = 0.8                 # Stage1 logic smoke 3: enable lateral fine shaping
     lat_fine_sigma: float = 0.15            # 横向高斯尺度 (m)
     lat_fine_ins_thresh: float = 0.05       # 激活门槛（归一化 insert_norm）
 

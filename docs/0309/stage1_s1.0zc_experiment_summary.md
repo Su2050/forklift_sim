@@ -255,16 +255,282 @@ Conclusion:
   - repeat this same combination once more for stability confirmation
   - or promote it to a longer `1000 iter` confirmation run
 
-## Next Gate
+### `initYaw_narrow + initY_narrow` long confirmation (`resume 450 -> 1000`)
 
-If the combination run still shows:
+- Log: `/home/uniubi/projects/forklift_sim/logs/20260309_152411_train_s1.0zc.log`
+- Window used for comparison: tail 50 iterations
+- `success_rate_ema`: `0.4820`
+- `success_rate_total`: `0.4841`
+- `Mean episode length`: `567.8368`
+- `phase/frac_inserted`: `0.5173`
+- `phase/frac_aligned`: `0.0397`
+- `phase/hold_counter_max`: `8.0800`
+- `phase/hold_counter_mean`: `0.2220`
+- `err/yaw_deg_near_success`: `10.2928`
+- `err/lateral_near_success`: `0.2028`
 
-- `inserted` not low
-- `aligned` still low
-- `hold_counter` still weak
+Relative to baseline tail 50:
 
-then the next priority should switch from reset randomization to Stage 1 success/hold logic:
+- `success_rate_ema`: `+74.2%`
+- `success_rate_total`: `+69.4%`
+- `Mean episode length`: `-28.3%`
+- `phase/frac_inserted`: `+73.5%`
+- `phase/frac_aligned`: `+133.5%`
+- `phase/hold_counter_max`: `+52.5%`
+- `phase/hold_counter_mean`: `+462.0%`
+- `err/yaw_deg_near_success`: worse
+- `err/lateral_near_success`: worse
 
-- relax `max_yaw_err_deg`
-- reduce `hold_time_s`
-- enable or increase `k_lat_fine`
+Relative to `initYaw_narrow_formal` tail 50:
+
+- `success_rate_ema`: `-1.3%`
+- `success_rate_total`: `-2.0%`
+- `Mean episode length`: `-1.6%`
+- `phase/frac_inserted`: `+70.7%`
+- `phase/frac_aligned`: `+25.6%`
+- `phase/hold_counter_max`: `+20.6%`
+- `phase/hold_counter_mean`: `+131.5%`
+- `err/yaw_deg_near_success`: worse
+- `err/lateral_near_success`: worse
+
+Relative to first combo confirmation tail 50:
+
+- `success_rate_ema`: `-18.5%`
+- `success_rate_total`: `-19.0%`
+- `Mean episode length`: `+25.7%`
+- `phase/frac_inserted`: `+37.6%`
+- `phase/frac_aligned`: `-24.7%`
+- `phase/hold_counter_max`: `-5.2%`
+- `phase/hold_counter_mean`: `+35.9%`
+- `err/yaw_deg_near_success`: slightly better
+- `err/lateral_near_success`: slightly better
+
+Conclusion:
+
+- The combination is still clearly better than baseline and remains strong on inserted fraction and hold statistics.
+- However, the long confirmation run did not reproduce the earlier `0.5916` success-rate peak.
+- On the primary decision metric, it no longer shows a stable advantage over `initYaw_narrow_formal`.
+- This means the reset-randomization line has likely reached a plateau on the current branch.
+
+## Updated Decision
+
+- Stage 3 is now considered closed for this branch.
+- `initYaw_narrow + initY_narrow` remains a useful recipe, but it is not yet validated as a stable default over `initYaw_narrow_formal`.
+- There is still no reason to revive `tip_y_gate3`.
+- The next priority should switch from reset randomization to Stage 1 success/hold logic.
+
+## Stage 1 Logic Line
+
+Base recipe for the next line:
+
+- keep `initYaw_narrow + initY_narrow`
+- keep camera / asymmetric critic / Stage 1 setup unchanged
+- only change one Stage 1 success-hold variable at a time
+
+Recommended execution order:
+
+1. Relax `max_yaw_err_deg`: `5.0 -> 8.0`
+2. Reduce `hold_time_s`: `0.33 -> 0.20`
+3. Enable `k_lat_fine`: `0.0 -> 0.8`
+
+Why this order:
+
+- Current long-run logs show `inserted` is already high and `hold_counter` is not zero, but hold is still frequently broken by yaw/lateral quality near success.
+- `diag_hold/yaw_margin` stays clearly negative in the long run, so yaw tolerance is the most direct first lever.
+- `hold_time_s` should be tested only after checking whether the success gate itself is still too strict.
+- `k_lat_fine` is a shaping lever and should come after success-gate tests, otherwise it becomes harder to tell whether gains come from reward shaping or from the success definition.
+
+Smoke-screening rule for this line:
+
+- Run each Stage 1 logic change as a single-factor `smoke_train` first.
+- Promote only if it improves at least one primary metric (`success_rate_ema` or `success_rate_total`) without clearly damaging `phase/frac_aligned` or `phase/hold_counter_mean`.
+
+### `max_yaw_err_deg: 5 -> 8` (`yawRelax_smoke`)
+
+- Log: `/home/uniubi/projects/forklift_sim/logs/20260309_163116_smoke_train_s1.0zc.log`
+- Window used for comparison: full 30-iteration smoke window
+- `success_rate_ema`: `0.4559`
+- `Mean episode length`: `224.4770`
+- `phase/frac_inserted`: `0.1896`
+- `phase/frac_aligned`: `0.1526`
+- `phase/hold_counter_mean`: `0.1570`
+- `err/yaw_deg_near_success`: `4.3767`
+- `err/lateral_near_success`: `0.1144`
+
+Relative to `initYaw_narrow` smoke:
+
+- `success_rate_ema`: strongly better
+- `Mean episode length`: much shorter
+- `phase/frac_aligned`: better
+- `phase/hold_counter_mean`: much better
+- `err/yaw_deg_near_success`: slightly worse than the very best yaw-only smoke, but still strong
+- `err/lateral_near_success`: better
+- `phase/frac_inserted`: lower
+
+Relative to baseline tail 30:
+
+- `success_rate_ema`: clearly better
+- `Mean episode length`: much shorter
+- `phase/frac_aligned`: much better
+- `phase/hold_counter_mean`: much better
+- `err/yaw_deg_near_success`: clearly better
+- `err/lateral_near_success`: clearly better
+
+Conclusion:
+
+- Relaxing the Stage 1 yaw hold gate is a strong positive direction.
+- This is the first clear confirmation that the current bottleneck is in Stage 1 success/hold logic rather than reset randomization.
+- The lower `inserted` fraction means this change is not a free improvement on every metric, but the much better success, alignment, and hold statistics make it worth immediate formal confirmation.
+
+Next action:
+
+- Keep `max_yaw_err_deg=8.0`.
+- Run a longer formal confirmation before deciding whether to stack `hold_time_s`.
+
+### `max_yaw_err_deg: 5 -> 8` (`yawRelax_formal`)
+
+- Log: `/home/uniubi/projects/forklift_sim/logs/20260309_163730_train_s1.0zc.log`
+- Window used for comparison: tail 50 iterations
+- `success_rate_ema`: `0.6790`
+- `success_rate_total`: `0.6845`
+- `Mean episode length`: `370.8524`
+- `phase/frac_inserted`: `0.2163`
+- `phase/frac_aligned`: `0.0855`
+- `phase/hold_counter_mean`: `0.1265`
+- `phase/hold_counter_max`: `8.5600`
+- `err/yaw_deg_near_success`: `4.5571`
+- `err/lateral_near_success`: `0.1219`
+
+Relative to baseline tail 50:
+
+- `success_rate_ema`: `+145.4%`
+- `success_rate_total`: `+139.5%`
+- `Mean episode length`: `-53.2%`
+- `phase/frac_inserted`: lower
+- `phase/frac_aligned`: `+402.9%`
+- `phase/hold_counter_mean`: `+220.3%`
+- `phase/hold_counter_max`: `+61.5%`
+- `err/yaw_deg_near_success`: `-40.4%`
+- `err/lateral_near_success`: `-31.4%`
+
+Relative to `initYaw_narrow_formal` tail 50:
+
+- `success_rate_ema`: `+39.1%`
+- `success_rate_total`: `+38.5%`
+- `Mean episode length`: `-35.7%`
+- `phase/frac_inserted`: lower
+- `phase/frac_aligned`: `+170.6%`
+- `phase/hold_counter_mean`: `+31.9%`
+- `phase/hold_counter_max`: `+27.8%`
+- `err/yaw_deg_near_success`: `-4.9%`
+- `err/lateral_near_success`: `-31.6%`
+
+Relative to first combo confirmation tail 50:
+
+- `success_rate_ema`: `+14.8%`
+- `success_rate_total`: `+14.6%`
+- `Mean episode length`: `-17.9%`
+- `phase/frac_inserted`: lower
+- `phase/frac_aligned`: `+62.2%`
+- `phase/hold_counter_mean`: `-22.6%`
+- `phase/hold_counter_max`: roughly flat
+- `err/yaw_deg_near_success`: much better
+- `err/lateral_near_success`: much better
+
+Conclusion:
+
+- Relaxing the Stage 1 yaw hold gate is formally confirmed and is now the strongest validated logic-side improvement on the branch.
+- This result outperforms the previous best reset-only and reset-combination confirmations on the main decision metrics.
+- The lower `inserted` fraction means the gain is not coming from deeper insertion, but from a much healthier success/hold transition once the agent reaches the near-success region.
+
+Next action:
+
+- Keep `max_yaw_err_deg=8.0` as the current best logic-side setting.
+- Continue with the next single-factor logic smoke: reduce `hold_time_s`.
+
+### `hold_time_s: 0.33 -> 0.20` (`holdTimeRelax_smoke`)
+
+- Log: `/home/uniubi/projects/forklift_sim/logs/20260309_171654_smoke_train_s1.0zc.log`
+- Window used for comparison: full 30-iteration smoke window
+- `success_rate_ema`: `0.4590`
+- `Mean episode length`: `220.9360`
+- `phase/frac_inserted`: `0.1941`
+- `phase/frac_aligned`: `0.1529`
+- `phase/hold_counter_mean`: `0.0671`
+- `err/yaw_deg_near_success`: `4.1787`
+- `err/lateral_near_success`: `0.1107`
+
+Relative to `yawRelax_smoke`:
+
+- `success_rate_ema`: nearly flat, slightly better
+- `Mean episode length`: slightly shorter
+- `phase/frac_inserted`: slightly better
+- `phase/frac_aligned`: essentially flat
+- `err/yaw_deg_near_success`: slightly better
+- `err/lateral_near_success`: slightly better
+- `phase/hold_counter_mean`: lower
+
+Interpretation:
+
+- Reducing `hold_time_s` from `0.33` to `0.20` does not show a large extra gain on top of `max_yaw_err_deg=8.0`.
+- The main metrics moved only slightly, so this is not yet strong evidence of a real task-closure improvement.
+- Because shorter hold time directly relaxes the success condition, part of the observed gain could be a surface-level success-gate effect rather than a genuinely more stable policy.
+
+Conclusion:
+
+- `holdTimeRelax_smoke` is not clearly negative.
+- But it is also not strong enough to promote as a new default from smoke alone.
+- If this line is pursued, it should be labeled as a validation run for “whether the gain is only from a looser success gate”.
+
+Recommended next action:
+
+- Conservative path: keep `max_yaw_err_deg=8.0`, revert `hold_time_s` to `0.33`, and treat yaw relaxation as the current best logic-side change.
+- Aggressive path: run one formal confirmation with `hold_time_s=0.20`, explicitly treating it as a validation of whether the gain is superficial or truly stable.
+
+### `k_lat_fine: 0.0 -> 0.8` (`kLatFine_smoke`)
+
+- Log: `/home/uniubi/projects/forklift_sim/logs/20260309_173129_smoke_train_s1.0zc.log`
+- Window used for comparison: full 30-iteration smoke window
+- `success_rate_ema`: `0.4497`
+- `Mean episode length`: `238.9730`
+- `phase/frac_inserted`: `0.2022`
+- `phase/frac_aligned`: `0.1674`
+- `phase/hold_counter_mean`: `0.1770`
+- `err/yaw_deg_near_success`: `4.2221`
+- `err/lateral_near_success`: `0.1092`
+
+Relative to `yawRelax_smoke`:
+
+- `success_rate_ema`: slightly lower
+- `Mean episode length`: slightly longer
+- `phase/frac_inserted`: slightly better
+- `phase/frac_aligned`: better
+- `phase/hold_counter_mean`: better
+- `err/yaw_deg_near_success`: slightly better
+- `err/lateral_near_success`: slightly better
+
+Relative to `holdTimeRelax_smoke`:
+
+- `success_rate_ema`: slightly lower
+- `Mean episode length`: slightly longer
+- `phase/frac_aligned`: better
+- `phase/hold_counter_mean`: much better
+- `err/yaw_deg_near_success`: roughly flat to slightly worse
+- `err/lateral_near_success`: slightly better
+
+Interpretation:
+
+- Enabling `k_lat_fine` does not immediately improve the headline success-rate metric over `yawRelax_smoke`.
+- However, it consistently improves the process metrics most related to near-success quality: alignment, hold-counter behavior, and lateral/yaw quality.
+- This makes it a good candidate for a combination confirmation with the already validated `max_yaw_err_deg=8.0` setting.
+
+Conclusion:
+
+- `kLatFine_smoke` is a meaningful positive candidate, but its benefit appears more in process quality than in raw smoke success rate.
+- The next useful question is whether those process gains convert into stable success-rate gains in a longer formal confirmation run.
+
+Next action:
+
+- Keep `max_yaw_err_deg=8.0`.
+- Keep `hold_time_s=0.33`.
+- Run a longer formal confirmation for `max_yaw_err_deg=8.0 + k_lat_fine=0.8`.
