@@ -47,10 +47,12 @@ MAX_ITERATIONS="${MAX_ITERATIONS:-}"
 SANITY_ITERATIONS="${SANITY_ITERATIONS:-}"
 FROM_PHASE="${FROM_PHASE:-}"
 DRY_RUN="${DRY_RUN:-0}"
+NOHUP_MODE="${NOHUP_MODE:-0}"
 ALLOW_DIRTY="${ALLOW_DIRTY:-0}"
 PRETRAINED_CKPT="${PRETRAINED_CKPT:-}"
 FREEZE_BACKBONE_ITERS="${FREEZE_BACKBONE_ITERS:-0}"
 BASE_BRANCH_SOURCE="${BASE_BRANCH_SOURCE:-}"
+PIPELINE_LOG_FILE="${PIPELINE_LOG_FILE:-}"
 
 COLLECT_DATA_CMD="${COLLECT_DATA_CMD:-}"
 PRETRAIN_CMD="${PRETRAIN_CMD:-}"
@@ -90,6 +92,8 @@ Options:
   --pretrained-ckpt <path>      Backbone checkpoint used by finetune stage
   --freeze-backbone-iters <n>   Metadata knob for later finetune wiring
   --base-branch-source <ref>    Base branch/commit for exp/vision_cnn/base
+  --nohup                       Relaunch the whole pipeline under nohup
+  --pipeline-log-file <path>    Log file used with --nohup
   --dry-run                     Print commands without executing them
   --allow-dirty                 Allow running with a dirty git worktree
   --help                        Show this message
@@ -108,6 +112,11 @@ Phases:
   pretrain-cnn
   finetune-rl
   compare-report
+
+Examples:
+  bash scripts/experiments/vision_cnn_pipeline.sh full --version s1.0zd --mode formal
+  bash scripts/experiments/vision_cnn_pipeline.sh full --version s1.0zd --mode formal --nohup
+  bash scripts/experiments/vision_cnn_pipeline.sh resume --from-phase finetune-rl --version s1.0zd --nohup
 EOF
 }
 
@@ -150,6 +159,75 @@ load_registry() {
     # shellcheck disable=SC1090
     source "${file}"
   fi
+}
+
+pipeline_log_file_default() {
+  echo "${RUN_DIR}/pipeline_nohup_$(timestamp_bj).log"
+}
+
+relaunch_args_without_nohup_flags() {
+  local filtered=()
+  local skip_next=0
+  local arg
+
+  for arg in "${ORIGINAL_ARGS[@]}"; do
+    if [[ "${skip_next}" == "1" ]]; then
+      skip_next=0
+      continue
+    fi
+
+    case "${arg}" in
+      --nohup)
+        continue
+        ;;
+      --pipeline-log-file)
+        skip_next=1
+        continue
+        ;;
+      *)
+        filtered+=("${arg}")
+        ;;
+    esac
+  done
+
+  printf '%s\n' "${filtered[@]}"
+}
+
+maybe_relaunch_with_nohup() {
+  local pipeline_log
+  local script_path
+  local filtered_args=()
+  local line
+  local pid
+
+  [[ "${NOHUP_MODE}" == "1" ]] || return 0
+  [[ -z "${VISION_CNN_NOHUP_CHILD:-}" ]] || return 0
+
+  pipeline_log="${PIPELINE_LOG_FILE:-$(pipeline_log_file_default)}"
+  mkdir -p "$(dirname "${pipeline_log}")"
+  script_path="${PROJECT_DIR}/scripts/experiments/vision_cnn_pipeline.sh"
+  require_file "${script_path}"
+
+  while IFS= read -r line; do
+    [[ -n "${line}" ]] && filtered_args+=("${line}")
+  done < <(relaunch_args_without_nohup_flags)
+
+  if [[ "${DRY_RUN}" == "1" ]]; then
+    log "dry-run: would relaunch pipeline with nohup"
+    log "pipeline log: ${pipeline_log}"
+    return 0
+  fi
+
+  (
+    cd "${PROJECT_DIR}"
+    nohup env VISION_CNN_NOHUP_CHILD=1 bash "${script_path}" "${filtered_args[@]}" > "${pipeline_log}" 2>&1 &
+    pid=$!
+    printf '%s\n' "${pid}" > "${RUN_DIR}/pipeline_nohup.pid"
+    log "pipeline relaunched with nohup"
+    log "pid: ${pid}"
+    log "pipeline log: ${pipeline_log}"
+  )
+  exit 0
 }
 
 normalize_stage_key() {
@@ -595,6 +673,14 @@ parse_args() {
         BASE_BRANCH_SOURCE="${2:?missing value for --base-branch-source}"
         shift 2
         ;;
+      --nohup)
+        NOHUP_MODE="1"
+        shift
+        ;;
+      --pipeline-log-file)
+        PIPELINE_LOG_FILE="${2:?missing value for --pipeline-log-file}"
+        shift 2
+        ;;
       --dry-run)
         DRY_RUN="1"
         shift
@@ -618,6 +704,7 @@ main() {
   local start_index=0
   local idx
 
+  ORIGINAL_ARGS=("$@")
   parse_args "$@"
   [[ -n "${VERSION}" ]] || die "--version is required"
   [[ "${MODE}" == "smoke" || "${MODE}" == "formal" ]] || die "--mode must be smoke or formal"
@@ -625,6 +712,7 @@ main() {
 
   RUN_DIR="${OUTPUT_DIR}/${VERSION}"
   ensure_directories
+  maybe_relaunch_with_nohup
 
   if [[ "${ACTION}" == "resume" ]]; then
     [[ -n "${FROM_PHASE}" ]] || die "--from-phase is required for resume"
