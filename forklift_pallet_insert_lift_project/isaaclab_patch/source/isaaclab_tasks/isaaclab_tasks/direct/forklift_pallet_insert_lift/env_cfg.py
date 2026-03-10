@@ -83,7 +83,7 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     # 这里的值等价于前方 1.3m、上方 2.5m。
     camera_pos_local: tuple[float, float, float] = (130.0, 0.0, 250.0)
     # 在 world 约定下，pitch=+45° 表示相机向下俯视 45°。
-    camera_rpy_local_deg: tuple[float, float, float] = (0.0, 45.0, 0.0)
+    camera_rpy_local_deg: tuple[float, float, float] = (0.0, 60.0, 0.0)
 
     # easy8 + privileged 维度（供 obs 组装使用）
     easy8_dim: int = 8

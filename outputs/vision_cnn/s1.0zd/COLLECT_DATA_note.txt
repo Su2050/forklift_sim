@@ -1,0 +1,8 @@
+stage=collect-data
+version=s1.0zd
+mode=smoke
+branch=exp/vision_cnn/cnn_pretrain
+log_file=/home/uniubi/projects/forklift_sim/logs/20260309_222204_sanity_check_s1.0zd.log
+command=export PYTHONUNBUFFERED=1
+export TERM=xterm
+CONDA_PREFIX="" bash "/home/uniubi/projects/forklift_sim/IsaacLab/isaaclab.sh" -p "/home/uniubi/projects/forklift_sim/scripts/collect_detection_data.py"   --output-dir "/home/uniubi/projects/forklift_sim/data/vision_cnn" --version "s1.0zd"   --headless --enable_cameras --num-envs "32" --seed "42"

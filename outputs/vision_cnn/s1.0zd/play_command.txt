@@ -1,0 +1,38 @@
+# 生成相机视角视频的命令
+cd /home/uniubi/projects/forklift_sim/IsaacLab && ./isaaclab.sh -p ../scripts/experiments/play_with_camera.py \
+  --task Isaac-Forklift-PalletInsertLift-Direct-v0 \
+  --num_envs 1 \
+  --checkpoint "/home/uniubi/projects/forklift_sim/IsaacLab/logs/rsl_rl/forklift_pallet_insert_lift/2026-03-10_00-06-10/model_1999.pt" \
+  --headless \
+  --video_length 1200 \
+  --video_folder play_camera_1200_v2
+
+# 生成全局上帝视角视频的命令
+cd /home/uniubi/projects/forklift_sim/IsaacLab && ./isaaclab.sh -p ../scripts/experiments/play_global.py \
+  --task Isaac-Forklift-PalletInsertLift-Direct-v0 \
+  --num_envs 1 \
+  --checkpoint "/home/uniubi/projects/forklift_sim/IsaacLab/logs/rsl_rl/forklift_pallet_insert_lift/2026-03-10_00-06-10/model_1999.pt" \
+  --headless \
+  --video_length 1200 \
+  --video_folder play_global_1200
+
+# ==========================================
+# 统一的视频录制脚本 (支持参数配置视角)
+# ==========================================
+# 使用 --view_mode 参数，可选值: global, camera, both (默认 both)
+
+# 生成两种视角的视频 (自动依次运行)
+./isaaclab.sh -p ../scripts/experiments/play_and_record.py \
+  --task Isaac-Forklift-PalletInsertLift-Direct-v0 \
+  --num_envs 1 \
+  --checkpoint "/home/uniubi/projects/forklift_sim/IsaacLab/logs/rsl_rl/forklift_pallet_insert_lift/2026-03-10_00-06-10/model_1999.pt" \
+  --headless \
+  --video_length 1200 \
+  --video_folder play_videos \
+  --view_mode both
+
+# 仅生成上帝视角
+# --view_mode global
+
+# 仅生成相机视角
+# --view_mode camera

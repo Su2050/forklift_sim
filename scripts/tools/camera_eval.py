@@ -71,6 +71,7 @@ def tensor_to_rgb_image(img_tensor: torch.Tensor) -> np.ndarray:
 
 
 def main():
+    print("[DEBUG] Starting main()")
     out_dir = REPO_ROOT / "outputs" / "camera_eval" / args_cli.cam_name
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -86,8 +87,11 @@ def main():
     cfg.camera_rpy_local_deg = (args_cli.roll_deg, args_cli.pitch_deg, args_cli.yaw_deg)
     cfg.robot_cfg.init_state.pos = (-2.0, 0.0, 0.03)
 
+    print("[DEBUG] Creating env...")
     env = gym.make("Isaac-Forklift-PalletInsertLift-Direct-v0", cfg=cfg)
+    print("[DEBUG] Resetting env...")
     obs, _ = env.reset()
+    print("[DEBUG] Env reset done.")
 
     stage = env.unwrapped.sim.stage
     spawn_marker_cube(stage, "/World/Debug/TipMarker", (-0.2, 0.0, 0.1), 0.2, (1.0, 0.0, 0.0), "/World/Debug/Materials/TipMarker")
@@ -97,6 +101,7 @@ def main():
     robot_positions: list[tuple[float, float, float]] = []
     mid_step = max(1, args_cli.steps // 2)
 
+    print("[DEBUG] Starting step loop...")
     for step in range(args_cli.steps):
         action = torch.zeros((1, 3), device=env.unwrapped.device, dtype=torch.float32)
         if step <= 60:
@@ -105,6 +110,11 @@ def main():
             action[:, 2] = 1.0
 
         obs, _, terminated, truncated, _ = env.step(action)
+        
+        if "image" not in obs["policy"]:
+            print(f"[DEBUG] Step {step}: 'image' not in obs['policy']. Keys: {obs['policy'].keys()}")
+            continue
+            
         img_np = tensor_to_rgb_image(obs["policy"]["image"][0])
         frames.append(img_np)
 
@@ -119,8 +129,10 @@ def main():
             Image.fromarray(img_np).save(out_dir / "frame_end.png")
 
         if bool(terminated[0]) or bool(truncated[0]):
+            print(f"[DEBUG] Step {step}: terminated or truncated")
             break
 
+    print(f"[DEBUG] Loop done. Frames captured: {len(frames)}")
     env.close()
 
     if not frames:
@@ -132,6 +144,7 @@ def main():
     for frame in frames:
         writer.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
     writer.release()
+    print(f"[DEBUG] Video saved to {video_path}")
 
     diffs = []
     for idx in range(1, min(10, len(frames))):
@@ -153,5 +166,9 @@ def main():
 if __name__ == "__main__":
     try:
         main()
+    except Exception as e:
+        print(f"[DEBUG] Exception: {e}")
+        import traceback
+        traceback.print_exc()
     finally:
         simulation_app.close()
