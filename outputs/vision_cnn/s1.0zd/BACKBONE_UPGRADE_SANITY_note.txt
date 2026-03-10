@@ -1,0 +1,8 @@
+stage=backbone-upgrade-sanity
+version=s1.0zd
+mode=formal
+branch=exp/vision_cnn/actor_backbone_upgrade
+log_file=/home/uniubi/projects/forklift_sim/logs/20260309_193444_sanity_check_s1.0zd.log
+command=export PYTHONUNBUFFERED=1
+export TERM=xterm
+CONDA_PREFIX="" bash isaaclab.sh -p scripts/reinforcement_learning/rsl_rl/train.py   --task "Isaac-Forklift-PalletInsertLift-Direct-v0"   --headless --enable_cameras --num_envs "256" --max_iterations "100"   --seed "42"

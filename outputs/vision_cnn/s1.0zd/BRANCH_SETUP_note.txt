@@ -1,0 +1,6 @@
+stage=branch-setup
+version=s1.0zd
+mode=formal
+branch=exp/vision_cnn/actor_backbone_upgrade
+namespace=exp/vision_cnn
+git_note=exp/vision_cnn is treated as namespace; shared ancestor branch is exp/vision_cnn/base
