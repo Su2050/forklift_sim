@@ -1766,7 +1766,7 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
 
         # ---- 随机化叉车初始位姿 ----
         if self._stage_1_mode:
-            x = sample_uniform(-2.5, -2.0, (len(env_ids), 1), device=self.device)
+            x = sample_uniform(-3.5, -3.0, (len(env_ids), 1), device=self.device)
             y = sample_uniform(
                 self.cfg.stage1_init_y_min_m,
                 self.cfg.stage1_init_y_max_m,
