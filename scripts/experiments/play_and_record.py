@@ -73,6 +73,7 @@ def run_simulation(view_type):
     env_cfg.viewer.resolution = (640, 480)
 
     # Create environment
+    env_cfg.seed = 42 # 固定随机种子以确保两个视角的环境初始化完全一致
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array")
 
     # Wrap for video recording
