@@ -35,5 +35,5 @@ video_kwargs = {
 env = gym.wrappers.RecordVideo(env, **video_kwargs)
 env = RslRlVecEnvWrapper(env)
 
-agent_cfg = isaaclab_tasks.utils.parse_env_cfg("Isaac-Forklift-PalletInsertLift-Direct-v0", device="cuda:0", num_envs=1, use_default_kwargs=False)
+agent_cfg = isaaclab_tasks.utils.parse_env_cfg("Isaac-Forklift-PalletInsertLift-Direct-v0", device="cuda:0", num_envs=1)
 agent_cfg = isaaclab_tasks.utils.parse_env_cfg("Isaac-Forklift-PalletInsertLift-Direct-v0", device="cuda:0", num_envs=1) # Need to load agent cfg, actually let's use the standard play.py but modify the env_cfg
