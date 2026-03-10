@@ -8,7 +8,7 @@
 本次实验（`exp/vision_cnn/scratch_rl_baseline` 分支）的目标是：**从低维状态输入切换到纯视觉输入（端到端）**。
 即：Actor 网络不再直接读取托盘的精确坐标，而是通过叉车上搭载的**第一人称摄像头画面（RGB 图像）**，结合自身的本体感觉（速度、转向等），直接输出控制动作。
 
-本实验作为视觉方案的 **Baseline（基线）**，采用了最简单的 3 层 CNN 架构从零开始训练（Scratch），用于验证环境配置、摄像头视角、奖励函数以及不对称 Actor-Critic 架构的有效性。
+本实验作为视觉方案的 **Baseline（基线）**，最初采用了简单的 3 层 CNN 架构从零开始训练。在随后的迭代中（`exp/vision_cnn/cnn_pretrain` 分支），我们升级到了 **MobileNetV3-Small** 作为视觉主干网络，以提取更丰富的特征，并验证了其在 60 度俯视视角和远距离初始化下的可行性。
 
 ---
 
@@ -37,20 +37,15 @@
 网络在 `vision_actor_critic.py` 中定义：
 
 ```python
-# 1. 视觉编码器 (Nature CNN 变体)
-self.image_encoder = nn.Sequential(
-    nn.Conv2d(3, 32, kernel_size=8, stride=4),
-    ELU(),
-    nn.Conv2d(32, 64, kernel_size=4, stride=2),
-    ELU(),
-    nn.Conv2d(64, 128, kernel_size=3, stride=1),
-    ELU(),
-    nn.Flatten(), # 输出 2048 维
-)
+# 1. 视觉编码器 (MobileNetV3-Small)
+# 位于 vision_backbone.py 中定义
+self.image_encoder = MobileNetVisionBackbone(imagenet_init=False)
+# 内部结构：tv_models.mobilenet_v3_small 的 features 层 + AdaptiveAvgPool2d
+# 输出维度: 576 维
 
 # 2. 视觉特征投影
 self.image_proj = nn.Sequential(
-    nn.Linear(2048, 256), ELU(),
+    nn.Linear(576, 256), ELU(),
     nn.Linear(256, 256), ELU(),
 )
 
@@ -58,7 +53,7 @@ self.image_proj = nn.Sequential(
 self.proprio_encoder = MLP(input_dim=8, output_dim=128, hidden_dims=[128, 128], activation="elu")
 
 # 4. Actor Head (融合视觉与本体感觉)
-# 输入: 256 (视觉) + 128 (本体) = 384 维
+# 输入: 256 (视觉投影后) + 128 (本体) = 384 维
 self.actor = MLP(input_dim=384, output_dim=3, hidden_dims=[256, 256, 128], activation="elu")
 
 # 5. Critic MLP (直接处理 15 维特权状态)
@@ -173,9 +168,16 @@ env TERM=xterm PYTHONUNBUFFERED=1 CONDA_PREFIX="" CONDA_DEFAULT_ENV="" \
 
 ---
 
-## 6. 后续演进计划 (Next Steps)
+## 6. 实验演进与分支说明
 
-当前分支 (`scratch_rl_baseline`) 仅验证了最基础的 3 层 CNN 在 64x64 分辨率下的可行性。根据项目规划，后续将在 `actor_backbone_upgrade` 分支进行以下升级：
-1. **提升分辨率**：从 `64x64` 提升至 `128x128` 或更高。
-2. **升级 Backbone**：将简单的 3 层 CNN 替换为 **ResNet-18** 或 **MobileNetV3**，以提取更丰富的空间与语义特征。
-3. **视觉预训练 (Pretrain)**：先用收集好的数据集对 CNN 进行预训练（如对比学习或位姿预测），再将预训练权重加载到 RL 中进行微调（Finetune），以大幅提升收敛速度和最终成功率。
+### 6.1 `exp/vision_cnn/scratch_rl_baseline` 分支
+这是最初的视觉 Baseline，验证了最基础的 3 层 CNN 在 64x64 分辨率下的可行性。
+
+### 6.2 `exp/vision_cnn/cnn_pretrain` 分支 (当前)
+在 Baseline 的基础上进行了两项重要升级：
+1. **升级 Backbone**：将简单的 3 层 CNN 替换为 **MobileNetV3-Small**，以提取更丰富的空间与语义特征。
+2. **支持预训练权重加载**：在 `vision_actor_critic.py` 中增加了对预训练 Backbone 权重的加载支持（通过 `pretrained_backbone_path` 配置），为后续的视觉预训练（Finetune）打下基础。
+
+### 6.3 后续演进计划 (Next Steps)
+1. **提升分辨率**：考虑从 `64x64` 提升至 `128x128` 或更高，以提供更清晰的对齐特征。
+2. **视觉预训练 (Pretrain)**：先用收集好的数据集对 MobileNetV3 进行预训练（如对比学习或位姿预测），再将预训练权重加载到 RL 中进行微调，以期大幅提升收敛速度和最终成功率，解决远距离对齐的难题。
