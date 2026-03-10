@@ -34,8 +34,29 @@
 
 ### 2.2 网络结构 (VisionActorCritic)
 
-网络在 `vision_actor_critic.py` 中定义：
+网络在 `vision_actor_critic.py` 中定义。根据不同的分支，视觉编码器有所不同：
 
+**方案 A：基础 3 层 CNN (位于 `scratch_rl_baseline` 分支)**
+```python
+# 1. 视觉编码器 (Nature CNN 变体)
+self.image_encoder = nn.Sequential(
+    nn.Conv2d(3, 32, kernel_size=8, stride=4),
+    ELU(),
+    nn.Conv2d(32, 64, kernel_size=4, stride=2),
+    ELU(),
+    nn.Conv2d(64, 128, kernel_size=3, stride=1),
+    ELU(),
+    nn.Flatten(), # 输出 2048 维
+)
+
+# 2. 视觉特征投影
+self.image_proj = nn.Sequential(
+    nn.Linear(2048, 256), ELU(),
+    nn.Linear(256, 256), ELU(),
+)
+```
+
+**方案 B：MobileNetV3-Small (位于 `cnn_pretrain` 分支，当前使用)**
 ```python
 # 1. 视觉编码器 (MobileNetV3-Small)
 # 位于 vision_backbone.py 中定义
@@ -48,7 +69,10 @@ self.image_proj = nn.Sequential(
     nn.Linear(576, 256), ELU(),
     nn.Linear(256, 256), ELU(),
 )
+```
 
+**公共部分：本体感觉与 Actor/Critic Head**
+```python
 # 3. 本体感觉编码器
 self.proprio_encoder = MLP(input_dim=8, output_dim=128, hidden_dims=[128, 128], activation="elu")
 
