@@ -15,9 +15,9 @@ from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, R
 class ForkliftVisionActorCriticCfg(RslRlPpoActorCriticCfg):
     """ActorCritic config with extra knobs for backbone pretraining transfer."""
 
-    pretrained_backbone_path: str | None = None
-    freeze_backbone: bool = False
-    freeze_backbone_updates: int = 0
+    pretrained_backbone_path: str | None = "/home/uniubi/projects/forklift_sim/outputs/vision_pretrain/best_backbone.pt"
+    freeze_backbone: bool = True
+    freeze_backbone_updates: int = 500
     imagenet_backbone_init: bool = False
 
 
