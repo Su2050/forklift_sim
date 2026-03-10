@@ -53,9 +53,9 @@ class ForkliftInsertLiftPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         actor_hidden_dims=[256, 256, 128],  # fusion actor head
         critic_hidden_dims=[256, 256, 128],  # Critic MLP 隐藏层
         activation="elu",  # 激活函数
-        pretrained_backbone_path=None,
-        freeze_backbone=False,
-        freeze_backbone_updates=0,
+        pretrained_backbone_path="/home/uniubi/projects/forklift_sim/outputs/vision_pretrain/best_backbone.pt",
+        freeze_backbone=True,
+        freeze_backbone_updates=500,
         imagenet_backbone_init=False,
     )
 
