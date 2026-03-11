@@ -38,6 +38,7 @@ class VisionActorCritic(nn.Module):
         activation="elu",
         init_noise_std=1.0,
         noise_std_type: str = "scalar",
+        backbone_type: str = "mobilenet_v3_small",
         pretrained_backbone_path: str | None = None,
         freeze_backbone: bool = False,
         freeze_backbone_updates: int = 0,
@@ -65,7 +66,14 @@ class VisionActorCritic(nn.Module):
         self._backbone_is_frozen = False
         self._policy_iteration_count = 0
 
-        self.image_encoder = MobileNetVisionBackbone(imagenet_init=bool(imagenet_backbone_init))
+        if backbone_type == "mobilenet_v3_small":
+            from .vision_backbone import MobileNetVisionBackbone
+            self.image_encoder = MobileNetVisionBackbone(imagenet_init=bool(imagenet_backbone_init))
+        elif backbone_type == "resnet18":
+            from .vision_backbone import ResNet18VisionBackbone
+            self.image_encoder = ResNet18VisionBackbone(imagenet_init=bool(imagenet_backbone_init))
+        else:
+            raise ValueError(f"Unknown backbone_type: {backbone_type}")
 
         with torch.no_grad():
             image_feat_dim = int(self.image_encoder(sample_image[:1].detach().cpu()).shape[-1])

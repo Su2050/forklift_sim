@@ -164,7 +164,8 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         # _fork_tip_z0: reset 时 fork tip 的基准高度
         # _hold_counter: 成功条件保持计数器
         # _lift_pos_target: lift 关节位置目标（位置控制）
-        self.actions = torch.zeros((self.num_envs, self.cfg.action_space), device=self.device)
+        # 无论 action_space 是 2 还是 3，内部统一使用 3 维动作缓存
+        self.actions = torch.zeros((self.num_envs, 3), device=self.device)
         self._last_insert_depth = torch.zeros((self.num_envs,), device=self.device)
         self._fork_tip_z0 = torch.zeros((self.num_envs,), device=self.device)
         # S1.0O-C2: 使用 float 以支持衰减（原 S1.0N 为 int32）
@@ -1750,6 +1751,7 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         super()._reset_idx(env_ids)
 
         # ---- 计数器清零 ----
+        self.actions[env_ids] = 0.0
         self._last_insert_depth[env_ids] = 0.0
         self._hold_counter[env_ids] = 0
         self._is_first_step[env_ids] = True
