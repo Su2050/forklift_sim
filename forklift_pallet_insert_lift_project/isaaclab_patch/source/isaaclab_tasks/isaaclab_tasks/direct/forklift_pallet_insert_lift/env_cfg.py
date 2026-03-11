@@ -73,10 +73,10 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     stage1_init_yaw_deg_max: float = 10.0
 
     # 相机参数：
-    # - 训练默认 64x64，降低渲染和显存开销
+    # - 训练默认 128x128，提升视觉特征提取精度 (从 64x64 升级)
     # - camera_eval.py 会显式覆盖到 320x320 做可视化验收
-    camera_width: int = 64
-    camera_height: int = 64
+    camera_width: int = 128
+    camera_height: int = 128
     camera_hfov_deg: float = 90.0
     camera_mount_body: str = "body"
     # forklift_c.usd 使用 cm 单位；TiledCamera offset 也需使用挂载 prim 的局部单位。
