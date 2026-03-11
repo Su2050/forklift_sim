@@ -41,6 +41,7 @@ parser.add_argument("--video_length", type=int, default=1200)
 parser.add_argument("--num_envs", type=int, default=1)
 parser.add_argument("--view_mode", type=str, choices=["global", "camera", "both"], default="both", help="Which camera view to record")
 parser.add_argument("--video_folder", type=str, default="play_videos", help="Base folder for videos")
+parser.add_argument("--seed", type=int, default=42, help="Random seed for environment initialization")
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
 args_cli.enable_cameras = True
@@ -73,7 +74,7 @@ def run_simulation(view_type):
     env_cfg.viewer.resolution = (640, 480)
 
     # Create environment
-    env_cfg.seed = 42 # 固定随机种子以确保两个视角的环境初始化完全一致
+    env_cfg.seed = args_cli.seed if hasattr(args_cli, 'seed') and args_cli.seed is not None else 42 # 固定随机种子以确保两个视角的环境初始化完全一致
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array")
 
     # Wrap for video recording
