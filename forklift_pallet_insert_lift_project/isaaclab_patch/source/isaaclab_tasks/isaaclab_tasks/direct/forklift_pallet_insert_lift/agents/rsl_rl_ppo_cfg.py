@@ -55,7 +55,7 @@ class ForkliftInsertLiftPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         activation="elu",  # 激活函数
         pretrained_backbone_path="/home/uniubi/projects/forklift_sim/outputs/vision_pretrain_256x256/best_backbone.pt",
         freeze_backbone=True,
-        freeze_backbone_updates=500,
+        freeze_backbone_updates=50,
         imagenet_backbone_init=False,
     )
 
