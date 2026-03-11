@@ -208,9 +208,18 @@ env TERM=xterm PYTHONUNBUFFERED=1 CONDA_PREFIX="" CONDA_DEFAULT_ENV="" \
 1. **数据采集**：编写了 `collect_expert_data.py`，利用 15 维输入的专家策略（`model_1999.pt`，成功率 ~70%），在开启摄像头的环境中跑仿真，收集了 64,000 帧 `(RGB图像, 物理状态)` 的 HDF5 数据集。
 2. **监督学习预训练**：编写了 `train_visual_pretrain.py`，让 MobileNetV3 学习直接从图像预测托盘的 `(x, y, yaw)`。经过 30 个 Epoch 的训练，横向误差 (Y) 降至 0.16m，偏航角误差降至 2.9°。最佳权重保存在 `outputs/vision_pretrain/best_backbone.pt`。
 
-### 6.4 `exp/vision_cnn/rl_finetune` 分支 (当前)
+### 6.4 `exp/vision_cnn/rl_finetune` 分支
 在完成预训练后拉取此分支，用于**阶段三：强化学习微调 (RL Finetuning)**。
-计划在此分支中：
-1. 修改 RL 训练配置，加载预训练好的 `best_backbone.pt`。
-2. 冻结（或以极小学习率微调）MobileNetV3 的特征层。
-3. 重新启动 PPO 训练，观察是否能突破 20% 的成功率瓶颈。
+
+已完成的验证：
+1. 成功加载预训练好的 `best_backbone.pt` 并启动 PPO 微调。
+2. 2000 iter 跑完后，总成功率从纯 RL Baseline 的约 20% 提升到约 **26%**，接近成功率提升到约 **39%**。
+3. 但更重要的发现是：训练早期对齐精度很好，后期却发生退化，说明主要问题不是“完全看不见”，而是 **RL 微调没有稳定保住预训练出来的精对齐特征**。
+
+下一步不再直接默认“先升分辨率”，而是优先做：
+1. 修正 Backbone 冻结/解冻的计数口径；
+2. 做“全程冻结 Backbone”和“真正冻结前 500 iter 再解冻”的单因素对照实验；
+3. 只有在上述实验仍然无法突破时，再升级到 `128x128` 全链路重跑。
+
+详细结果、结论与下一轮实验计划见：
+`docs/0310experiments/mobilenet_finetune_result_20260310.md`

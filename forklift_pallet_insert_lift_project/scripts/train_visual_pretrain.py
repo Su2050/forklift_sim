@@ -1,5 +1,5 @@
-import os
 import argparse
+from pathlib import Path
 import h5py
 import torch
 import torch.nn as nn
@@ -12,8 +12,17 @@ import numpy as np
 
 # Import the shared backbone
 import sys
-sys.path.append(os.path.join(os.path.dirname(__file__), "../isaaclab_patch/source/isaaclab_tasks/isaaclab_tasks/direct/forklift_pallet_insert_lift"))
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+TASK_PATCH_DIR = PROJECT_ROOT / "forklift_pallet_insert_lift_project" / "isaaclab_patch" / "source" / "isaaclab_tasks" / "isaaclab_tasks" / "direct" / "forklift_pallet_insert_lift"
+sys.path.append(str(TASK_PATCH_DIR))
 from vision_backbone import MobileNetVisionBackbone, save_backbone_checkpoint
+
+
+def resolve_project_path(path_str: str) -> Path:
+    path = Path(path_str).expanduser()
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
+    return path.resolve()
 
 class ExpertDataset(Dataset):
     def __init__(self, h5_path):
@@ -68,20 +77,29 @@ class PosePredictor(nn.Module):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dataset", type=str, default="../expert_dataset_64k.h5")
+    parser.add_argument("--dataset", type=str, default="expert_dataset_64k.h5")
     parser.add_argument("--batch_size", type=int, default=256)
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--output_dir", type=str, default="../outputs/vision_pretrain")
+    parser.add_argument("--output_dir", type=str, default="outputs/vision_pretrain")
     args = parser.parse_args()
-    
-    os.makedirs(args.output_dir, exist_ok=True)
-    writer = SummaryWriter(log_dir=os.path.join(args.output_dir, "tb_logs"))
+
+    dataset_path = resolve_project_path(args.dataset)
+    output_dir = resolve_project_path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"Project root: {PROJECT_ROOT}")
+    print(f"Resolved dataset path: {dataset_path}")
+    print(f"Resolved output directory: {output_dir}")
+    if not dataset_path.exists():
+        raise FileNotFoundError(f"Dataset not found: {dataset_path}")
+
+    writer = SummaryWriter(log_dir=str(output_dir / "tb_logs"))
     
     # 1. Prepare Data
-    print(f"Loading dataset from {args.dataset}")
-    full_dataset = ExpertDataset(args.dataset)
+    print(f"Loading dataset from {dataset_path}")
+    full_dataset = ExpertDataset(str(dataset_path))
     
     val_size = int(len(full_dataset) * 0.1)
     train_size = len(full_dataset) - val_size
@@ -170,7 +188,7 @@ def main():
         # Save best model
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            save_path = os.path.join(args.output_dir, "best_backbone.pt")
+            save_path = output_dir / "best_backbone.pt"
             
             # We only save the backbone part, because that's what RL needs
             save_backbone_checkpoint(

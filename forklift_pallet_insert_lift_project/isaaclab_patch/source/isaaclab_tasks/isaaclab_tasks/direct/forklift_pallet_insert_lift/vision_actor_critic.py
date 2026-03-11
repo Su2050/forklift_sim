@@ -63,7 +63,7 @@ class VisionActorCritic(nn.Module):
         self.pretrained_backbone_path = pretrained_backbone_path
         self.freeze_backbone_updates = int(freeze_backbone_updates or 0)
         self._backbone_is_frozen = False
-        self._backbone_update_calls = 0
+        self._policy_iteration_count = 0
 
         self.image_encoder = MobileNetVisionBackbone(imagenet_init=bool(imagenet_backbone_init))
 
@@ -100,6 +100,13 @@ class VisionActorCritic(nn.Module):
             )
         if freeze_backbone or self.freeze_backbone_updates > 0:
             self._set_backbone_frozen(True)
+            if self.freeze_backbone_updates > 0:
+                print(
+                    "Vision backbone freeze schedule: "
+                    f"frozen for the first {self.freeze_backbone_updates} policy iterations"
+                )
+            else:
+                print("Vision backbone freeze schedule: frozen for the entire training run")
 
         print(f"Vision image encoder: {self.image_encoder}")
         print(f"Vision image projection: {self.image_proj}")
@@ -174,12 +181,25 @@ class VisionActorCritic(nn.Module):
         state = "frozen" if frozen else "trainable"
         print(f"Vision backbone is now {state}")
 
-    def _maybe_unfreeze_backbone(self) -> None:
+    def on_policy_iteration_end(self, policy_iteration: int) -> None:
+        """Track outer PPO iterations and unfreeze backbone on schedule.
+
+        The previous implementation counted calls to ``update_normalization()``,
+        which happens multiple times inside one PPO iteration. Here we count the
+        outer policy updates instead so ``freeze_backbone_updates`` truly means
+        "freeze for N training iterations".
+        """
+        self._policy_iteration_count = int(policy_iteration)
         if not self._backbone_is_frozen or self.freeze_backbone_updates <= 0:
             return
-        self._backbone_update_calls += 1
-        if self._backbone_update_calls >= self.freeze_backbone_updates:
+        if self._policy_iteration_count >= self.freeze_backbone_updates:
             self._set_backbone_frozen(False)
+            print(
+                "Vision backbone unfrozen after "
+                f"{self._policy_iteration_count} completed policy iterations; "
+                "becomes trainable from the next outer learning iteration "
+                f"(zero-based index {self._policy_iteration_count})"
+            )
 
     def update_distribution(self, obs):
         mean = self.actor(self._encode_policy_obs(obs))
@@ -214,7 +234,6 @@ class VisionActorCritic(nn.Module):
         return self.distribution.log_prob(actions).sum(dim=-1)
 
     def update_normalization(self, obs):
-        self._maybe_unfreeze_backbone()
         if self.actor_obs_normalization:
             _, proprio = self._extract_policy_terms(obs)
             self.actor_obs_normalizer.update(proprio.float())
