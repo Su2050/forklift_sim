@@ -218,6 +218,10 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         # S1.0z: Episode 级别成功率统计
         self._ep_success_count = 0
         self._ep_total_count = 0
+        
+        # 实验 0：push-free 成功率统计
+        self._ep_push_free_success_count = 0
+        self._ep_push_free_insert_count = 0
 
         # ---- 派生常量 ----
         # S1.0h 修复：符号 + → -
@@ -701,7 +705,14 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
     # ---------------------------
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
         # store normalized actions
-        self.actions = torch.clamp(actions, -1.0, 1.0)
+        clamped_actions = torch.clamp(actions, -1.0, 1.0)
+        
+        # 实验 1：如果 action_space 是 2 (approach-only)，自动补齐第 3 维 (lift) 为 0
+        if clamped_actions.shape[1] == 2:
+            lift_zeros = torch.zeros((clamped_actions.shape[0], 1), device=self.device)
+            self.actions = torch.cat([clamped_actions, lift_zeros], dim=1)
+        else:
+            self.actions = clamped_actions
 
     def _apply_action(self) -> None:
         """将动作写入仿真。
@@ -1564,6 +1575,7 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self.extras["log"]["err/stage_dist_front_mean"] = stage_dist_front.mean()
         self.extras["log"]["diag/pallet_disp_xy_mean"] = pallet_disp_xy.mean()
         self.extras["log"]["diag/pallet_disp_xy_max"] = pallet_disp_xy.max()
+        self.extras["log"]["diag/pallet_disp_xy_p95"] = torch.quantile(pallet_disp_xy, 0.95)
         self.extras["log"]["err/d_xy_mean"] = d_xy.mean()
 
         # 阶段命中率
@@ -1624,24 +1636,42 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
             num_resets = reset_mask.sum().item()
             num_successes = (success & reset_mask).sum().item()
             
+            # 实验 0：push-free metrics
+            push_free_mask = pallet_disp_xy < self.cfg.push_free_disp_thresh_m
+            num_push_free_successes = (success & push_free_mask & reset_mask).sum().item()
+            num_push_free_inserts = (inserted_enough & push_free_mask & reset_mask).sum().item()
+            
             self._ep_total_count += num_resets
             self._ep_success_count += num_successes
+            self._ep_push_free_success_count += num_push_free_successes
+            self._ep_push_free_insert_count += num_push_free_inserts
             
             # 使用 EMA 跟踪最近的成功率 (平滑系数 0.001，约等于过去 1000 次 reset 的平均)
             # 1024 个环境，每个 episode ~400 步，每步平均 ~2.5 次 reset，1000 次 reset 约等于 400 步 (一个完整周期)
             batch_rate = num_successes / num_resets
+            batch_pf_success_rate = num_push_free_successes / num_resets
+            batch_pf_insert_rate = num_push_free_inserts / num_resets
+            
             if not hasattr(self, "_ep_success_rate_ema"):
                 self._ep_success_rate_ema = batch_rate
+                self._ep_pf_success_rate_ema = batch_pf_success_rate
+                self._ep_pf_insert_rate_ema = batch_pf_insert_rate
             else:
                 # 动态 alpha，确保批量 reset 时权重正确
                 alpha = min(1.0, num_resets * 0.001)
                 self._ep_success_rate_ema = (1 - alpha) * self._ep_success_rate_ema + alpha * batch_rate
+                self._ep_pf_success_rate_ema = (1 - alpha) * self._ep_pf_success_rate_ema + alpha * batch_pf_success_rate
+                self._ep_pf_insert_rate_ema = (1 - alpha) * self._ep_pf_insert_rate_ema + alpha * batch_pf_insert_rate
 
         if hasattr(self, "_ep_success_rate_ema"):
             self.extras["log"]["episode/success_rate_ema"] = self._ep_success_rate_ema
+            self.extras["log"]["episode/push_free_success_rate_ema"] = self._ep_pf_success_rate_ema
+            self.extras["log"]["episode/push_free_insert_rate_ema"] = self._ep_pf_insert_rate_ema
         
         if self._ep_total_count > 0:
             self.extras["log"]["episode/success_rate_total"] = self._ep_success_count / self._ep_total_count
+            self.extras["log"]["episode/push_free_success_rate_total"] = self._ep_push_free_success_count / self._ep_total_count
+            self.extras["log"]["episode/push_free_insert_rate_total"] = self._ep_push_free_insert_count / self._ep_total_count
 
         # ==================================================================
         # S1.0P: 诊断观测指标（不改训练，只改看结果的方式）

@@ -44,8 +44,8 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     decimation = 4
     episode_length_s = 36.0  # was 12.0; ~1080 steps for expert to complete insertion+lift
 
-    # actions: [drive, steer, lift]（驾驶、转向、举升）
-    action_space = 3
+    # actions: [drive, steer]（驾驶、转向，Stage 1 纯 approach 策略）
+    action_space = 2
 
     # 默认走视频端到端训练：
     # - actor 观测是 image + proprio
@@ -151,6 +151,9 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     lift_exit_epsilon: float = 0.08     # S1.0T: 0.02→0.08 等比放大 (m)
     # S1.0O-C2: hold counter 衰减（越界不清零，改为 *= decay）
     hold_counter_decay: float = 0.8
+    
+    # 实验 0：push-free 判定阈值
+    push_free_disp_thresh_m: float = 0.05
     
     # ---- 防作弊与终局优化 ----
     max_insert_z_err: float = 0.4       # 最大允许的货叉与托盘高度差（防止隔空飞越作弊）
