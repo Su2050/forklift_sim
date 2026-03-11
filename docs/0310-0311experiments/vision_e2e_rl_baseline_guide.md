@@ -230,12 +230,15 @@ env TERM=xterm PYTHONUNBUFFERED=1 CONDA_PREFIX="" CONDA_DEFAULT_ENV="" \
 在收集了 256x256 专家数据并完成预训练后，我们拉取此分支进行高分辨率的 Finetune 实验，经历了三次关键迭代：
 1. **强惩罚测试**：为解决 64x64 时的“推托盘”问题，将推盘惩罚权重设为 3.0。结果初期成功率飙升至 21%，但后期 Agent 变得极端保守，宁可不插也不推盘，成功率掉回 10%。证明：**256x256 预训练特征极度有效，但惩罚过强阻碍了学习**。
 2. **正常惩罚测试**：将惩罚回调至 1.0。结果成功率稳定在 23% 左右，但发现这是一种“推着托盘走 2 米”的假成功。分析发现：**预训练特征内生带有 16cm 的横向误差**，在冻结 Backbone 500 代的情况下，Agent 无法进行零碰撞的完美插入。
-3. **极短冻结期测试 (当前进行中)**：将 `freeze_backbone_updates` 从 500 大幅缩短至 50。目标是让 Actor 短暂适应后，**立刻让 RL 梯度端到端地回传给 MobileNet，以修正那 16cm 的视觉误差**。
+3. **极短冻结期测试**：将 `freeze_backbone_updates` 从 500 大幅缩短至 50，试图让 RL 梯度尽早修正视觉误差。结果发生了**灾难性遗忘**：Actor 还没学会开车就解冻，充满噪声的 RL 梯度把预训练特征洗废了，最终成功率降至 0.2%。
+
+**阶段性结论**：不能指望 RL 去修视觉误差。必须回头在预训练阶段就把视觉误差（尤其是横向 Y 误差）压低到 5cm 以内。
 
 详细结果与结论见：
 `docs/0310-0311experiments/scratch_baseline_256x256_result_20260311.md`
 `docs/0310-0311experiments/finetune_256x256_strong_pen_result_20260311.md`
 `docs/0310-0311experiments/finetune_256x256_normal_pen_result_20260311.md`
+`docs/0310-0311experiments/finetune_256x256_freeze50_result_20260311.md`
 
 ---
 
