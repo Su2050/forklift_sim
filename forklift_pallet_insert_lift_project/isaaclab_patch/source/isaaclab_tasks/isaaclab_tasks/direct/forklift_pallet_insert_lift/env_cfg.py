@@ -332,8 +332,8 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     tip_align_near_dist: float = 2.2       # tip constraint only active below this dist
 
     # ---- S1.0zB: Pallet displacement penalty (Exp-A2) ----
-    k_pallet_push_pen: float = 1.0          # 推盘惩罚权重 (Exp-A2: 3.0 -> 1.0)
-    pallet_push_insert_gate: float = 0.15   # insert_norm < 此值时全额惩罚
+    k_pallet_push_pen: float = 3.0          # 推盘惩罚权重 (Exp-A2: 3.0 -> 1.0; 视觉微调恢复为 3.0)
+    pallet_push_insert_gate: float = 0.80   # insert_norm < 此值时全额惩罚 (视觉微调: 0.15 -> 0.80, 取消浅插入豁免)
     pallet_push_insert_ramp: float = 0.15   # 惩罚从 gate 到 gate+ramp 线性衰减
     pallet_push_deadband_m: float = 0.05    # 5cm 死区 (Exp-A2: 0.02 -> 0.05，允许物理微振)
 
