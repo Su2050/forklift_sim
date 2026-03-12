@@ -1353,6 +1353,14 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         pallet_disp_xy = torch.norm(pallet_pos[:, :2] - pallet_init_pos_xy, dim=-1)
         push_excess = torch.clamp(pallet_disp_xy - self.cfg.pallet_push_deadband_m, min=0.0)
         
+        # ---- 实验 3.2: 近场 commit 奖励 ----
+        # 提前计算 gate_commit，因为 3.3 的推盘惩罚也需要用到它
+        gate_commit = (
+            smoothstep((self.cfg.d_commit_open - dist_front) / self.cfg.d_commit_open) *
+            torch.exp(-(tip_y_err / self.cfg.sigma_commit_tip) ** 2) *
+            torch.exp(-(yaw_err_deg / self.cfg.sigma_commit_yaw) ** 2)
+        )
+        
         # 实验 3.3: 条件化推盘惩罚
         w_push_relax = gate_commit
         # 注意：这里需要用到 dead_zone，但 dead_zone 是在下面计算的。
@@ -1580,11 +1588,7 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self._prev_phi_lift_progress = phi_lift_progress_gated.detach()
 
         # ---- 实验 3.2: 近场 commit 奖励 ----
-        gate_commit = (
-            smoothstep((self.cfg.d_commit_open - dist_front) / self.cfg.d_commit_open) *
-            torch.exp(-(tip_y_err / self.cfg.sigma_commit_tip) ** 2) *
-            torch.exp(-(yaw_err_deg / self.cfg.sigma_commit_yaw) ** 2)
-        )
+        # gate_commit 已经在上面 3.3 惩罚计算前提前计算了
         
         delta_front = torch.clamp(self._prev_dist_front - dist_front, min=0.0, max=self.cfg.delta_front_clip)
         r_commit_front = self.cfg.k_commit_front * delta_front * gate_commit
