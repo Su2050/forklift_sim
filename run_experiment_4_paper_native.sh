@@ -31,6 +31,6 @@ nohup env TERM=xterm PYTHONUNBUFFERED=1 CONDA_PREFIX="" CONDA_DEFAULT_ENV="" \
   agent.policy.freeze_backbone=true \
   > "${LOG_FILE}" 2>&1 &
 
-echo "Started Experiment 3 (Reward Shaping + RRL) training."
+echo "Started Experiment 4 (Paper Native Reward + RRL) training."
 echo "log: ${LOG_FILE}"
 echo "run_name: ${RUN_NAME}"
