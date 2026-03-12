@@ -354,11 +354,26 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     tip_align_exit_m: float = 0.16         # Schmitt exit: tip_y_err > this breaks hold
     tip_align_near_dist: float = 2.2       # tip constraint only active below this dist
 
-    # ---- 实验 3.3: 条件化推盘惩罚 (Conditional Pallet Push Penalty) ----
-    k_push_far: float = 1.0                # 远场（未触发 commit 时）重罚推盘
-    k_push_near: float = 0.35              # 近场（触发 commit 时）轻罚推盘，允许探索
-    k_push_deadzone_bonus: float = 0.6     # 死区（插歪了还推）额外加重惩罚
-    pallet_push_deadband_m: float = 0.08   # 死区，允许物理微振和极轻微推挤
+    # ---- 实验 4: 论文原生 Reward (Paper Native Reward) ----
+    # 正向奖励权重 (Positive Reward R+)
+    alpha_1: float = 1.0     # 距离托盘奖励权重 (1/rd)
+    alpha_2: float = 1.0     # 距离轨迹奖励权重 (1/rcd)
+    alpha_3: float = 1.0     # 偏航角奖励权重 (1/rcψ)
+    alpha_4: float = 10.0    # 到达托盘特殊奖励权重 (rg)
+    
+    # 负向惩罚权重 (Penalty Reward R-)
+    alpha_5: float = 1.0     # 推盘惩罚权重 (rp)
+    alpha_6: float = 1.0     # 超速惩罚权重 (rv)
+    alpha_7: float = 1.0     # 动作突变惩罚权重 (ra)
+    alpha_8: float = 1.0     # 初始停滞惩罚权重 (rini)
+    
+    # 论文公式中的阈值
+    paper_pallet_vel_thresh: float = 0.01  # 托盘移动速度阈值 (m/s)
+    paper_fork_vel_thresh: float = 0.07    # 叉车超速阈值 (m/s)
+    paper_ini_vel_thresh: float = 0.05     # 初始停滞速度阈值 (m/s)
+    paper_ini_dist_thresh: float = 0.3     # 初始停滞距离阈值 (m)
+    paper_rg_dist_thresh: float = 0.1      # 触发 rg 的距离阈值 (m)
+    paper_eps: float = 0.01                # 防止除零的极小值
 
     # termination thresholds
     max_roll_pitch_rad: float = 0.45  # ~25 deg

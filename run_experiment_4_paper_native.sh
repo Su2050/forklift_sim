@@ -7,7 +7,7 @@ LOG_TYPE="train"
 # 集中算力，环境数从 128 进一步降低到 64，因为在 GB10 上 128 跑了 20 分钟后依然 OOM
 NUM_ENVS="64"
 MAX_ITERATIONS="2000"
-RUN_NAME="exp3_3_conditional_push_penalty_rrl"
+RUN_NAME="exp4_paper_native_reward"
 
 mkdir -p "${PROJECT_ROOT}/logs"
 BEIJING_TS="$(TZ=Asia/Shanghai date +%Y%m%d_%H%M%S)"
