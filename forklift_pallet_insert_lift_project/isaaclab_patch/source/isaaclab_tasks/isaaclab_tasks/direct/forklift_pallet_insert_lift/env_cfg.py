@@ -360,9 +360,10 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     alpha_2: float = 1.0     # 距离轨迹奖励权重 (1/rcd)
     alpha_3: float = 1.0     # 偏航角奖励权重 (1/rcψ)
     alpha_4: float = 10.0    # 到达托盘特殊奖励权重 (rg)
-    
+    alpha_lift: float = 5.0  # 举升奖励权重（论文补丁，用于端到端）
+
     # 负向惩罚权重 (Penalty Reward R-)
-    alpha_5: float = 1.0     # 推盘惩罚权重 (rp)
+    alpha_5: float = 100.0   # 推盘惩罚权重 (rp) - 放大以避免 reward hacking
     alpha_6: float = 1.0     # 超速惩罚权重 (rv)
     alpha_7: float = 1.0     # 动作突变惩罚权重 (ra)
     alpha_8: float = 1.0     # 初始停滞惩罚权重 (rini)

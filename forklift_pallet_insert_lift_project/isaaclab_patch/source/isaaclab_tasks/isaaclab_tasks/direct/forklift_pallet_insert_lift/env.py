@@ -804,6 +804,22 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
 
         return torch.stack([tip_x, tip_y, tip_z], dim=-1)
 
+    def _compute_fork_center(self) -> torch.Tensor:
+        """计算叉臂的几何中心世界位置。
+        
+        基于 fork tip 的位置，向后退回叉臂长度的一半。
+        假设叉臂长度约为 1.2 米，因此向后退 0.6 米。
+        """
+        tip = self._compute_fork_tip()
+        yaw = _quat_to_yaw(self.robot.data.root_quat_w)
+        
+        # 叉臂长度约 1.2m，中心在尖端后方 0.6m
+        center_x = tip[:, 0] - 0.6 * torch.cos(yaw)
+        center_y = tip[:, 1] - 0.6 * torch.sin(yaw)
+        center_z = tip[:, 2]
+        
+        return torch.stack([center_x, center_y, center_z], dim=-1)
+
     # ==========================================================================
     # 实验 3.1: 参考轨迹走廊 (Trajectory-lite)
     # ==========================================================================
@@ -1151,6 +1167,7 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         root_pos = self.robot.data.root_pos_w
         pallet_pos = self.pallet.data.root_pos_w
         tip = self._compute_fork_tip()                                       # (N, 3)
+        fork_center = self._compute_fork_center()                            # (N, 3)
 
         robot_yaw = _quat_to_yaw(self.robot.data.root_quat_w)               # (N,)
         pallet_yaw = _quat_to_yaw(self.pallet.data.root_quat_w)             # (N,)
@@ -1199,22 +1216,33 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         d_traj, yaw_traj_err_deg, _ = self._query_reference_trajectory()
         yaw_traj_err_rad = yaw_traj_err_deg * math.pi / 180.0
         
-        # 2. 正向奖励 R+ (Eq.6)
+        # 2. 距离 rd 的定义：叉臂中心到托盘中心的距离 (重大修正)
+        # 只有当叉车完全插入时，叉臂中心才会和托盘中心重合
+        dist_center = torch.norm(fork_center[:, :2] - pallet_pos[:, :2], dim=-1)
+
+        # 3. 正向奖励 R+ (Eq.6)
         eps = self.cfg.paper_eps
-        r_dist = 1.0 / (dist_front + eps)
+        r_dist = 1.0 / (dist_center + eps)
         r_traj_d = 1.0 / (d_traj + eps)
         r_traj_yaw = 1.0 / (yaw_traj_err_rad + eps)
-        
-        # rg: 到达奖励 (距离 < 0.1m 且姿态大致对准)
-        rg = ((dist_front < self.cfg.paper_rg_dist_thresh) & 
+
+        # rg: 到达奖励 (当叉臂中心距离托盘中心很近，且姿态对准时)
+        # 论文中是到达托盘，因为我们用了中心距离，所以阈值设为 0.1m
+        rg = ((dist_center < self.cfg.paper_rg_dist_thresh) & 
               (tip_y_err < 0.15) & 
               (yaw_err_deg < 10.0)).float()
-              
+
+        # r_lift: 举升奖励 (论文补丁，用于端到端训练)
+        # 当叉车插入到位 (rg 触发) 时，根据举升高度给予奖励
+        lift_height_joint = self._joint_pos[:, self._lift_id]
+        r_lift = rg * lift_height_joint * self.cfg.alpha_lift
+
         R_plus = (
             self.cfg.alpha_1 * r_dist +
             self.cfg.alpha_2 * r_traj_d +
             self.cfg.alpha_3 * r_traj_yaw +
-            self.cfg.alpha_4 * rg
+            self.cfg.alpha_4 * rg +
+            r_lift
         )
         
         # 3. 负向惩罚 R- (Eq.7)
@@ -1233,12 +1261,12 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         # ra: 动作突变惩罚
         ra = -torch.norm(self.actions - self.previous_actions, dim=-1) ** 2
         
-        # rini: 初始停滞惩罚
-        rini = torch.where(
-            (fork_vel_xy < self.cfg.paper_ini_vel_thresh) & (dist_front > self.cfg.paper_ini_dist_thresh),
-            -1.0,
-            0.0
-        )
+                # rini: 初始停滞惩罚
+                rini = torch.where(
+                    (fork_vel_xy < self.cfg.paper_ini_vel_thresh) & (dist_center > self.cfg.paper_ini_dist_thresh),
+                    -1.0,
+                    0.0
+                )
         
         R_minus = (
             self.cfg.alpha_5 * rp +
@@ -1258,12 +1286,13 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         # ==================================================================
         
         # 更新持有时长计数器 (用于 success 判断)
+        # 实验 4 修改：论文中没有举升阶段，只要插入且对准就算成功
         insert_norm = torch.clamp(insert_depth / (self.cfg.pallet_depth_m + 1e-6), 0.0, 1.0)
         is_inserted = insert_norm > 0.8
         is_aligned = (y_err < 0.1) & (yaw_err_deg < 5.0)
-        is_lifted = lift_height > 0.05
+        # is_lifted = lift_height > 0.05
         
-        hold_cond = is_inserted & is_aligned & is_lifted
+        hold_cond = is_inserted & is_aligned
         self._hold_counter = torch.where(hold_cond, self._hold_counter + 1, 0.0)
         
         # 记录 episode 成功率
@@ -1284,6 +1313,7 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self.extras["log"]["paper_reward/r_traj_d"] = r_traj_d.mean()
         self.extras["log"]["paper_reward/r_traj_yaw"] = r_traj_yaw.mean()
         self.extras["log"]["paper_reward/rg"] = rg.mean()
+        self.extras["log"]["paper_reward/r_lift"] = r_lift.mean()
         self.extras["log"]["paper_reward/rp"] = rp.mean()
         self.extras["log"]["paper_reward/rv"] = rv.mean()
         self.extras["log"]["paper_reward/ra"] = ra.mean()
