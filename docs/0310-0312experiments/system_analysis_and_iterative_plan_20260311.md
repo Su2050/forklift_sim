@@ -16,13 +16,12 @@
 
 基于以下材料综合判断：
 
-- `docs/0310-0311experiments/mobilenet_baseline_result_20260310.md`
-- `docs/0310-0311experiments/mobilenet_finetune_result_20260310.md`
-- `docs/0310-0311experiments/scratch_baseline_256x256_result_20260311.md`
-- `docs/0310-0311experiments/finetune_256x256_strong_pen_result_20260311.md`
-- `docs/0310-0311experiments/finetune_256x256_normal_pen_result_20260311.md`
-- `docs/0310-0311experiments/finetune_256x256_freeze50_result_20260311.md`
-- 最新日志 `logs/20260311_154823_train_finetune_256x256_freeze50_env64.log`
+- `docs/0310-0312experiments/scratch_baseline_256x256_result_20260311.md`
+- `docs/0310-0312experiments/finetune_256x256_freeze50_result_20260311.md`
+- `docs/0310-0312experiments/experiment_log_20260311_night.md`
+- `docs/0310-0312experiments/experiment_log_20260312_morning.md`
+- `docs/0310-0312experiments/experiment_3x_reference_trajectory_reward_plan_20260312.md`
+- 最新日志 `logs/20260312_100059_train_exp3_reward_shaping_rrl.log`
 
 ### 2.1 当前没有一条可以算“论文式成功训练”的路线
 
@@ -31,42 +30,40 @@
 1. **`256x256 scratch` 全程为 0**
    - 说明纯 RL 从零开始学习高分辨率视觉输入在当前任务上不可行。
 
-2. **`256x256 + pretrain + strong penalty`**
-   - 早期会插，但很快被强惩罚压成极端保守策略。
-   - 说明惩罚过强会把策略训练成“不敢插”。
+2. **“坐标回归预训练”路线已正式降级**
+   - `MobileNetV3 任务预训练+解冻微调` 与 `ResNet18 ImageNet特征+全程冻结` 的最终上限几乎一致，二者都卡在 `push-free ≈ 16.5%`。
+   - 这说明特定任务的坐标回归预训练不是当前主瓶颈，`RRL` 才是更合理、更简洁的主线。
 
-3. **`256x256 + pretrain + normal penalty`**
-   - 表面成功率约 `22%~25%`，但托盘位移达到 `~2m`。
-   - 这是典型“推着托盘走”的**假成功**，不能视为真正的精确插入。
+3. **`exp3 reward shaping v1` 还没有打通 `approach -> insert -> hold`**
+   - 到 `iteration 348` 左右，`push_free_success_rate_total` 仅约 `0.53%`，`push_free_insert_rate_total` 仅约 `0.60%`。
+   - 同时 `diag/pallet_disp_xy_mean` 仍约 `0.08m ~ 0.11m`，说明虽然出现了极少量近成功或浅插入，但距离“稳定、无推盘的插入保持成功”还很远。
 
-4. **`256x256 + pretrain + freeze50`**
-   - 最新日志到 `iteration 310` 左右，`success_rate_total` 约 `0.25%`，`phase/frac_inserted` 回到 `0.0`。
-   - 说明短冻结期 + 端到端 RL 微调导致了明显退化，符合“灾难性遗忘”判断。
+4. **`loading decision / lift` 仍未开始独立打通**
+   - 当前即便在 `approach-only` 主线中，也还没有形成论文那种“接近策略 + 单独决策举升”的完整 pipeline。
 
 ### 2.2 当前真正的系统状态
 
 当前更准确的系统状态不是“完全看不见”，而是：
 
-- 能一定程度靠近托盘
-- 能在部分时刻出现较好的横向/偏航误差
-- 但**无法稳定变成 push-free 的插入保持成功**
-- 更不会自然打通 `lift`
+- 已确认 `2 动作 approach-only` 与 `RRL (ResNet18 + ImageNet + 全程冻结)` 是当前正确主线
+- 能在相当一部分 episode 中形成中等质量对齐，`phase/frac_aligned` 可达到 `~0.35 ~ 0.63`
+- 在 `exp3 reward shaping v1` 中，`err/dist_front_mean` 已下降到约 `0.22m`，说明叉尖能够更频繁地开到托盘口前
+- 但这种接近还**不能稳定转化为插入与保持**，`phase/frac_inserted` 基本仍接近 `0`，`phase/hold_counter_max` 仍为 `0`
+- 托盘位移仍不可忽略，`diag/pallet_disp_xy_mean` 约 `0.08m ~ 0.11m`
+- `lift / loading decision` 仍完全没打通
 
 ### 2.3 当前最重要的负面证据
 
-1. **RL 不能可靠地修预训练误差**
-   - `freeze50` 说明：当 Actor 还不成熟时，RL 传回给 backbone 的梯度质量太差，会破坏预训练特征。
+1. **特定任务预训练不是当前主要矛盾**
+   - 经过实验 1 与实验 2 对比，已经可以把“要不要继续死磕坐标回归预训练”视为已回答的问题：当前主线应固定为 `RRL`。
 
-2. **当前 success 指标会被 reward hacking 污染**
-   - `normal_pen` 已证明：只看 `success_rate_total` 会把“推土机”误判为进步。
+2. **当前 Reward v1 只解决了“更靠近”，没有解决“沿可插入路径 commit”**
+   - 最新 `exp3` 日志表明：近场误差和局部接近确实比之前更好，但稳定插入与保持几乎没有发生。
+   - 这说明当前 Reward 仍缺少“参考走廊 -> commit -> insert”的显式分解。
 
-3. **任务拆分方式与论文不一致**
-   - 当前 Stage 1 虽然 success 已不再要求 lift，但**动作空间仍是 3 维**：
-     - `drive`
-     - `steer`
-     - `lift`
-   - 这意味着策略在“只考接近/插入”的阶段，仍要同时探索一个不必要的 `lift` 动作维度。
-   - 论文的 `approach policy` 只输出 `throttle + steering`，`lift` 决策是后续单独的监督策略。
+3. **问题已不再是动作维度，而是 Reward 结构与诊断粒度**
+   - `2 动作 approach-only` 已验证有效，不应继续把“3 动作探索噪声”当成当前主障碍。
+   - 当前真正缺的是：更像论文那样的几何先验、分阶段 Reward、以及能区分 `approach / commit / insert` 的过程诊断。
 
 ---
 
@@ -80,26 +77,41 @@
 2. **使用双侧相机，强调叉齿与托盘开口的近场几何关系**
 3. **把任务拆成 approach policy 和 loading decision**
 4. **approach policy 只学驱动与转向，不把 lift 混进同一个 RL policy**
-5. **使用 photorealistic sim + domain randomization**
-6. **reward/critic 允许使用 privileged information**
+5. **在 Reward 中使用基于参考轨迹的几何先验**
+   - 原文明确使用了基于 `clothoid` 近似的 reference trajectory 来计算正奖励。
+6. **使用 photorealistic sim + domain randomization**
+7. **reward/critic 允许使用 privileged information**
 
 ### 3.2 我们与论文的核心差距
 
-当前项目与论文相比，主要差在 4 个地方：
+经过实验 1 和实验 2 的修正后，我们已经在两点上向论文靠拢：
 
-1. **预训练范式完全不同 (最致命差距)**
-   - 当前：试图让 CNN 回归物理坐标 (x,y,yaw)，导致陷入“预训练误差瓶颈”。
-   - 论文：使用 RRL 范式，直接拿 ImageNet 预训练的 ResNet，**全程冻结**，只输出通用视觉特征，把“理解物理含义”的任务交给下游 FC 层在 RL 中学习。
+- `2 动作 approach-only`
+- `RRL` 范式（ImageNet 特征 + 冻结骨干）
 
-2. **任务拆分不够彻底**
-   - 当前 Stage 1 的 success 已经不要求 lift，但 actor 仍输出 3 维动作。
+当前项目与论文相比，主要还差在 6 个地方：
 
-3. **相机几何仍与论文不同**
+1. **Reward 仍缺少“参考轨迹走廊”这一层全局几何先验**
+   - 当前主线 Reward 仍以局部中心线误差、局部门控和插入深度为主。
+   - 论文则显式利用 reference trajectory 引导 forklift 以“可插入的方式”接近托盘。
+
+2. **相机几何仍与论文不同**
    - 当前主线是单个 `60°` 俯视相机。
    - 论文更强调从侧边观察叉齿与托盘开口关系。
 
-4. **评估指标还没完全区分“真插入”和“推土机”**
-   - 当前日志里虽然有 `pallet_disp_xy_mean`，但还没有把“push-free success”提升为一等 KPI。
+3. **`approach -> commit -> insert` 还没有真正打通**
+   - 当前 `exp3 v1` 说明：我们已经不只是“看不见”，而是“能靠近、能对齐一些，但不会稳定 commit 到插入”。
+
+4. **`loading decision / lift` 仍未单独建模**
+   - 论文是 `approach policy` 和 `loading decision` 两阶段。
+   - 我们目前仍停留在先把 `approach` 打通的阶段。
+
+5. **过程诊断还不够细**
+   - `push-free` 指标已经补上，但还缺少能直接回答“卡在走廊、卡在 commit、还是卡在 insert”的过程指标。
+
+6. **domain randomization 范围仍较窄**
+   - 论文除了外观随机化，还对观测速度、动作执行等做扰动。
+   - 这部分对后续 sim2real 仍有借鉴价值。
 
 ---
 
@@ -189,15 +201,33 @@
 
 3. `pallet_disp_xy_mean / p95 / max`
 
-4. `err/lateral_near_success`
+4. `phase/frac_aligned`
 
-5. `err/yaw_deg_near_success`
+5. `phase/frac_inserted`
 
-6. `phase/frac_inserted`
+6. `phase/hold_counter_max`
 
-7. `phase/hold_counter_max`
+7. `diag/near_success_frac`
 
-8. `phase/frac_lifted`
+8. `err/lateral_near_success`
+
+9. `err/yaw_deg_near_success`
+
+10. `err/dist_front_mean`
+
+11. `milestone/hit_approach`
+
+12. 若启用 `3.x` 参考轨迹方案，增加：
+    - `traj/corridor_frac`
+    - `traj/commit_gate_mean`
+    - `traj/d_traj_mean`
+
+13. `phase/frac_lifted`
+
+说明：
+
+- `1~3` 是最终结果指标
+- `4~12` 是过程诊断指标，用于判断策略到底卡在 `approach`、`commit` 还是 `insert`
 
 ### 5.4 建议的“真成功”阈值
 
@@ -358,7 +388,7 @@
 
 ---
 
-## 11. 实验 3：重塑 Reward 函数，突破 16.5% 瓶颈 (当前最高优先级)
+## 11. 实验 3：Reward 重构主线 (已启动，需拆成 3.1 ~ 3.4)
 
 ### 假设 H3_Reward
 
@@ -366,26 +396,150 @@
 经过 2026-03-11 晚间的实验 1 和实验 2 对比，我们发现无论使用复杂的 MobileNetV3 坐标回归预训练，还是使用简单的 ResNet18 冻结通用特征 (RRL 范式)，最终的无碰撞成功率都死死卡在 **16.5%** 左右。
 这说明：**当前的瓶颈已经不在视觉感知端，而在于 RL 的探索策略和 Reward 函数的塑造。** 智能体在接近目标时，缺乏足够的引导来完成最后的“精准插入”动作。
 
-### 只改一个因素
+### 11.1 当前状态与判断修正
 
-在实验 2 (ResNet18 冻结 RRL 范式) 的基础上，只修改 `env.py` 中的 Reward 函数：
-1. **增加“保持对齐”奖励**：鼓励叉车在对准后稳定姿态，不要乱动。
-2. **强化“插入深度”奖励**：在最后插入阶段（`insert_depth` > 0），给予更强的梯度奖励，引导智能体勇敢向前。
-3. **微调“推托盘”惩罚**：寻找探索（允许轻微碰撞）与保守（严格防推）之间的最佳平衡点。
+最新运行中的 `exp3 reward shaping` 日志 `logs/20260312_100059_train_exp3_reward_shaping_rrl.log` 表明：
+
+- 到 `iteration 348` 左右，`push_free_success_rate_total` 仅约 `0.53%`
+- `push_free_insert_rate_total` 仅约 `0.60%`
+- `diag/pallet_disp_xy_mean` 仍约 `0.08m ~ 0.11m`
+- `err/lateral_near_success` 约 `0.14m`
+- `err/yaw_deg_near_success` 约 `8° ~ 9°`
+- `phase/frac_inserted` 基本仍接近 `0`
+
+这说明：
+
+- 当前 Reward v1 **不是完全无效**
+- 它确实让叉尖更常到达托盘前沿附近，也让 near-success 区域偶发出现
+- 但它还没有把“更靠近”稳定转化成“可插入、可保持、可复现的 push-free 成功”
+
+因此，**实验 3 不应继续作为一个“大包 Reward 实验”推进，而应拆成严格单因素的 `3.1 ~ 3.4`**。
+
+详细设计见：
+
+- `docs/0310-0312experiments/experiment_3x_reference_trajectory_reward_plan_20260312.md`
 
 ### 保持不变
 
 - 实验 1 确立的 2 动作 `approach-only` 策略
 - 实验 2 确立的 RRL 范式 (ResNet18 + ImageNet权重 + 全程冻结)
 
-### 验证指标
+### 11.2 实验 3.1：参考轨迹走廊替代远场距离带
 
-- `push_free_success_rate` (目标：突破 16.5%，冲击 30%+)
-- `err/lateral_near_success` 和 `err/yaw_deg_near_success` (观察对齐精度是否保持)
+#### 假设
 
-### 预期
+当前 Reward 的远场引导仍然过于局部，导致策略学会了“对齐一些”，却没有学会“沿可插入路径推进”。  
+如果引入类似论文中 reference trajectory 的“走廊先验”，`approach` 与后续 `commit` 会更顺。
 
-若 H3_Reward 成立，在更合理的奖励引导下，智能体应该能学会勇敢且精准地完成最后的插入动作，成功率将迎来新一轮的爆发。
+#### 只改一个因素
+
+- 用参考轨迹走廊 shaping 替代当前远场 `phi1`
+- 第一版采用 `clothoid-lite / trajectory-lite`，不强求严格数学 clothoid
+
+#### 保持不变
+
+- 当前 `2 动作 approach-only`
+- 当前 `RRL` 主线
+- 当前相机方案
+- 当前 success / hold 判据
+
+#### 验证指标
+
+- `phase/frac_aligned`
+- `err/dist_front_mean`
+- `milestone/hit_approach`
+- `traj/corridor_frac`（新增）
+- `traj/d_traj_mean`（新增）
+
+#### 决策规则
+
+- 若 `approach` 与进入走廊相关指标明显改善，再继续做 `实验 3.2`
+- 若几乎无改善，先排查轨迹几何与走廊宽度，而不是立即切相机
+
+### 11.3 实验 3.2：近场 commit 奖励
+
+#### 假设
+
+即使进入了走廊，智能体仍可能在托盘前沿犹豫不前。  
+如果在近场显式奖励 `dist_front` 下降与 `insert_norm` 上升，`insert` 会更容易破零。
+
+#### 只改一个因素
+
+- 在 `实验 3.1` 最佳配置上，只新增近场 `commit` 奖励
+
+#### 保持不变
+
+- 参考轨迹走廊
+- 当前相机与动作空间
+- 当前 success / hold 判据
+
+#### 验证指标
+
+- `phase/frac_inserted`
+- `push_free_insert_rate`
+- `err/dist_front_mean`
+- `traj/commit_gate_mean`（新增）
+
+#### 决策规则
+
+- 若 `insert` 仍完全不破零，说明当前主要问题仍是“看见了但不敢插”
+- 若 `insert` 破零但 `push_free` 不升，则进入 `实验 3.3`
+
+### 11.4 实验 3.3：条件化推盘惩罚
+
+#### 假设
+
+一旦 `commit` 打开，策略很容易再次回到“推着托盘走”的老问题。  
+如果把推盘惩罚改成“远场重、近场轻、死区再加重、但永远非零”的条件化惩罚，能够在探索与防 bulldozer 之间取得更好平衡。
+
+#### 只改一个因素
+
+- 只重构 `pen_pallet_push`
+
+#### 保持不变
+
+- `实验 3.1` 的轨迹走廊
+- `实验 3.2` 的近场 commit 奖励
+- 其他 success / hold 逻辑
+
+#### 验证指标
+
+- `push_free_insert_rate`
+- `push_free_success_rate`
+- `pallet_disp_xy_mean / p95`
+- 视频中的托盘位移
+
+#### 决策规则
+
+- 若插入率保住、位移下降，则条件化惩罚成立
+- 若插入再次消失，说明惩罚仍然过重
+
+### 11.5 实验 3.4：死区撤退 / 重试奖励
+
+#### 假设
+
+即使前 3 步都有效，策略仍可能卡在“浅插错位 -> 顶住 -> 不退不进”的死区。  
+如果显式奖励从死区退出并重试，最终 `hold` 成功率会更容易提升。
+
+#### 只改一个因素
+
+- 只新增死区撤退 / 重试奖励
+
+#### 保持不变
+
+- `实验 3.1 ~ 3.3` 最佳配置
+
+#### 验证指标
+
+- `diag/dead_zone_frac`（新增）
+- `diag/dead_zone_escape_frac`（新增）
+- `phase/hold_counter_max`
+- `push_free_success_rate`
+
+#### 决策规则
+
+- 若视频中开始出现“退一点再对准再插”的行为，且 `hold_counter_max` 提升，则该项成立
+- 若 `3.1 ~ 3.4` 都无明显帮助，再提高相机视角 ablation 的优先级
 
 ---
 
@@ -398,7 +552,7 @@
 
 ### 只改一个因素
 
-在最佳预训练 + 最佳 Stage 1 设置基础上，只比较相机方案：
+在 `实验 3.x` 的最佳 Reward 配置 + `2 动作 approach-only` + `RRL` 冻结骨干基础上，只比较相机方案：
 
 1. 当前单俯视相机
 2. 单个更低、更前的 fork-centric 相机
@@ -406,17 +560,19 @@
 
 ### 验证指标
 
-- 近场预训练误差
-- frozen RL 的 push-free 插入率
+- `push_free_insert_rate / push_free_success_rate`
+- `phase/frac_inserted`
+- `err/lateral_near_success / err/yaw_deg_near_success`
 - 视频中叉齿与插孔相对关系是否更清楚
 
 ### 决策规则
 
-- 若双侧或 fork-centric 明显提升，则进入主线替换。
+- 只有在 `实验 3.x` 分解后仍然卡住时，才提高本实验优先级
+- 若双侧或 fork-centric 明显提升，则进入主线替换
 
 ---
 
-## 14. 实验 5：按论文方式拆出 loading decision / lift
+## 13. 实验 5：按论文方式拆出 loading decision / lift
 
 ### 假设 H5
 
@@ -442,20 +598,22 @@
 
 ---
 
-## 15. 实验 6：只有在前面都稳定后，才做组合验证
+## 14. 实验 6：只有在前面都稳定后，才做组合验证
 
 ### 条件
 
-只有当下面 3 项都分别验证有效后，才组合：
+只有当下面 4 项都分别验证有效后，才组合：
 
 1. 2 动作 `approach-only` 有效
-2. 新预训练方案有效
-3. 新相机方案有效
+2. `实验 3.x` 中至少一项 Reward 主改动稳定有效
+3. 新相机方案有效（若做了视角 ablation）
+4. `loading decision / lift` 头有效
 
 ### 组合目标
 
 - 最佳相机
-- 最佳预训练
+- `RRL` 冻结骨干
+- 最佳 `3.x` Reward 配置
 - 2 动作 Stage 1
 - 单独 decision / lift 头
 
@@ -469,31 +627,31 @@
 
 ---
 
-## 14. 我对下一步最具体的建议
+## 15. 我对下一步最具体的建议
 
 按优先级，建议下一步只做下面 3 件事，不要同时乱改：
 
-### 建议 1：立刻做实验 3 (重塑 Reward 函数)
+### 建议 1：立刻做实验 3.1（参考轨迹走廊）
 
 原因：
-- 昨晚的实验证明，视觉特征已经足够支撑对齐，但最后插入动作缺乏引导。
-- 必须通过 Reward Shaping 打破 16.5% 的成功率天花板。
+- 最新 `exp3 v1` 已经证明，单纯“保持对齐 + 插入深度 + 推盘惩罚”的局部 shaping 不足以稳定打通插入。
+- 当前更缺的是“沿可插入路径接近”的全局几何先验。
 
-### 建议 2：全面拥抱 RRL 范式 (实验 2 的结论)
-
-原因：
-- 实验 2 已经证明了 RRL 范式（ResNet18 + ImageNet冻结）的极高效率和稳定性。
-- 后续所有实验都应基于此基座，不再浪费时间进行任务特定的坐标回归预训练。
-
-### 建议 3：暂缓特定任务预训练的数据收集
+### 建议 2：实验 3 必须严格按 `3.1 -> 3.2 -> 3.3 -> 3.4` 分拆
 
 原因：
-- 既然 RRL 范式已经跑通并追平了预训练方案，我们根本不需要去死磕“预训练 Y 误差 16cm”的问题。
-- 只有在 RRL 范式彻底失败后，我们才需要回到备用路线。
+- 现在最怕的不是 reward 太弱，而是一次改太多后无法判断到底哪一项在起作用。
+- 只有严格做单因素，后面的相机和 lift 决策实验才有解释力。
+
+### 建议 3：继续锁定 `RRL + 2 动作 approach-only` 为统一基座，暂缓无关分支
+
+原因：
+- 当前不应再回头扩张“任务特定预训练”路线。
+- 相机 ablation 与 `loading decision` 也应排在 `3.x` Reward 主线后面。
 
 ---
 
-## 15. 记录规范：后续如何持续迭代
+## 16. 记录规范：后续如何持续迭代
 
 后续每轮实验都必须新增一个独立 md，格式固定为：
 
@@ -519,11 +677,12 @@
 
 ---
 
-## 16. 一句话总结
+## 17. 一句话总结
 
 当前要想接近论文的成功路径，**不是死磕视觉预训练，而是先把问题拆对，并拥抱 RRL 范式**：
 
 1. **先把 approach-only 训练做干净**（已在实验 1 验证有效）
 2. **把“真成功”与“推土机假成功”区分开**（已在实验 0 验证有效）
 3. **彻底拥抱 RRL 范式**：直接使用冻结的 ImageNet 通用特征，把物理理解交给下游 RL（已在实验 2 验证有效，成功追平复杂预训练）。
-4. **死磕 Reward Shaping**：目前卡在 16.5% 的瓶颈，说明视觉已非短板，下一步必须在 RL 探索和最后插入阶段的奖励引导上做文章。
+4. **把 Reward 主线从“大包调参”升级为 `3.1 ~ 3.4` 分阶段路线**：先补参考轨迹走廊，再补近场 commit、条件化推盘惩罚和死区重试。
+5. **只有当 `3.x` 这条线仍失败时，再提高相机视角 ablation 的优先级**。
