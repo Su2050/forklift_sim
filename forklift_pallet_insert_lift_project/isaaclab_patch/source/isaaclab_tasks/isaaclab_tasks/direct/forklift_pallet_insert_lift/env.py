@@ -1137,35 +1137,11 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         return obs_dict
 
     def _get_rewards(self) -> torch.Tensor:
-        """S1.0k 三阶段势函数奖励（严格中心线几何 + 全局势函数 shaping）
-
-        核心改进（相对 S1.0j）：
-        ──────────────────────────────────────────────────────────
-        A. 严格中心线几何：y_err / yaw_err 基于托盘局部坐标轴，不再随距离变分母
-        B. 三阶段势函数 shaping：
-           Stage 1 (phi1): 距离带 [d1_min, d1_max] + 粗对齐
-           Stage 2 (phi2): 微调接近（带距离带门控 + 粗对齐门控）
-           Stage 3 (phi_ins): 插入深化（带严对齐门控）
-           + phi_lift: 举升（带插入门控 + 严对齐门控）
-        C. 全局 r_pot = gamma * phi_total_t - phi_total_{t-1}
-           → 原地抖动净亏损，后退自动扣分
-        D. action std 约束（配合 rsl_rl_ppo_cfg.py 修改）
-        ──────────────────────────────────────────────────────────
-
-        奖励结构（每 step 叠加）:
-          rew = r_pot                                      # 势函数 shaping
-               + pen_premature                              # 空举惩罚
-               + pen_dense                                  # 时间 + 动作L2 + 距离惩罚
-               + r_terminal                                 # 成功/超时终局奖励
-        """
+        """实验 4: 回归论文原生 Reward 体系 (Paper Native Reward)"""
         # ---- 从 PhysX view 刷新关节数据 ----
         # _get_rewards() 在 _get_observations() 之前调用，需要先刷新
         self._joint_pos[:] = self.robot.root_physx_view.get_dof_positions()
         self._joint_vel[:] = self.robot.root_physx_view.get_dof_velocities()
-
-        # ==================================================================
-        # S1.0k: 三阶段势函数 shaping + 严格中心线几何
-        # ==================================================================
 
         # ---- 基础量 ----
         root_pos = self.robot.data.root_pos_w
@@ -1174,6 +1150,14 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
 
         robot_yaw = _quat_to_yaw(self.robot.data.root_quat_w)               # (N,)
         pallet_yaw = _quat_to_yaw(self.pallet.data.root_quat_w)             # (N,)
+        
+        # 偏航误差（中心线平行度）
+        yaw_err = torch.atan2(
+            torch.sin(robot_yaw - pallet_yaw),
+            torch.cos(robot_yaw - pallet_yaw),
+        )
+        yaw_err_deg = torch.abs(yaw_err) * (180.0 / math.pi)
+        yaw_err_rad = torch.abs(yaw_err)
 
         # ---- 严格中心线几何 ----
         cp = torch.cos(pallet_yaw)
@@ -1187,23 +1171,12 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         y_err = torch.abs(y_signed)
 
         # S1.0U: fork tip 在 pallet center-line frame 中的横向误差
-        # tip 已在 L904 通过 _compute_fork_tip() 计算，直接复用。
         rel_tip_lat = tip[:, :2] - pallet_pos[:, :2]
         tip_y_signed = torch.sum(rel_tip_lat * v_lat, dim=-1)
         tip_y_err = torch.abs(tip_y_signed)
 
-        # 偏航误差（中心线平行度）
-        yaw_err = torch.atan2(
-            torch.sin(robot_yaw - pallet_yaw),
-            torch.cos(robot_yaw - pallet_yaw),
-        )
-        yaw_err_deg = torch.abs(yaw_err) * (180.0 / math.pi)
-        yaw_err_rad = torch.abs(yaw_err)
-
         # 举升
         lift_height = tip[:, 2] - self._fork_tip_z0
-        delta_lift = lift_height - self._last_lift_pos
-        self._last_lift_pos = lift_height.detach()
 
         # 沿托盘插入轴的标量坐标
         rel_tip = tip[:, :2] - pallet_pos[:, :2]
@@ -1213,30 +1186,120 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         dist_front = torch.clamp(s_front - s_tip, min=0.0)
         insert_depth = torch.clamp(s_tip - s_front, min=0.0)
         
-        # 新增 Z 轴对齐约束（防止隔空飞越作弊）
-        pallet_lift_height = pallet_pos[:, 2] - self.cfg.pallet_cfg.init_state.pos[2]
-        z_err = torch.abs(lift_height - pallet_lift_height)
-        valid_insert_z = z_err < self.cfg.max_insert_z_err
-        insert_depth = torch.where(valid_insert_z, insert_depth, torch.zeros_like(insert_depth))
-        
-        insert_norm = torch.clamp(insert_depth / (self.cfg.pallet_depth_m + 1e-6), 0.0, 1.0)
-        # S1.0L: Stage1/2 距离参考点改为 base（插入深度仍基于 tip）。
-        rel_base = root_pos[:, :2] - pallet_pos[:, :2]
-        s_base = torch.sum(rel_base * u_in, dim=-1)
-        dist_front_base = torch.clamp(s_front - s_base, min=0.0)
-        stage_dist_front = dist_front_base if self.cfg.stage_distance_ref == "base" else dist_front
-
         # 仍需 insert_depth 用于 _apply_action 安全制动
         self._last_insert_depth = insert_depth.detach()
 
-        # 2D 距离（用于连续距离惩罚）
-        d_xy = torch.sqrt(stage_dist_front ** 2 + y_err ** 2)
-
-        # ---- 实验 3.1: 远场参考轨迹走廊 (替代 phi1) ----
-        d_traj, yaw_traj_err_deg, s_traj_norm = self._query_reference_trajectory()
+        # ---- 实验 4: 论文原生 Reward 计算 ----
         
-        phi_traj_center = (
-            torch.exp(-(d_traj / self.cfg.sigma_traj_d) ** 2) *
+        # 1. 轨迹相关变量 (复用 3.1 的轨迹查询)
+        d_traj, yaw_traj_err_deg, _ = self._query_reference_trajectory()
+        yaw_traj_err_rad = yaw_traj_err_deg * math.pi / 180.0
+        
+        # 2. 正向奖励 R+ (Eq.6)
+        eps = self.cfg.paper_eps
+        r_dist = 1.0 / (dist_front + eps)
+        r_traj_d = 1.0 / (d_traj + eps)
+        r_traj_yaw = 1.0 / (yaw_traj_err_rad + eps)
+        
+        # rg: 到达奖励 (距离 < 0.1m 且姿态大致对准)
+        rg = ((dist_front < self.cfg.paper_rg_dist_thresh) & 
+              (tip_y_err < 0.15) & 
+              (yaw_err_deg < 10.0)).float()
+              
+        R_plus = (
+            self.cfg.alpha_1 * r_dist +
+            self.cfg.alpha_2 * r_traj_d +
+            self.cfg.alpha_3 * r_traj_yaw +
+            self.cfg.alpha_4 * rg
+        )
+        
+        # 3. 负向惩罚 R- (Eq.7)
+        # rp: 托盘移动惩罚
+        pallet_vel_xy = torch.norm(self.pallet.data.root_vel_w[:, :2], dim=-1)
+        rp = torch.where(pallet_vel_xy > self.cfg.paper_pallet_vel_thresh, -1.0, 0.0)
+        
+        # rv: 叉车超速惩罚
+        fork_vel_xy = torch.norm(self.robot.data.root_vel_w[:, :2], dim=-1)
+        rv = torch.where(
+            fork_vel_xy > self.cfg.paper_fork_vel_thresh,
+            -(fork_vel_xy - self.cfg.paper_fork_vel_thresh) ** 2,
+            0.0
+        )
+        
+        # ra: 动作突变惩罚
+        ra = -torch.norm(self.actions - self.previous_actions, dim=-1) ** 2
+        
+        # rini: 初始停滞惩罚
+        rini = torch.where(
+            (fork_vel_xy < self.cfg.paper_ini_vel_thresh) & (dist_front > self.cfg.paper_ini_dist_thresh),
+            -1.0,
+            0.0
+        )
+        
+        R_minus = (
+            self.cfg.alpha_5 * rp +
+            self.cfg.alpha_6 * rv +
+            self.cfg.alpha_7 * ra +
+            self.cfg.alpha_8 * rini
+        )
+        
+        # 4. 总奖励
+        rew = R_plus + R_minus
+        
+        # 清除首步标记
+        self._is_first_step[:] = False
+
+        # ==================================================================
+        # 状态更新与日志输出
+        # ==================================================================
+        
+        # 更新持有时长计数器 (用于 success 判断)
+        insert_norm = torch.clamp(insert_depth / (self.cfg.pallet_depth_m + 1e-6), 0.0, 1.0)
+        is_inserted = insert_norm > 0.8
+        is_aligned = (y_err < 0.1) & (yaw_err_deg < 5.0)
+        is_lifted = lift_height > 0.05
+        
+        hold_cond = is_inserted & is_aligned & is_lifted
+        self._hold_counter = torch.where(hold_cond, self._hold_counter + 1, 0.0)
+        
+        # 记录 episode 成功率
+        success = self._hold_counter >= self._hold_steps
+        
+        # 记录 push-free success (成功且托盘位移小)
+        pallet_init_pos_xy = torch.tensor(self.cfg.pallet_cfg.init_state.pos[:2], device=self.device)
+        pallet_disp_xy = torch.norm(pallet_pos[:, :2] - pallet_init_pos_xy, dim=-1)
+        push_free = pallet_disp_xy < 0.08
+        
+        if "log" not in self.extras:
+            self.extras["log"] = {}
+
+        # 实验 4 日志
+        self.extras["log"]["paper_reward/R_plus"] = R_plus.mean()
+        self.extras["log"]["paper_reward/R_minus"] = R_minus.mean()
+        self.extras["log"]["paper_reward/r_dist"] = r_dist.mean()
+        self.extras["log"]["paper_reward/r_traj_d"] = r_traj_d.mean()
+        self.extras["log"]["paper_reward/r_traj_yaw"] = r_traj_yaw.mean()
+        self.extras["log"]["paper_reward/rg"] = rg.mean()
+        self.extras["log"]["paper_reward/rp"] = rp.mean()
+        self.extras["log"]["paper_reward/rv"] = rv.mean()
+        self.extras["log"]["paper_reward/ra"] = ra.mean()
+        self.extras["log"]["paper_reward/rini"] = rini.mean()
+
+        # 核心诊断指标
+        self.extras["log"]["err/dist_front_mean"] = dist_front.mean()
+        self.extras["log"]["err/lateral_mean"] = y_err.mean()
+        self.extras["log"]["err/yaw_deg_mean"] = yaw_err_deg.mean()
+        
+        self.extras["log"]["diag/pallet_disp_xy_mean"] = pallet_disp_xy.mean()
+        
+        self.extras["log"]["phase/frac_inserted"] = is_inserted.float().mean()
+        self.extras["log"]["phase/frac_aligned"] = is_aligned.float().mean()
+        
+        # 轨迹指标
+        self.extras["log"]["traj/d_traj_mean"] = d_traj.mean()
+        self.extras["log"]["traj/yaw_traj_deg_mean"] = yaw_traj_err_deg.mean()
+
+        return rew
             torch.exp(-(yaw_traj_err_deg / self.cfg.sigma_traj_yaw_deg) ** 2)
         )
         phi_traj_progress = s_traj_norm * phi_traj_center
@@ -1351,7 +1414,7 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         # 惩罚在未插稳前推走托盘的行为
         pallet_init_pos_xy = torch.tensor(self.cfg.pallet_cfg.init_state.pos[:2], device=self.device)
         pallet_disp_xy = torch.norm(pallet_pos[:, :2] - pallet_init_pos_xy, dim=-1)
-        push_excess = torch.clamp(pallet_disp_xy - self.cfg.pallet_push_deadband_m, min=0.0)
+        push_excess = torch.clamp(pallet_disp_xy - 0.08, min=0.0)
         
         # ---- 实验 3.2: 近场 commit 奖励 ----
         # 提前计算 gate_commit，因为 3.3 的推盘惩罚也需要用到它
@@ -1367,12 +1430,7 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         # 为了保持逻辑清晰，我们先在这里计算一个临时的 dead_zone 标志
         dead_zone_flag = (insert_norm > self.cfg.dead_zone_insert_thresh) & (y_err > self.cfg.dead_zone_lat_thresh)
         
-        k_push_eff = (
-            self.cfg.k_push_far * (1.0 - w_push_relax)
-            + self.cfg.k_push_near * w_push_relax
-            + self.cfg.k_push_deadzone_bonus * dead_zone_flag.float()
-        )
-        pen_pallet_push = -k_push_eff * push_excess
+        pen_pallet_push = torch.zeros_like(push_excess)
 
         # S1.0U: tip alignment flags (used by milestones AND hold counter below).
         is_near = stage_dist_front < self.cfg.tip_align_near_dist
@@ -1901,7 +1959,7 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         pitch = torch.asin(torch.clamp(sinp, -1.0, 1.0))
         tipped = (torch.abs(roll) > self.cfg.max_roll_pitch_rad) | (torch.abs(pitch) > self.cfg.max_roll_pitch_rad)
 
-        terminated = tipped | success | self._early_stop_fly | self._early_stop_stall | self._early_stop_dz_stuck
+        terminated = tipped | success
         return terminated, time_out
 
     # ---------------------------
