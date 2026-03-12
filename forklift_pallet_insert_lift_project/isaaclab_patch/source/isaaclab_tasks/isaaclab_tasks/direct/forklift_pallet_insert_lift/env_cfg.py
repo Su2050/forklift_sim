@@ -196,7 +196,7 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     # S1.0L: 放宽 Stage3 对齐门控，避免 gate 过紧导致插入信号过弱。
     y_gate3: float = 0.18    # Stage3 严对齐门控 (m)
     yaw_gate3: float = 12.0  # Stage3 严对齐门控 (deg)
-    k_ins: float = 18.0      # 插入势函数强度
+    k_ins: float = 30.0      # 插入势函数强度 (从 18.0 增加到 30.0，强力引导最后插入)
     # S1.0L: 默认不再用 (1-w3) 压制 phi1/phi2，保留开关便于回滚。
     suppress_preinsert_phi_with_w3: bool = False
 
@@ -240,7 +240,7 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     rew_milestone_gate_align: float = 2.5      # y<0.15m & yaw<8° & approach 已触发
 
     # S1.0O-B1: 增大 sigma + k，让 lateral 0.2~0.4m 区间梯度更强（S1.0N: 0.1/0.15/8.0）
-    k_hold_align: float = 0.3          # delta shaping 权重
+    k_hold_align: float = 1.0          # delta shaping 权重 (从 0.3 增加到 1.0，强力鼓励保持对齐)
     hold_align_sigma_y: float = 0.25   # 横向尺度 (m)
     hold_align_sigma_yaw: float = 8.0  # 偏航尺度 (deg) — A3B1C2_v2: 12→8 收紧 yaw 梯度
 
@@ -335,10 +335,10 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     tip_align_near_dist: float = 2.2       # tip constraint only active below this dist
 
     # ---- S1.0zB: Pallet displacement penalty (Exp-A2) ----
-    k_pallet_push_pen: float = 1.0          # 推盘惩罚权重 (Exp-A2: 3.0 -> 1.0; 视觉微调恢复为 3.0 -> 再次回调为 1.0)
+    k_pallet_push_pen: float = 0.5          # 推盘惩罚权重 (从 1.0 降低到 0.5，允许更多的探索性碰撞)
     pallet_push_insert_gate: float = 0.15   # insert_norm < 此值时全额惩罚 (视觉微调: 0.15 -> 0.80 -> 再次回调为 0.15, 恢复浅插入豁免)
     pallet_push_insert_ramp: float = 0.15   # 惩罚从 gate 到 gate+ramp 线性衰减
-    pallet_push_deadband_m: float = 0.05    # 5cm 死区 (Exp-A2: 0.02 -> 0.05，允许物理微振)
+    pallet_push_deadband_m: float = 0.08    # 死区 (从 0.05 增加到 0.08，允许物理微振和轻微推挤)
 
     # termination thresholds
     max_roll_pitch_rad: float = 0.45  # ~25 deg
