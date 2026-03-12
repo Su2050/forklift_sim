@@ -940,3 +940,23 @@ r_escape =
 3. 然后才是 `push_free_success` 往上走
 
 这才是最符合当前系统状态的推进顺序。
+
+---
+
+## 19. 经验教训与避坑指南 (Lessons Learned)
+
+### 19.1 距离计算的参考点混淆 (2026-03-12)
+
+在实现 `3.2` 的近场门控 (`gate_commit`) 时，曾犯过一个隐蔽的逻辑错误：
+
+**错误描述**：
+直接使用了 `stage_dist_front` 来判断是否进入近场（`< 1.0m`）。但在 `env_cfg.py` 中，`stage_distance_ref` 被配置为 `"base"`。这意味着 `stage_dist_front` 计算的是**叉车中心 (base)** 到托盘前沿的距离，而不是**叉尖 (tip)** 的距离。
+
+**导致后果**：
+叉车中心到叉尖有约 1.8m 的物理偏移。当叉尖已经碰到托盘时，`stage_dist_front` 仍然是 1.8m，永远大于门控阈值 1.0m。这导致 `gate_commit` 永远为 0，精心设计的近场 commit 奖励（`r_commit_front` 和 `r_commit_insert`）完全失效。
+
+**修复方案**：
+在 `env.py` 中，针对近场 commit 逻辑，必须**强制使用基于叉尖 (tip) 的真实物理距离** (`dist_front` 和 `true_dist_front_reset`)，而不能盲目复用为 Stage 1 远场设计的 `stage_dist_front`。
+
+**核心教训**：
+在设计与“物理接触/近场”强相关的 Reward 门控时，**必须绝对明确距离参考点是 base 还是 tip**。远场引导可以用 base，但近场交互必须用 tip。不要过度信任和复用已有的距离变量，使用前务必确认其物理语义。
