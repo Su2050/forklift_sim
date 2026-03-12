@@ -197,6 +197,9 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         # S1.0Q: 死区撤退 shaping 状态量
         self._prev_insert_norm = torch.zeros((self.num_envs,), device=self.device)
         self._prev_in_dead_zone = torch.zeros((self.num_envs,), dtype=torch.bool, device=self.device)
+        
+        # 实验 3.2: 近场 commit 状态量
+        self._prev_dist_front = torch.zeros((self.num_envs,), device=self.device)
         # S1.0Q-A2v2: 撤退窗口缓冲（环形缓冲区）
         self._insert_norm_window = torch.zeros(
             (self.num_envs, self.cfg.retreat_window_size), device=self.device)
@@ -1567,6 +1570,24 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         r_lift_progress = torch.where(self._is_first_step, torch.zeros_like(r_lift_progress), r_lift_progress)
         self._prev_phi_lift_progress = phi_lift_progress_gated.detach()
 
+        # ---- 实验 3.2: 近场 commit 奖励 ----
+        gate_commit = (
+            smoothstep((self.cfg.d_commit_open - stage_dist_front) / self.cfg.d_commit_open) *
+            torch.exp(-(tip_y_err / self.cfg.sigma_commit_tip) ** 2) *
+            torch.exp(-(yaw_err_deg / self.cfg.sigma_commit_yaw) ** 2)
+        )
+        
+        delta_front = torch.clamp(self._prev_dist_front - stage_dist_front, min=0.0, max=self.cfg.delta_front_clip)
+        r_commit_front = self.cfg.k_commit_front * delta_front * gate_commit
+        r_commit_front = torch.where(self._is_first_step, torch.zeros_like(r_commit_front), r_commit_front)
+        
+        delta_insert = torch.clamp(insert_norm - self._prev_insert_norm, min=0.0, max=self.cfg.delta_insert_clip)
+        r_commit_insert = self.cfg.k_commit_insert * delta_insert * gate_commit
+        r_commit_insert = torch.where(self._is_first_step, torch.zeros_like(r_commit_insert), r_commit_insert)
+        
+        self._prev_dist_front = stage_dist_front.detach()
+        self._gate_commit = gate_commit.detach()
+
         # ---- S1.0Q-A1: 深插死区惩罚 ----
         dead_zone = (insert_norm > self.cfg.dead_zone_insert_thresh) & \
                     (y_err > self.cfg.dead_zone_lat_thresh)
@@ -1644,7 +1665,8 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
                + r_hold_align + r_lift_progress + early_stop_penalty
                + pen_dead_zone + r_retreat + r_lat_fine
                + r_far_lat_fix + pen_global_stall
-               + pen_tip_proximity + pen_pallet_push + r_stay_still)  # S1.0zB + S1.0U + 防作弊修复
+               + pen_tip_proximity + pen_pallet_push + r_stay_still
+               + r_commit_front + r_commit_insert)  # 实验 3.2: 近场 commit 奖励
 
         # 清除首步标记
         self._is_first_step[:] = False
@@ -1681,6 +1703,11 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self.extras["log"]["s0/pen_global_stall"] = pen_global_stall.mean()
         self.extras["log"]["s0/r_stay_still"] = r_stay_still.mean()
         self.extras["log"]["s0/pen_pallet_push"] = pen_pallet_push.mean()
+        
+        # 实验 3.2: 近场 commit 奖励日志
+        self.extras["log"]["reward/r_commit_front"] = r_commit_front.mean()
+        self.extras["log"]["reward/r_commit_insert"] = r_commit_insert.mean()
+        self.extras["log"]["traj/commit_gate_mean"] = self._gate_commit.mean()
 
         # 门控权重
         self.extras["log"]["s0/w_band"] = w_band.mean()
@@ -1908,6 +1935,10 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self._prev_insert_norm[env_ids] = 0.0
         self._prev_in_dead_zone[env_ids] = False
         self._prev_phi_lat[env_ids] = 0.0
+        
+        # 实验 3.2: 近场 commit 状态量
+        self._prev_dist_front[env_ids] = dist_front_reset.detach()
+        
         # S1.0S Phase-2: 举升里程碑清零
         self._milestone_lift_10cm[env_ids] = False
         self._milestone_lift_20cm[env_ids] = False

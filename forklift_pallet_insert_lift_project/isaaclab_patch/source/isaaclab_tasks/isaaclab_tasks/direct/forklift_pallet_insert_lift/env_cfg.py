@@ -179,6 +179,15 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     k_traj_center: float = 4.0         # 走廊居中奖励强度
     k_traj_progress: float = 6.0       # 沿轨迹推进奖励强度
 
+    # ---- 实验 3.2: 近场 commit 奖励 ----
+    d_commit_open: float = 1.0         # 开启 commit 奖励的距离门槛
+    sigma_commit_tip: float = 0.12     # 叉尖横向对齐要求
+    sigma_commit_yaw: float = 10.0     # 偏航对齐要求
+    delta_front_clip: float = 0.05     # 单步前进距离限幅
+    delta_insert_clip: float = 0.03    # 单步插入深度限幅
+    k_commit_front: float = 20.0       # 鼓励接近奖励强度
+    k_commit_insert: float = 30.0      # 鼓励插入奖励强度
+
     # Stage 1: 距离带 + 粗对齐
     # S1.0L: 距离参考点改为 base（root），插入深度仍使用 tip。
     stage_distance_ref: str = "base"

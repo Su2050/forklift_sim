@@ -7,7 +7,7 @@ LOG_TYPE="train"
 # 集中算力，环境数从 256 进一步降低到 128，因为在 GB10 上 256 跑了 40 分钟后依然 OOM
 NUM_ENVS="128"
 MAX_ITERATIONS="2000"
-RUN_NAME="exp3_1_trajectory_corridor_rrl"
+RUN_NAME="exp3_2_near_field_commit_rrl"
 
 mkdir -p "${PROJECT_ROOT}/logs"
 BEIJING_TS="$(TZ=Asia/Shanghai date +%Y%m%d_%H%M%S)"
