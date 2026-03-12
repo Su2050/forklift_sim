@@ -1261,12 +1261,12 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         # ra: 动作突变惩罚
         ra = -torch.norm(self.actions - self.previous_actions, dim=-1) ** 2
         
-                # rini: 初始停滞惩罚
-                rini = torch.where(
-                    (fork_vel_xy < self.cfg.paper_ini_vel_thresh) & (dist_center > self.cfg.paper_ini_dist_thresh),
-                    -1.0,
-                    0.0
-                )
+        # rini: 初始停滞惩罚
+        rini = torch.where(
+            (fork_vel_xy < self.cfg.paper_ini_vel_thresh) & (dist_center > self.cfg.paper_ini_dist_thresh),
+            -1.0,
+            0.0
+        )
         
         R_minus = (
             self.cfg.alpha_5 * rp +
