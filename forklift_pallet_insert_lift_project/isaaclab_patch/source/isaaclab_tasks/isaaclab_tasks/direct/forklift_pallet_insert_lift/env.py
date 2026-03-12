@@ -1572,12 +1572,12 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
 
         # ---- 实验 3.2: 近场 commit 奖励 ----
         gate_commit = (
-            smoothstep((self.cfg.d_commit_open - stage_dist_front) / self.cfg.d_commit_open) *
+            smoothstep((self.cfg.d_commit_open - dist_front) / self.cfg.d_commit_open) *
             torch.exp(-(tip_y_err / self.cfg.sigma_commit_tip) ** 2) *
             torch.exp(-(yaw_err_deg / self.cfg.sigma_commit_yaw) ** 2)
         )
         
-        delta_front = torch.clamp(self._prev_dist_front - stage_dist_front, min=0.0, max=self.cfg.delta_front_clip)
+        delta_front = torch.clamp(self._prev_dist_front - dist_front, min=0.0, max=self.cfg.delta_front_clip)
         r_commit_front = self.cfg.k_commit_front * delta_front * gate_commit
         r_commit_front = torch.where(self._is_first_step, torch.zeros_like(r_commit_front), r_commit_front)
         
@@ -1585,7 +1585,7 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         r_commit_insert = self.cfg.k_commit_insert * delta_insert * gate_commit
         r_commit_insert = torch.where(self._is_first_step, torch.zeros_like(r_commit_insert), r_commit_insert)
         
-        self._prev_dist_front = stage_dist_front.detach()
+        self._prev_dist_front = dist_front.detach()
         self._gate_commit = gate_commit.detach()
 
         # ---- S1.0Q-A1: 深插死区惩罚 ----
@@ -2021,19 +2021,23 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         rel_base_reset = pos[:, :2] - pallet_pos_reset
         s_base_reset = torch.sum(rel_base_reset * u_in_reset, dim=-1)
         s_front_reset = -0.5 * self.cfg.pallet_depth_m
+        
+        # 始终计算真实的叉尖距离，用于实验 3.2 的 commit 奖励
+        cos_yaw_reset = torch.cos(yaw.squeeze(-1))
+        sin_yaw_reset = torch.sin(yaw.squeeze(-1))
+        tip_x_reset = pos[:, 0] + self._fork_forward_offset * cos_yaw_reset
+        tip_y_reset = pos[:, 1] + self._fork_forward_offset * sin_yaw_reset
+        rel_tip_reset = torch.stack([tip_x_reset, tip_y_reset], dim=-1) - pallet_pos_reset
+        s_tip_reset = torch.sum(rel_tip_reset * u_in_reset, dim=-1)
+        true_dist_front_reset = torch.clamp(s_front_reset - s_tip_reset, min=0.0)
+        
         if self.cfg.stage_distance_ref == "base":
             dist_front_reset = torch.clamp(s_front_reset - s_base_reset, min=0.0)
         else:
-            cos_yaw_reset = torch.cos(yaw.squeeze(-1))
-            sin_yaw_reset = torch.sin(yaw.squeeze(-1))
-            tip_x_reset = pos[:, 0] + self._fork_forward_offset * cos_yaw_reset
-            tip_y_reset = pos[:, 1] + self._fork_forward_offset * sin_yaw_reset
-            rel_tip_reset = torch.stack([tip_x_reset, tip_y_reset], dim=-1) - pallet_pos_reset
-            s_tip_reset = torch.sum(rel_tip_reset * u_in_reset, dim=-1)
-            dist_front_reset = torch.clamp(s_front_reset - s_tip_reset, min=0.0)
+            dist_front_reset = true_dist_front_reset
 
-        # 实验 3.2: 近场 commit 状态量初始化
-        self._prev_dist_front[env_ids] = dist_front_reset.detach()
+        # 实验 3.2: 近场 commit 状态量初始化 (使用真实的叉尖距离)
+        self._prev_dist_front[env_ids] = true_dist_front_reset.detach()
 
         # 计算 phi1 初始值
         e_band_reset = torch.where(
