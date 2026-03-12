@@ -4,8 +4,8 @@ set -euo pipefail
 PROJECT_ROOT="/home/uniubi/projects/forklift_sim"
 ISAACLAB_DIR="${PROJECT_ROOT}/IsaacLab"
 LOG_TYPE="train"
-# 集中算力，环境数从 256 进一步降低到 128，因为在 GB10 上 256 跑了 40 分钟后依然 OOM
-NUM_ENVS="128"
+# 集中算力，环境数从 128 进一步降低到 64，因为在 GB10 上 128 跑了 20 分钟后依然 OOM
+NUM_ENVS="64"
 MAX_ITERATIONS="2000"
 RUN_NAME="exp3_3_conditional_push_penalty_rrl"
 
