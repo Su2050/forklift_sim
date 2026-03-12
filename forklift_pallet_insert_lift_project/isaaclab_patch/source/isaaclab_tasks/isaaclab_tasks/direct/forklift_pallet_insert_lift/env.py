@@ -1936,9 +1936,6 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self._prev_in_dead_zone[env_ids] = False
         self._prev_phi_lat[env_ids] = 0.0
         
-        # 实验 3.2: 近场 commit 状态量
-        self._prev_dist_front[env_ids] = dist_front_reset.detach()
-        
         # S1.0S Phase-2: 举升里程碑清零
         self._milestone_lift_10cm[env_ids] = False
         self._milestone_lift_20cm[env_ids] = False
@@ -2034,6 +2031,9 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
             rel_tip_reset = torch.stack([tip_x_reset, tip_y_reset], dim=-1) - pallet_pos_reset
             s_tip_reset = torch.sum(rel_tip_reset * u_in_reset, dim=-1)
             dist_front_reset = torch.clamp(s_front_reset - s_tip_reset, min=0.0)
+
+        # 实验 3.2: 近场 commit 状态量初始化
+        self._prev_dist_front[env_ids] = dist_front_reset.detach()
 
         # 计算 phi1 初始值
         e_band_reset = torch.where(
