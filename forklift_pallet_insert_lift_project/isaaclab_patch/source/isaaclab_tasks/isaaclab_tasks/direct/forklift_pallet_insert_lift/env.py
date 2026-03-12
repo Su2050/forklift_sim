@@ -1352,10 +1352,19 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         pallet_init_pos_xy = torch.tensor(self.cfg.pallet_cfg.init_state.pos[:2], device=self.device)
         pallet_disp_xy = torch.norm(pallet_pos[:, :2] - pallet_init_pos_xy, dim=-1)
         push_excess = torch.clamp(pallet_disp_xy - self.cfg.pallet_push_deadband_m, min=0.0)
-        push_gate = 1.0 - smoothstep(
-            (insert_norm - self.cfg.pallet_push_insert_gate) / self.cfg.pallet_push_insert_ramp
+        
+        # 实验 3.3: 条件化推盘惩罚
+        w_push_relax = gate_commit
+        # 注意：这里需要用到 dead_zone，但 dead_zone 是在下面计算的。
+        # 为了保持逻辑清晰，我们先在这里计算一个临时的 dead_zone 标志
+        dead_zone_flag = (insert_norm > self.cfg.dead_zone_insert_thresh) & (y_err > self.cfg.dead_zone_lat_thresh)
+        
+        k_push_eff = (
+            self.cfg.k_push_far * (1.0 - w_push_relax)
+            + self.cfg.k_push_near * w_push_relax
+            + self.cfg.k_push_deadzone_bonus * dead_zone_flag.float()
         )
-        pen_pallet_push = -self.cfg.k_pallet_push_pen * push_gate * push_excess
+        pen_pallet_push = -k_push_eff * push_excess
 
         # S1.0U: tip alignment flags (used by milestones AND hold counter below).
         is_near = stage_dist_front < self.cfg.tip_align_near_dist
@@ -1702,7 +1711,9 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self.extras["log"]["s0/r_far_lat_fix"] = r_far_lat_fix.mean()
         self.extras["log"]["s0/pen_global_stall"] = pen_global_stall.mean()
         self.extras["log"]["s0/r_stay_still"] = r_stay_still.mean()
-        self.extras["log"]["s0/pen_pallet_push"] = pen_pallet_push.mean()
+        
+        # 实验 3.3: 条件化推盘惩罚日志 (原名 s0/pen_pallet_push)
+        self.extras["log"]["reward/pen_push_cond"] = pen_pallet_push.mean()
         
         # 实验 3.2: 近场 commit 奖励日志
         self.extras["log"]["reward/r_commit_front"] = r_commit_front.mean()

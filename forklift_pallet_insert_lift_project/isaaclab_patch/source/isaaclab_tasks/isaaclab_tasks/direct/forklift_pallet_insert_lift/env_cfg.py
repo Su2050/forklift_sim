@@ -354,11 +354,11 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     tip_align_exit_m: float = 0.16         # Schmitt exit: tip_y_err > this breaks hold
     tip_align_near_dist: float = 2.2       # tip constraint only active below this dist
 
-    # ---- S1.0zB: Pallet displacement penalty (Exp-A2) ----
-    k_pallet_push_pen: float = 0.5          # 推盘惩罚权重 (从 1.0 降低到 0.5，允许更多的探索性碰撞)
-    pallet_push_insert_gate: float = 0.15   # insert_norm < 此值时全额惩罚 (视觉微调: 0.15 -> 0.80 -> 再次回调为 0.15, 恢复浅插入豁免)
-    pallet_push_insert_ramp: float = 0.15   # 惩罚从 gate 到 gate+ramp 线性衰减
-    pallet_push_deadband_m: float = 0.08    # 死区 (从 0.05 增加到 0.08，允许物理微振和轻微推挤)
+    # ---- 实验 3.3: 条件化推盘惩罚 (Conditional Pallet Push Penalty) ----
+    k_push_far: float = 1.0                # 远场（未触发 commit 时）重罚推盘
+    k_push_near: float = 0.35              # 近场（触发 commit 时）轻罚推盘，允许探索
+    k_push_deadzone_bonus: float = 0.6     # 死区（插歪了还推）额外加重惩罚
+    pallet_push_deadband_m: float = 0.08   # 死区，允许物理微振和极轻微推挤
 
     # termination thresholds
     max_roll_pitch_rad: float = 0.45  # ~25 deg
