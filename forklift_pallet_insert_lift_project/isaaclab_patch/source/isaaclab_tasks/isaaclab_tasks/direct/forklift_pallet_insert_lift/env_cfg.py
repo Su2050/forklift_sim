@@ -169,6 +169,16 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     # S1.0L: 纯差分 shaping，避免 gamma<1 在慢变化势函数上形成负常数底噪。
     gamma: float = 1.0
 
+    # ---- 实验 3.1: 参考轨迹走廊 (Trajectory-lite) ----
+    traj_pre_dist_m: float = 1.2       # 预对位点距离 (m)
+    traj_ctrl_start_m: float = 0.8     # Bézier 起点切线长度 (m)
+    traj_ctrl_goal_m: float = 1.0      # Bézier 终点切线长度 (m)
+    traj_num_samples: int = 21         # 轨迹离散点数
+    sigma_traj_d: float = 0.35         # 轨迹走廊宽度 (m)
+    sigma_traj_yaw_deg: float = 15.0   # 轨迹切线偏航尺度 (deg)
+    k_traj_center: float = 4.0         # 走廊居中奖励强度
+    k_traj_progress: float = 6.0       # 沿轨迹推进奖励强度
+
     # Stage 1: 距离带 + 粗对齐
     # S1.0L: 距离参考点改为 base（root），插入深度仍使用 tip。
     stage_distance_ref: str = "base"
@@ -178,7 +188,8 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     # S1.0M: 收紧对齐尺度，增大 alignment 在 E1/E2 中的权重。
     y_scale1: float = 0.15   # S1.0M: 0.25→0.15，lateral 在 E1 中权重 1.0→1.67
     yaw_scale1: float = 10.0  # S1.0M: 15→10，yaw 在 E1 中权重 0.5→0.75
-    k_phi1: float = 6.0      # Stage1 势函数强度
+    # 实验 3.1: 用 phi_traj 替代 phi1，将 k_phi1 置 0
+    k_phi1: float = 0.0      # Stage1 势函数强度
 
     # Stage 2: 微调接近（从距离带推到口前）
     d2_scale: float = 1.0    # Stage2 前向距离尺度 (m)

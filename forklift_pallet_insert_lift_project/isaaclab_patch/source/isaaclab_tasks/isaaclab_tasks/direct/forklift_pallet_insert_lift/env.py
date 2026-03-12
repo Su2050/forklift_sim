@@ -216,6 +216,12 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self._global_stall_counter = torch.zeros((self.num_envs,), dtype=torch.int32, device=self.device)
         self._prev_phi_total_stall = torch.zeros((self.num_envs,), device=self.device)
 
+        # ---- 实验 3.1: 参考轨迹走廊 (Trajectory-lite) ----
+        self._traj_pts = torch.zeros((self.num_envs, self.cfg.traj_num_samples, 2), device=self.device)
+        self._traj_tangents = torch.zeros((self.num_envs, self.cfg.traj_num_samples, 2), device=self.device)
+        self._traj_s_norm = torch.zeros((self.num_envs, self.cfg.traj_num_samples), device=self.device)
+        self._prev_phi_traj = torch.zeros((self.num_envs,), device=self.device)
+
         # S1.0z: Episode 级别成功率统计
         self._ep_success_count = 0
         self._ep_total_count = 0
@@ -791,6 +797,105 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
 
         return torch.stack([tip_x, tip_y, tip_z], dim=-1)
 
+    # ==========================================================================
+    # 实验 3.1: 参考轨迹走廊 (Trajectory-lite)
+    # ==========================================================================
+    def _build_reference_trajectory(self, env_ids: torch.Tensor):
+        """在 reset 时为每个 env 生成并缓存参考轨迹。
+        使用一段三次 Bézier 曲线连接起点和预对位点，再接一段直线进入托盘。
+        """
+        if len(env_ids) == 0:
+            return
+
+        # 1. 获取起点位姿
+        p0 = self.robot.data.root_pos_w[env_ids, :2]  # (M, 2)
+        yaw0 = _quat_to_yaw(self.robot.data.root_quat_w[env_ids])  # (M,)
+        h0 = torch.stack([torch.cos(yaw0), torch.sin(yaw0)], dim=-1)  # (M, 2)
+
+        # 2. 获取托盘位姿与目标点
+        pallet_pos = self.pallet.data.root_pos_w[env_ids, :2]  # (M, 2)
+        pallet_yaw = _quat_to_yaw(self.pallet.data.root_quat_w[env_ids])  # (M,)
+        u_in = torch.stack([torch.cos(pallet_yaw), torch.sin(pallet_yaw)], dim=-1)  # (M, 2)
+
+        s_front = -0.5 * self.cfg.pallet_depth_m
+        p_goal = pallet_pos + s_front * u_in  # 托盘前沿中心点
+        p_pre = pallet_pos + (s_front - self.cfg.traj_pre_dist_m) * u_in  # 预对位点
+
+        # 3. 构造三次 Bézier 控制点 (M, 4, 2)
+        B0 = p0
+        B1 = p0 + self.cfg.traj_ctrl_start_m * h0
+        B2 = p_pre - self.cfg.traj_ctrl_goal_m * u_in
+        B3 = p_pre
+
+        # 4. 离散化轨迹
+        num_samples = self.cfg.traj_num_samples
+        # 预先分配采样点，前 70% 用于 Bézier，后 30% 用于直线
+        num_bezier = int(num_samples * 0.7)
+        num_line = num_samples - num_bezier
+
+        t_bez = torch.linspace(0.0, 1.0, num_bezier, device=self.device).view(1, -1, 1)  # (1, num_bezier, 1)
+        # Bézier 曲线公式: (1-t)^3*B0 + 3*(1-t)^2*t*B1 + 3*(1-t)*t^2*B2 + t^3*B3
+        pts_bez = (
+            (1 - t_bez)**3 * B0.unsqueeze(1) +
+            3 * (1 - t_bez)**2 * t_bez * B1.unsqueeze(1) +
+            3 * (1 - t_bez) * t_bez**2 * B2.unsqueeze(1) +
+            t_bez**3 * B3.unsqueeze(1)
+        )  # (M, num_bezier, 2)
+
+        t_line = torch.linspace(0.0, 1.0, num_line, device=self.device).view(1, -1, 1)
+        pts_line = (1 - t_line) * p_pre.unsqueeze(1) + t_line * p_goal.unsqueeze(1)  # (M, num_line, 2)
+
+        # 拼接轨迹点
+        pts = torch.cat([pts_bez, pts_line], dim=1)  # (M, num_samples, 2)
+        self._traj_pts[env_ids] = pts
+
+        # 5. 计算切线与累积弧长
+        # 差分计算切线
+        diffs = pts[:, 1:, :] - pts[:, :-1, :]  # (M, num_samples-1, 2)
+        dists = torch.norm(diffs, dim=-1)  # (M, num_samples-1)
+        
+        # 累积弧长
+        s_cum = torch.cat([torch.zeros((len(env_ids), 1), device=self.device), torch.cumsum(dists, dim=-1)], dim=1)
+        s_total = s_cum[:, -1:] + 1e-6
+        self._traj_s_norm[env_ids] = s_cum / s_total
+
+        # 切线方向 (归一化)
+        tangents = diffs / (dists.unsqueeze(-1) + 1e-6)
+        # 最后一个点的切线与前一个点相同
+        tangents = torch.cat([tangents, tangents[:, -1:, :]], dim=1)  # (M, num_samples, 2)
+        self._traj_tangents[env_ids] = tangents
+
+    def _query_reference_trajectory(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """查询当前位置在参考轨迹上的状态。
+        返回:
+            d_traj: 到轨迹的最短距离 (N,)
+            yaw_traj_err_deg: 车头朝向与最近点切线的偏航误差 (N,)
+            s_traj_norm: 最近点在轨迹上的归一化进度 (N,)
+        """
+        root_pos = self.robot.data.root_pos_w[:, :2]  # (N, 2)
+        robot_yaw = _quat_to_yaw(self.robot.data.root_quat_w)  # (N,)
+
+        # 计算到所有轨迹点的距离 (N, num_samples)
+        dists = torch.norm(self._traj_pts - root_pos.unsqueeze(1), dim=-1)
+        
+        # 找到最近点的索引
+        min_dists, min_indices = torch.min(dists, dim=1)  # (N,), (N,)
+        
+        # 提取最近点信息
+        env_arange = torch.arange(self.num_envs, device=self.device)
+        closest_tangent = self._traj_tangents[env_arange, min_indices]  # (N, 2)
+        s_traj_norm = self._traj_s_norm[env_arange, min_indices]  # (N,)
+        
+        # 计算偏航误差
+        traj_yaw = torch.atan2(closest_tangent[:, 1], closest_tangent[:, 0])
+        yaw_err = torch.atan2(
+            torch.sin(robot_yaw - traj_yaw),
+            torch.cos(robot_yaw - traj_yaw)
+        )
+        yaw_traj_err_deg = torch.abs(yaw_err) * (180.0 / math.pi)
+
+        return min_dists, yaw_traj_err_deg, s_traj_norm
+
     def _compute_phi_align(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
         """计算对齐势函数 phi_align（与 _get_rewards 同源几何）。
 
@@ -1124,6 +1229,26 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         # 2D 距离（用于连续距离惩罚）
         d_xy = torch.sqrt(stage_dist_front ** 2 + y_err ** 2)
 
+        # ---- 实验 3.1: 远场参考轨迹走廊 (替代 phi1) ----
+        d_traj, yaw_traj_err_deg, s_traj_norm = self._query_reference_trajectory()
+        
+        phi_traj_center = (
+            torch.exp(-(d_traj / self.cfg.sigma_traj_d) ** 2) *
+            torch.exp(-(yaw_traj_err_deg / self.cfg.sigma_traj_yaw_deg) ** 2)
+        )
+        phi_traj_progress = s_traj_norm * phi_traj_center
+        
+        phi_traj = (
+            self.cfg.k_traj_center * phi_traj_center +
+            self.cfg.k_traj_progress * phi_traj_progress
+        )
+        
+        # 保存诊断信息
+        self._d_traj = d_traj.detach()
+        self._yaw_traj_err_deg = yaw_traj_err_deg.detach()
+        self._s_traj_norm = s_traj_norm.detach()
+        self._phi_traj_center = phi_traj_center.detach()
+
         # ---- Stage 1: 距离带 + 粗对齐 (Phi1 >= 0) ----
         e_band = torch.where(
             stage_dist_front < self.cfg.d1_min, self.cfg.d1_min - stage_dist_front,
@@ -1133,6 +1258,7 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         E1 = (e_band / self.cfg.e_band_scale
               + y_err / self.cfg.y_scale1
               + yaw_err_deg / self.cfg.yaw_scale1)
+        # 实验 3.1: k_phi1 已设为 0，phi1 实际不生效
         phi1 = self.cfg.k_phi1 / (1.0 + E1)
 
         # ---- Stage 2: 微调接近，带软门控 ----
@@ -1195,9 +1321,9 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         # ---- 总势函数 & shaping ----
         # S1.0L: 默认不压制 phi1/phi2，保留开关可回滚旧逻辑。
         if self.cfg.suppress_preinsert_phi_with_w3:
-            phi_total = (phi1 + phi2) * (1.0 - w3) + phi_ins + phi_lift
+            phi_total = (phi_traj + phi1 + phi2) * (1.0 - w3) + phi_ins + phi_lift
         else:
-            phi_total = phi1 + phi2 + phi_ins + phi_lift
+            phi_total = phi_traj + phi1 + phi2 + phi_ins + phi_lift
 
         gamma = self.cfg.gamma
         r_pot = gamma * phi_total - self._last_phi_total
@@ -1530,6 +1656,7 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
             self.extras["log"] = {}
 
         # 势函数分量
+        self.extras["log"]["phi/phi_traj"] = phi_traj.mean()
         self.extras["log"]["phi/phi1"] = phi1.mean()
         self.extras["log"]["phi/phi2"] = phi2.mean()
         self.extras["log"]["phi/phi_ins"] = phi_ins.mean()
@@ -1578,6 +1705,12 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self.extras["log"]["diag/pallet_disp_xy_max"] = pallet_disp_xy.max()
         self.extras["log"]["diag/pallet_disp_xy_p95"] = torch.quantile(pallet_disp_xy, 0.95)
         self.extras["log"]["err/d_xy_mean"] = d_xy.mean()
+
+        # ---- 实验 3.1: 轨迹走廊诊断 ----
+        self.extras["log"]["traj/d_traj_mean"] = self._d_traj.mean()
+        self.extras["log"]["traj/yaw_traj_deg_mean"] = self._yaw_traj_err_deg.mean()
+        self.extras["log"]["traj/s_traj_norm_mean"] = self._s_traj_norm.mean()
+        self.extras["log"]["traj/corridor_frac"] = (self._phi_traj_center > 0.5).float().mean()
 
         # 阶段命中率
         self.extras["log"]["phase/frac_inserted"] = inserted_enough.float().mean()
@@ -1790,6 +1923,10 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self._insert_norm_window[env_ids] = 0.0
         self._window_ptr[env_ids] = 0
         self._window_filled[env_ids] = False
+
+        # ==== 实验 3.1: 生成参考轨迹 ====
+        self._prev_phi_traj[env_ids] = 0.0
+        self._build_reference_trajectory(env_ids)
 
         # ---- 托盘固定位姿（可选：后续可加随机化） ----
         pallet_pos = torch.tensor(self.cfg.pallet_cfg.init_state.pos, device=self.device).repeat(len(env_ids), 1)
