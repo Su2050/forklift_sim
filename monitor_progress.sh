@@ -1,8 +1,8 @@
 #!/bin/bash
-LOG_FILE="/home/uniubi/projects/forklift_sim/logs/20260313_223259_train_exp5_5_b_smooth_curriculum_0.3.log"
-OUT_FILE="/home/uniubi/projects/forklift_sim/docs/0310-0313experiments/exp5_5b_live_monitor.md"
+LOG_FILE="/home/uniubi/projects/forklift_sim/logs/20260313_234438_train_exp5_5_c_smooth_curriculum_0.2.log"
+OUT_FILE="/home/uniubi/projects/forklift_sim/docs/0310-0313experiments/exp5_5c_live_monitor.md"
 
-echo "# Exp 5.5b Live Monitor" > $OUT_FILE
+echo "# Exp 5.5c Live Monitor (Threshold: 0.2m)" > $OUT_FILE
 echo "Updated every 60 seconds. (Last updated: $(date))" >> $OUT_FILE
 echo "" >> $OUT_FILE
 echo "| Time | Iteration | rg (Success) | Yaw Err (deg) | Pallet Disp (m) |" >> $OUT_FILE
