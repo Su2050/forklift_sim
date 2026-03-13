@@ -4,10 +4,9 @@ set -euo pipefail
 PROJECT_ROOT="/home/uniubi/projects/forklift_sim"
 ISAACLAB_DIR="${PROJECT_ROOT}/IsaacLab"
 LOG_TYPE="train"
-# 集中算力，环境数从 128 进一步降低到 64，因为在 GB10 上 128 跑了 20 分钟后依然 OOM
 NUM_ENVS="64"
 MAX_ITERATIONS="2000"
-RUN_NAME="exp5_1_eliminate_exploration_fear"
+RUN_NAME="exp0_1_approach_only_256x256_freeze50"
 
 mkdir -p "${PROJECT_ROOT}/logs"
 BEIJING_TS="$(TZ=Asia/Shanghai date +%Y%m%d_%H%M%S)"
@@ -27,10 +26,10 @@ nohup env TERM=xterm PYTHONUNBUFFERED=1 CONDA_PREFIX="" CONDA_DEFAULT_ENV="" \
   agent.policy.class_name=rsl_rl.modules.VisionActorCritic \
   agent.obs_groups.policy='[image, proprio]' \
   agent.obs_groups.critic='[critic]' \
-  agent.policy.imagenet_backbone_init=true \
-  agent.policy.freeze_backbone=true \
+  agent.policy.pretrained_backbone_path="${PROJECT_ROOT}/outputs/vision_pretrain_256x256/best_backbone.pt" \
+  agent.policy.freeze_backbone_updates=50 \
   > "${LOG_FILE}" 2>&1 &
 
-echo "Started Experiment 4 (Paper Native Reward + RRL) training."
+echo "Started Experiment 0 & 1 training."
 echo "log: ${LOG_FILE}"
 echo "run_name: ${RUN_NAME}"

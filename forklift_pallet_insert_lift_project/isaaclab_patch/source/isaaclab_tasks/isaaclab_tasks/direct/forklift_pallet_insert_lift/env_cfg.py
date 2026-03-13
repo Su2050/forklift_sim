@@ -73,10 +73,10 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     # 如果距离是 0.6m (在托盘外)，tip_x = -1.68m -> x_root = -3.55m
     stage1_init_x_min_m: float = -3.55
     stage1_init_x_max_m: float = -3.25
-    stage1_init_y_min_m: float = -0.15
-    stage1_init_y_max_m: float = 0.15
-    stage1_init_yaw_deg_min: float = -10.0
-    stage1_init_yaw_deg_max: float = 10.0
+    stage1_init_y_min_m: float = -0.05
+    stage1_init_y_max_m: float = 0.05
+    stage1_init_yaw_deg_min: float = -2.0
+    stage1_init_yaw_deg_max: float = 2.0
 
     # 相机参数：
     # - 训练默认 256x256，进一步提升视觉特征提取精度
@@ -369,7 +369,7 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     alpha_lift: float = 5.0  # 举升奖励权重（论文补丁，用于端到端）
 
     # 负向惩罚权重 (Penalty Reward R-)
-    alpha_5: float = 100.0   # 推盘惩罚权重 (rp) - 放大以避免 reward hacking
+    alpha_5: float = 1.0     # 推盘惩罚权重 (rp) - 实验5.1：极大降低以消除探索恐惧
     alpha_6: float = 1.0     # 超速惩罚权重 (rv)
     alpha_7: float = 1.0     # 动作突变惩罚权重 (ra)
     alpha_8: float = 5.0     # 初始停滞惩罚权重 (rini) - 适当降低，因为现在shaping有界了
