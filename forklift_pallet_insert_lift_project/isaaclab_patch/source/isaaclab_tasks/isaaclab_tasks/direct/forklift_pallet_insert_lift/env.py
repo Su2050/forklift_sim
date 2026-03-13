@@ -1212,9 +1212,8 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
 
         # ---- 实验 4: 论文原生 Reward 计算 ----
         
-        # 1. 轨迹相关变量 (复用 3.1 的轨迹查询)
+        # 1. 轨迹相关变量 (复用 3.1 的轨迹查询，仅用于日志)
         d_traj, yaw_traj_err_deg, _ = self._query_reference_trajectory()
-        yaw_traj_err_rad = yaw_traj_err_deg * math.pi / 180.0
         
         # 2. 距离 rd 的定义：叉臂中心到目标叉臂中心的距离 (修复重大几何Bug)
         # 目标叉臂中心：当叉车完全插入时，叉根抵住托盘前沿。
@@ -1230,11 +1229,12 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         
         dist_center = torch.norm(fork_center[:, :2] - target_center, dim=-1)
 
-        # 3. 正向奖励 R+ (实验 5: 替换 1/x 为有界 exp 函数)
-        # 避免 1/x 在小误差区域的数值爆炸导致“局部最优黑洞”
-        r_dist = torch.exp(-dist_center / 1.0)
-        r_traj_d = torch.exp(-(d_traj / 0.3)**2)
-        r_traj_yaw = torch.exp(-(yaw_traj_err_rad / 0.3)**2)
+        # 3. 正向奖励 R+ (实验 5.2: 修复距离梯度消失，替换轨迹奖励为绝对姿态奖励)
+        # 使用 dist_front (叉尖到托盘前沿距离) 替代 dist_center，避免距离过大导致梯度平缓
+        r_dist = torch.exp(-dist_front / 0.5)
+        # 替换轨迹奖励为绝对姿态奖励，避免 Agent 为了保持轨迹而拒绝前进
+        r_lat = torch.exp(-tip_y_err / 0.2)
+        r_yaw = torch.exp(-yaw_err_rad / 0.2)
 
         # rg: 到达奖励 (当叉臂中心距离托盘中心很近，且姿态对准时)
         # 论文中是到达托盘，因为我们用了中心距离，所以阈值设为 0.1m
@@ -1249,8 +1249,8 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
 
         R_plus = (
             self.cfg.alpha_1 * r_dist +
-            self.cfg.alpha_2 * r_traj_d +
-            self.cfg.alpha_3 * r_traj_yaw +
+            self.cfg.alpha_2 * r_lat +
+            self.cfg.alpha_3 * r_yaw +
             self.cfg.alpha_4 * rg +
             r_lift
         )
@@ -1271,16 +1271,20 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         # ra: 动作突变惩罚
         ra = -torch.norm(self.actions - self.previous_actions, dim=-1) ** 2
         
-        # rini: 初始停滞惩罚
+        # rini: 初始停滞惩罚 (实验 5.2 修复: 改为投影速度，防止原地鬼畜)
+        # 计算向托盘的投影速度
+        fork_vel_xy_vec = self.robot.data.root_vel_w[:, :2]
+        proj_vel = torch.sum(fork_vel_xy_vec * u_in, dim=-1)
         rini = torch.where(
-            (fork_vel_xy < self.cfg.paper_ini_vel_thresh) & (dist_center > self.cfg.paper_ini_dist_thresh),
+            (proj_vel < self.cfg.paper_ini_vel_thresh) & (dist_front > self.cfg.paper_ini_dist_thresh),
             -1.0,
             0.0
         )
 
         # r_out: 越界逃跑惩罚 (新增漏洞补丁)
+        # 实验 5.2: 改用 dist_front，更直观
         r_out = torch.where(
-            dist_center > self.cfg.paper_out_of_bounds_dist,
+            dist_front > self.cfg.paper_out_of_bounds_dist,
             -1.0,
             0.0
         )

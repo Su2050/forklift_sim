@@ -363,8 +363,8 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     # ---- 实验 4: 论文原生 Reward (Paper Native Reward) ----
     # 正向奖励权重 (Positive Reward R+)
     alpha_1: float = 5.0     # 距离托盘奖励权重 (exp)
-    alpha_2: float = 1.0     # 距离轨迹奖励权重 (exp)
-    alpha_3: float = 1.0     # 偏航角奖励权重 (exp)
+    alpha_2: float = 1.0     # 横向对齐奖励权重 (exp) - 实验5.2：替换轨迹奖励为绝对姿态奖励
+    alpha_3: float = 1.0     # 偏航角对齐奖励权重 (exp) - 实验5.2：替换轨迹奖励为绝对姿态奖励
     alpha_4: float = 200.0   # 到达托盘特殊奖励权重 (rg) - 极大的终局奖励
     alpha_lift: float = 5.0  # 举升奖励权重（论文补丁，用于端到端）
 
