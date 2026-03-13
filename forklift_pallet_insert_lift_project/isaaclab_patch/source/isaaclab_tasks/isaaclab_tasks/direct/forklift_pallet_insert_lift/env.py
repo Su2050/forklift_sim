@@ -1230,11 +1230,11 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         
         dist_center = torch.norm(fork_center[:, :2] - target_center, dim=-1)
 
-        # 3. 正向奖励 R+ (Eq.6)
-        eps = self.cfg.paper_eps
-        r_dist = 1.0 / (dist_center + eps)
-        r_traj_d = 1.0 / (d_traj + eps)
-        r_traj_yaw = 1.0 / (yaw_traj_err_rad + eps)
+        # 3. 正向奖励 R+ (实验 5: 替换 1/x 为有界 exp 函数)
+        # 避免 1/x 在小误差区域的数值爆炸导致“局部最优黑洞”
+        r_dist = torch.exp(-dist_center / 1.0)
+        r_traj_d = torch.exp(-(d_traj / 0.3)**2)
+        r_traj_yaw = torch.exp(-(yaw_traj_err_rad / 0.3)**2)
 
         # rg: 到达奖励 (当叉臂中心距离托盘中心很近，且姿态对准时)
         # 论文中是到达托盘，因为我们用了中心距离，所以阈值设为 0.1m
