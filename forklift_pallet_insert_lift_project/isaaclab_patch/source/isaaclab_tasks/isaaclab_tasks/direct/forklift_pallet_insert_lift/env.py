@@ -1267,12 +1267,20 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
             -1.0,
             0.0
         )
-        
+
+        # r_out: 越界逃跑惩罚 (新增漏洞补丁)
+        r_out = torch.where(
+            dist_center > self.cfg.paper_out_of_bounds_dist,
+            -1.0,
+            0.0
+        )
+
         R_minus = (
             self.cfg.alpha_5 * rp +
             self.cfg.alpha_6 * rv +
             self.cfg.alpha_7 * ra +
-            self.cfg.alpha_8 * rini
+            self.cfg.alpha_8 * rini +
+            self.cfg.alpha_9 * r_out
         )
         
         # 4. 总奖励
@@ -1318,6 +1326,7 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self.extras["log"]["paper_reward/rv"] = rv.mean()
         self.extras["log"]["paper_reward/ra"] = ra.mean()
         self.extras["log"]["paper_reward/rini"] = rini.mean()
+        self.extras["log"]["paper_reward/r_out"] = r_out.mean()
 
         # 核心诊断指标
         self.extras["log"]["err/dist_front_mean"] = dist_front.mean()
@@ -1354,7 +1363,13 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         pitch = torch.asin(torch.clamp(sinp, -1.0, 1.0))
         tipped = (torch.abs(roll) > self.cfg.max_roll_pitch_rad) | (torch.abs(pitch) > self.cfg.max_roll_pitch_rad)
 
-        terminated = tipped | success
+        # out of bounds check (新增漏洞补丁，防止倒车逃跑)
+        pallet_pos = self.pallet.data.root_pos_w
+        fork_center = self._compute_fork_center()
+        dist_center = torch.norm(fork_center[:, :2] - pallet_pos[:, :2], dim=-1)
+        out_of_bounds = dist_center > self.cfg.paper_out_of_bounds_dist
+
+        terminated = tipped | success | out_of_bounds
         return terminated, time_out
 
     # ---------------------------

@@ -367,6 +367,7 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     alpha_6: float = 1.0     # 超速惩罚权重 (rv)
     alpha_7: float = 1.0     # 动作突变惩罚权重 (ra)
     alpha_8: float = 20.0    # 初始停滞惩罚权重 (rini) - 大幅提高以惩罚“木头人”行为
+    alpha_9: float = 50.0    # 越界逃跑惩罚权重 (r_out) - 惩罚倒车逃跑行为
     
     # 论文公式中的阈值
     paper_pallet_vel_thresh: float = 0.01  # 托盘移动速度阈值 (m/s)
@@ -374,6 +375,7 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     paper_ini_vel_thresh: float = 0.05     # 初始停滞速度阈值 (m/s)
     paper_ini_dist_thresh: float = 0.3     # 初始停滞距离阈值 (m)
     paper_rg_dist_thresh: float = 0.1      # 触发 rg 的距离阈值 (m)
+    paper_out_of_bounds_dist: float = 3.0  # 越界逃跑距离阈值 (m)
     paper_eps: float = 0.01                # 防止除零的极小值
 
     # termination thresholds
