@@ -1229,9 +1229,9 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         
         dist_center = torch.norm(fork_center[:, :2] - target_center, dim=-1)
 
-        # 3. 正向奖励 R+ (实验 5.2: 修复距离梯度消失，替换轨迹奖励为绝对姿态奖励)
-        # 使用 dist_front (叉尖到托盘前沿距离) 替代 dist_center，避免距离过大导致梯度平缓
-        r_dist = torch.exp(-dist_front / 0.5)
+        # 3. 正向奖励 R+ (实验 5.3: 恢复 dist_center 保证插入过程有梯度)
+        # 之前用 dist_front 导致叉尖碰到托盘后梯度消失（因为 clamp 截断了负值）
+        r_dist = torch.exp(-dist_center / 1.0)
         # 替换轨迹奖励为绝对姿态奖励，避免 Agent 为了保持轨迹而拒绝前进
         r_lat = torch.exp(-tip_y_err / 0.2)
         r_yaw = torch.exp(-yaw_err_rad / 0.2)
