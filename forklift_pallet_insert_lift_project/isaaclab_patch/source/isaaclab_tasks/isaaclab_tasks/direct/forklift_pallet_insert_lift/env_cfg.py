@@ -369,7 +369,7 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     alpha_lift: float = 5.0  # 举升奖励权重（论文补丁，用于端到端）
 
     # 负向惩罚权重 (Penalty Reward R-)
-    alpha_5: float = 1.0     # 推盘惩罚权重 (rp) - 实验5.1：极大降低以消除探索恐惧
+    alpha_5: float = 3.0     # 推盘惩罚权重 (rp) - 实验5.5b：稍微增加惩罚，抑制推土机行为
     alpha_6: float = 1.0     # 超速惩罚权重 (rv)
     alpha_7: float = 1.0     # 动作突变惩罚权重 (ra)
     alpha_8: float = 5.0     # 初始停滞惩罚权重 (rini) - 适当降低，因为现在shaping有界了
@@ -380,7 +380,7 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     paper_fork_vel_thresh: float = 0.07    # 叉车超速阈值 (m/s)
     paper_ini_vel_thresh: float = 0.05     # 初始停滞速度阈值 (m/s)
     paper_ini_dist_thresh: float = 0.3     # 初始停滞距离阈值 (m)
-    paper_rg_dist_thresh: float = 0.2      # 触发 rg 的距离阈值 (m) - 实验5.5：从0.4收紧到0.2，逼迫更深插入
+    paper_rg_dist_thresh: float = 0.3      # 触发 rg 的距离阈值 (m) - 实验5.5b：退火到0.3，平滑课程难度
     paper_out_of_bounds_dist: float = 3.0  # 越界逃跑距离阈值 (m)
     paper_eps: float = 0.01                # 防止除零的极小值
 
