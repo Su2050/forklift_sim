@@ -380,7 +380,7 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     paper_fork_vel_thresh: float = 0.07    # 叉车超速阈值 (m/s)
     paper_ini_vel_thresh: float = 0.05     # 初始停滞速度阈值 (m/s)
     paper_ini_dist_thresh: float = 0.3     # 初始停滞距离阈值 (m)
-    paper_rg_dist_thresh: float = 0.4      # 触发 rg 的距离阈值 (m) - 实验5.4：放宽阈值，让它更容易尝到甜头
+    paper_rg_dist_thresh: float = 0.2      # 触发 rg 的距离阈值 (m) - 实验5.5：从0.4收紧到0.2，逼迫更深插入
     paper_out_of_bounds_dist: float = 3.0  # 越界逃跑距离阈值 (m)
     paper_eps: float = 0.01                # 防止除零的极小值
 
