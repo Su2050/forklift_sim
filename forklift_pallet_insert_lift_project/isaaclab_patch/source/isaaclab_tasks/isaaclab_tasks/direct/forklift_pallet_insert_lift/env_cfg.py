@@ -369,7 +369,7 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     alpha_lift: float = 5.0  # 举升奖励权重（论文补丁，用于端到端）
 
     # 负向惩罚权重 (Penalty Reward R-)
-    alpha_5: float = 3.0     # 推盘惩罚权重 (rp) - 实验5.5b：稍微增加惩罚，抑制推土机行为
+    alpha_5: float = 1.0     # 推盘惩罚权重 (rp) - 实验5.5e：降回1.0，鼓励在0.25m阈值下探索
     alpha_6: float = 1.0     # 超速惩罚权重 (rv)
     alpha_7: float = 1.0     # 动作突变惩罚权重 (ra)
     alpha_8: float = 5.0     # 初始停滞惩罚权重 (rini) - 适当降低，因为现在shaping有界了

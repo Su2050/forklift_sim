@@ -1,6 +1,6 @@
 #!/bin/bash
 LOG_FILE="/home/uniubi/projects/forklift_sim/logs/20260314_073134_train_exp5_5_d_smooth_curriculum_0.25.log"
-OUT_FILE="/home/uniubi/projects/forklift_sim/docs/0310-0313experiments/exp5_5d_live_monitor.md"
+OUT_FILE="/home/uniubi/projects/forklift_sim/docs/0310-0314experiments/exp5_5d_live_monitor.md"
 
 echo "# Exp 5.5d Live Monitor (Threshold: 0.25m)" > $OUT_FILE
 echo "Updated every 60 seconds. (Last updated: $(date))" >> $OUT_FILE
