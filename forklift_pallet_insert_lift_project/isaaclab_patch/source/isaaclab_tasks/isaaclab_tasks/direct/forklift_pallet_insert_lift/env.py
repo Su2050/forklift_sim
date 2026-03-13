@@ -1216,9 +1216,19 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         d_traj, yaw_traj_err_deg, _ = self._query_reference_trajectory()
         yaw_traj_err_rad = yaw_traj_err_deg * math.pi / 180.0
         
-        # 2. 距离 rd 的定义：叉臂中心到托盘中心的距离 (重大修正)
-        # 只有当叉车完全插入时，叉臂中心才会和托盘中心重合
-        dist_center = torch.norm(fork_center[:, :2] - pallet_pos[:, :2], dim=-1)
+        # 2. 距离 rd 的定义：叉臂中心到目标叉臂中心的距离 (修复重大几何Bug)
+        # 目标叉臂中心：当叉车完全插入时，叉根抵住托盘前沿。
+        # 托盘前沿坐标：
+        pallet_yaw = _quat_to_yaw(self.pallet.data.root_quat_w)
+        pallet_front_x = pallet_pos[:, 0] - (self.cfg.pallet_depth_m / 2.0) * torch.cos(pallet_yaw)
+        pallet_front_y = pallet_pos[:, 1] - (self.cfg.pallet_depth_m / 2.0) * torch.sin(pallet_yaw)
+        
+        # 叉臂长 1.2m，中心在叉根前方 0.6m
+        target_center_x = pallet_front_x + 0.6 * torch.cos(pallet_yaw)
+        target_center_y = pallet_front_y + 0.6 * torch.sin(pallet_yaw)
+        target_center = torch.stack([target_center_x, target_center_y], dim=-1)
+        
+        dist_center = torch.norm(fork_center[:, :2] - target_center, dim=-1)
 
         # 3. 正向奖励 R+ (Eq.6)
         eps = self.cfg.paper_eps
@@ -1366,7 +1376,15 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         # out of bounds check (新增漏洞补丁，防止倒车逃跑)
         pallet_pos = self.pallet.data.root_pos_w
         fork_center = self._compute_fork_center()
-        dist_center = torch.norm(fork_center[:, :2] - pallet_pos[:, :2], dim=-1)
+        
+        pallet_yaw = _quat_to_yaw(self.pallet.data.root_quat_w)
+        pallet_front_x = pallet_pos[:, 0] - (self.cfg.pallet_depth_m / 2.0) * torch.cos(pallet_yaw)
+        pallet_front_y = pallet_pos[:, 1] - (self.cfg.pallet_depth_m / 2.0) * torch.sin(pallet_yaw)
+        target_center_x = pallet_front_x + 0.6 * torch.cos(pallet_yaw)
+        target_center_y = pallet_front_y + 0.6 * torch.sin(pallet_yaw)
+        target_center = torch.stack([target_center_x, target_center_y], dim=-1)
+        
+        dist_center = torch.norm(fork_center[:, :2] - target_center, dim=-1)
         out_of_bounds = dist_center > self.cfg.paper_out_of_bounds_dist
 
         terminated = tipped | success | out_of_bounds
@@ -1446,7 +1464,12 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
 
         # ---- 随机化叉车初始位姿 ----
         if self._stage_1_mode:
-            x = sample_uniform(-3.5, -3.0, (len(env_ids), 1), device=self.device)
+            x = sample_uniform(
+                self.cfg.stage1_init_x_min_m,
+                self.cfg.stage1_init_x_max_m,
+                (len(env_ids), 1),
+                device=self.device,
+            )
             y = sample_uniform(
                 self.cfg.stage1_init_y_min_m,
                 self.cfg.stage1_init_y_max_m,

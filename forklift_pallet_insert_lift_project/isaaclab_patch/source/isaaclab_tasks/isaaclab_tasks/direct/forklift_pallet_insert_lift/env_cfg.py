@@ -65,10 +65,15 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
 
     # Stage 1 初始随机化范围，默认保持当前课程难度不变。
     # 这些字段主要给控制变量实验用，便于直接从命令行 override。
-    stage1_init_x_min_m: float = -2.5
-    stage1_init_x_max_m: float = -2.0
-    stage1_init_y_min_m: float = -0.2
-    stage1_init_y_max_m: float = 0.2
+    # ===== 实验 4.1 近距离课程 (Stage A) =====
+    # 目标：让叉尖距离托盘前沿 0.3m ~ 1.0m
+    # 托盘前沿 ≈ -1.08m, 叉尖偏移 ≈ +1.87m
+    # x_root = 目标距离 + (-1.08) - 1.87 = 目标距离 - 2.95
+    # 0.3m -> -2.65m; 1.0m -> -1.95m
+    stage1_init_x_min_m: float = -2.65
+    stage1_init_x_max_m: float = -1.95
+    stage1_init_y_min_m: float = -0.15
+    stage1_init_y_max_m: float = 0.15
     stage1_init_yaw_deg_min: float = -10.0
     stage1_init_yaw_deg_max: float = 10.0
 
