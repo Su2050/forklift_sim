@@ -7,8 +7,8 @@ LOG_TYPE="train"
 # 集中算力，环境数从 128 进一步降低到 64，因为在 GB10 上 128 跑了 20 分钟后依然 OOM
 NUM_ENVS="64"
 MAX_ITERATIONS="2000"
-RUN_NAME="exp5_5_c_smooth_curriculum_0.2"
-RESUME_DIR="2026-03-13_22-33-07_exp5_5_b_smooth_curriculum_0.3"
+RUN_NAME="exp5_5_d_smooth_curriculum_0.25"
+RESUME_DIR="2026-03-13_23-46-12_exp5_5_c_smooth_curriculum_0.2"
 
 mkdir -p "${PROJECT_ROOT}/logs"
 BEIJING_TS="$(TZ=Asia/Shanghai date +%Y%m%d_%H%M%S)"
