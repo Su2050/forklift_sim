@@ -5,6 +5,9 @@ todos:
   - id: audit-common-base
     content: 先做共同基座审计，统一 backbone、冻结策略、动作空间、成功判据和指标口径
     status: pending
+  - id: audit-reward-gate-consistency
+    content: 审计 rg、is_inserted、hold_cond、push_free 的一致性，防止出现奖励触发但真实成功未发生
+    status: pending
   - id: create-reflection-rule
     content: 创建 .cursor/rules/experiment-reflection.mdc，并固化失败后全链路复盘 checklist
     status: pending
@@ -35,12 +38,20 @@ isProject: false
 - 先审计启动脚本与配置是否真的一致：[run_experiment_2_rrl.sh](/home/uniubi/projects/forklift_sim/run_experiment_2_rrl.sh) 显式覆盖了 `agent.policy.backbone_type="resnet18"`，但 [run_experiment_4_paper_native.sh](/home/uniubi/projects/forklift_sim/run_experiment_4_paper_native.sh) 当前没有这条 override，而 [forklift_pallet_insert_lift_project/isaaclab_patch/source/isaaclab_tasks/isaaclab_tasks/direct/forklift_pallet_insert_lift/agents/rsl_rl_ppo_cfg.py](/home/uniubi/projects/forklift_sim/forklift_pallet_insert_lift_project/isaaclab_patch/source/isaaclab_tasks/isaaclab_tasks/direct/forklift_pallet_insert_lift/agents/rsl_rl_ppo_cfg.py) 默认仍是 `freeze_backbone_updates=50`。计划执行前必须先把“实际 backbone/冻结策略”校准成单一真相。
 - 输出物：一份简短 audit 结论，明确两条线共享什么、只允许哪一个因素不同。
 
+## 2.1 Step 0.5：奖励门控与真实成功一致性审计
+
+- 在任何继续调参之前，先单独核对 `paper_reward/rg`、`is_inserted`、`hold_cond`、`push_free_success_rate`、`push_free_insert_rate` 的逻辑关系。
+- 目标是避免出现“`rg` 已明显触发，但 `phase/frac_inserted` 仍为 0，或托盘位移持续扩大”的假突破。
+- 若发现奖励门槛与真实插入/保持条件不一致，则优先修正判据和日志，再继续课程实验；此类问题视为 `底层漏洞`，不归类为“调参失败”。
+- 输出物：一份 reward-gate consistency 结论，明确哪些量代表“接近”、哪些量代表“真实插入”、哪些量代表“无推盘真成功”。
+
 ## 3. 失败复盘规则
 
 - 新增 `.cursor/rules/experiment-reflection.mdc`。
 - 每次实验失败必须按固定 checklist 复盘五个环节：物理环境与 reset、观测与相机、actor/critic 与价值函数、reward/done/reset/buffer/log key、指标与视频。
 - 在 checklist 没完成前，禁止直接继续调超参。
 - 每轮实验都必须保存：日志尾段关键指标、至少 3 个评估视频、1 个失败视频、以及“是否存在底层漏洞”的结论。
+- `value_function loss` 必须作为显式观察项进入每轮实验记录；若出现异常放大或与行为指标明显脱钩，需要优先排查 reward scale、critic target 和成功/失败门控是否失真，而不是直接继续收紧课程。
 
 ## 4. 分支 A：master 势函数对照线
 
@@ -55,10 +66,11 @@ isProject: false
 
 - 目标：把当前已出现突破的论文式绝对状态奖励继续做成唯一主线。
 - 起点：从当前论文奖励分支继续，但先通过共同基座审计，确保它真的在跑 `ResNet18 + ImageNet + 全程冻结`。
-- 第一批实验只调 `rg / success gate / hold`：按 `0.4 -> 0.3 -> 0.25 -> 0.2` 课程收紧，每一步都从上一步 checkpoint 热启动。
-- 第二批实验再调 `rini`：只动投影速度停滞惩罚强度。
-- 第三批实验最后调 `rp`：只在前两批结论清晰后再测托盘移动惩罚强弱。
+- 第一批实验：**动态退火课程学习 (SOP)**。按 `0.4 -> 0.3 -> 0.2 -> 0.1` 的 0.1m 步长平滑收紧 `rg` 阈值。每次收紧必须加载上一阶段稳定的 Checkpoint。
+- 在收紧 `rg` 阈值的同时，可进行**动态惩罚**微调（如将推盘惩罚 `alpha_5` 从 1.0 缓慢增加到 3.0 等），逼迫策略从粗放走向精细控制。
 - 不允许把 `rg`、`rini`、`rp`、初始化范围、相机几何一起改。
+- 必须显式定义课程退出路径：当某个 `rg` 阈值在近场/容易初始化上稳定后，要逐步恢复更宽的初始化分布，最终回到 `master` 分布或同级难度，避免只在 easy setup 上形成局部策略。
+- 若课程收紧后 `rg` 继续高触发，但 `phase/frac_inserted`、`push_free_*`、视频行为不同步改善，则暂停后续课程，回到 `Step 0.5` 重新审计奖励与成功判据。
 
 ## 6. 统一验收与决策
 
@@ -66,6 +78,13 @@ isProject: false
 - 分支 A 额外关注：`phi/phi1`、`phi/phi2`、`phi/phi_ins` 是否在“正确行为”上升，而不是在死区刷分。
 - 分支 B 额外关注：`paper_reward/rg` 是否真实触发，`err/lateral_mean`、`err/yaw_deg_mean` 是否随课程收紧同步改善。
 - 决策规则：如果分支 A 只能稳定复现 hacking，而分支 B 能通过课程持续收紧阈值，就正式停止把势函数当主线；如果分支 A 在统一基座下也能稳定跑通，再保留为备用线。
+- 两条线都要同时看 `reward 指标`、`过程指标`、`最终 KPI` 和 `视频行为` 四类证据，禁止仅凭单个奖励项上升就判定“实验成功”。
+
+## 6.1 固定执行顺序
+
+- 固定顺序为：`共同基座审计 -> 奖励门控一致性审计 -> 分支 B 第一批课程实验 -> 分支 A smoke 对照 -> 分支 B 第二批/第三批实验`。
+- 分支 A 只承担“验证势函数在统一基座下是否仍可行”的职责，不得抢在分支 B 主线之前消耗长训预算。
+- 若分支 B 第一批实验已经暴露判据失配、critic 漂移或明显假突破，则暂停分支 A，对底层逻辑先做复盘与修正。
 
 ## 7. 执行约束
 
