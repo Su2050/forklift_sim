@@ -1,5 +1,5 @@
 #!/bin/bash
-LOG_FILE="/home/uniubi/projects/forklift_sim/logs/20260313_234438_train_exp5_5_c_smooth_curriculum_0.2.log"
+LOG_FILE="/home/uniubi/projects/forklift_sim/logs/20260313_234603_train_exp5_5_c_smooth_curriculum_0.2.log"
 OUT_FILE="/home/uniubi/projects/forklift_sim/docs/0310-0313experiments/exp5_5c_live_monitor.md"
 
 echo "# Exp 5.5c Live Monitor (Threshold: 0.2m)" > $OUT_FILE
