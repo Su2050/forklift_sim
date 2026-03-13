@@ -11,6 +11,9 @@ todos:
   - id: create-reflection-rule
     content: 创建 .cursor/rules/experiment-reflection.mdc，并固化失败后全链路复盘 checklist
     status: pending
+  - id: create-branches
+    content: 创建并切换到对应的 Git 分支（分支 A: exp/master_potential_approach_only，分支 B: exp/vision_cnn/paper_native_reward_v2）
+    status: pending
   - id: branch-a-master-control
     content: 建立 master 势函数对照线，只回滚 reward family，不回滚已验证必要的底层修复
     status: pending
@@ -55,6 +58,7 @@ isProject: false
 
 ## 4. 分支 A：master 势函数对照线
 
+- **分支创建**：基于当前修复好的基座，拉取新分支 `exp/master_potential_approach_only`。
 - 目标：回答“在保留现有底层修复、只把 reward family 切回 master 风格势函数后，`2 动作 approach-only + 视觉 actor` 是否仍然可行”。
 - 这条线是 `对照线`，不是把整个代码库原样回滚到 `master`。
 - 保持不变：共同基座中的全部非 reward 项。
@@ -64,6 +68,7 @@ isProject: false
 
 ## 5. 分支 B：论文 Reward 主线
 
+- **分支创建**：基于当前论文奖励分支，拉取或重命名为 `exp/vision_cnn/paper_native_reward_v2`（或继续在当前分支推进，但需明确 commit 节点）。
 - 目标：把当前已出现突破的论文式绝对状态奖励继续做成唯一主线。
 - 起点：从当前论文奖励分支继续，但先通过共同基座审计，确保它真的在跑 `ResNet18 + ImageNet + 全程冻结`。
 - 第一批实验：**动态退火课程学习 (SOP)**。按 `0.4 -> 0.3 -> 0.2 -> 0.1` 的 0.1m 步长平滑收紧 `rg` 阈值。每次收紧必须加载上一阶段稳定的 Checkpoint。
@@ -82,7 +87,7 @@ isProject: false
 
 ## 6.1 固定执行顺序
 
-- 固定顺序为：`共同基座审计 -> 奖励门控一致性审计 -> 分支 B 第一批课程实验 -> 分支 A smoke 对照 -> 分支 B 第二批/第三批实验`。
+- 固定顺序为：`创建分支 -> 共同基座审计 -> 奖励门控一致性审计 -> 分支 B 第一批课程实验 -> 分支 A smoke 对照 -> 分支 B 第二批/第三批实验`。
 - 分支 A 只承担“验证势函数在统一基座下是否仍可行”的职责，不得抢在分支 B 主线之前消耗长训预算。
 - 若分支 B 第一批实验已经暴露判据失配、critic 漂移或明显假突破，则暂停分支 A，对底层逻辑先做复盘与修正。
 
