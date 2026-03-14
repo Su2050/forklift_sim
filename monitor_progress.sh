@@ -1,8 +1,8 @@
 #!/bin/bash
-LOG_FILE="/home/uniubi/projects/forklift_sim/logs/20260314_075843_train_exp5_5_e_reduce_push_penalty_0.25.log"
-OUT_FILE="/home/uniubi/projects/forklift_sim/docs/0310-0314experiments/exp5_5e_live_monitor.md"
+LOG_FILE="/home/uniubi/projects/forklift_sim/logs/20260314_081732_train_exp5_5_f_micro_step_0.28.log"
+OUT_FILE="/home/uniubi/projects/forklift_sim/docs/0310-0314experiments/exp5_5f_live_monitor.md"
 
-echo "# Exp 5.5e Live Monitor (Threshold: 0.25m, alpha_5: 1.0)" > $OUT_FILE
+echo "# Exp 5.5f Live Monitor (Threshold: 0.28m, alpha_5: 3.0, from 5.5b)" > $OUT_FILE
 echo "Updated every 60 seconds. (Last updated: $(date))" >> $OUT_FILE
 echo "" >> $OUT_FILE
 echo "| Time | Iteration | rg (Success) | Yaw Err (deg) | Pallet Disp (m) |" >> $OUT_FILE
