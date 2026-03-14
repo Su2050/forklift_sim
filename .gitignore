@@ -70,3 +70,4 @@ logs/
 # System files
 .Trash-*
 .directory
+expert_dataset_*.h5
