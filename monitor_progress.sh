@@ -1,6 +1,6 @@
 #!/bin/bash
-LOG_FILE="/home/uniubi/projects/forklift_sim/logs/20260314_135430_train_exp5_7_break_local_optima_rg_5000.log"
-MD_FILE="/home/uniubi/projects/forklift_sim/docs/0310-0314experiments/exp5_7_live_monitor.md"
+LOG_FILE="/home/uniubi/projects/forklift_sim/logs/20260314_141130_train_exp5_8_return_to_physics_0.28.log"
+MD_FILE="/home/uniubi/projects/forklift_sim/docs/0310-0314experiments/exp5_8_live_monitor.md"
 
 while true; do
     if [ -f "$LOG_FILE" ]; then
