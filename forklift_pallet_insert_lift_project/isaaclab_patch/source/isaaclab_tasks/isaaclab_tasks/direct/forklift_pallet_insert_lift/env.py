@@ -1236,10 +1236,8 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         r_lat = torch.exp(-tip_y_err / 0.2)
         r_yaw = torch.exp(-yaw_err_rad / 0.2)
 
-        # 6.0: 引入空间衰减因子，防止远距离摆 Pose
-        # 距离越近，decay_factor 越接近 1；距离远时接近 0
-        # 假设 3 米外几乎没有姿态奖励，1 米内姿态奖励逐渐拉满
-        decay_factor = torch.exp(-dist_center / 1.0)
+        # 6.0b: 移除空间衰减，恢复全局姿态引导，逼迫它在远处就开始调整姿态
+        # decay_factor = torch.exp(-dist_center / 1.0)
 
         # rg: 到达奖励 (当叉臂中心距离托盘中心很近，且姿态对准时)
         # 论文中是到达托盘，因为我们用了中心距离，所以阈值设为 0.1m
@@ -1254,8 +1252,8 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
 
         R_plus = (
             self.cfg.alpha_1 * r_dist +
-            self.cfg.alpha_2 * r_lat * decay_factor +
-            self.cfg.alpha_3 * r_yaw * decay_factor +
+            self.cfg.alpha_2 * r_lat +
+            self.cfg.alpha_3 * r_yaw +
             self.cfg.alpha_4 * rg +
             r_lift
         )
