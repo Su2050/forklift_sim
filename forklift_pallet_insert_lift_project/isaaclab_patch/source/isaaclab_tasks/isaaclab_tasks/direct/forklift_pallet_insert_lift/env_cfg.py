@@ -365,7 +365,7 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     alpha_1: float = 5.0     # 距离托盘奖励权重 (exp)
     alpha_2: float = 5.0     # 横向对齐奖励权重 (exp) - 实验5.6：从1.0提升到5.0，平衡Shaping权重
     alpha_3: float = 5.0     # 偏航角对齐奖励权重 (exp) - 实验5.6：从1.0提升到5.0，平衡Shaping权重
-    alpha_4: float = 200.0   # 到达托盘特殊奖励权重 (rg) - 极大的终局奖励
+    alpha_4: float = 5000.0  # 到达托盘特殊奖励权重 (rg) - 实验5.7：从200提升到5000，打破摆Pose局部最优
     alpha_lift: float = 5.0  # 举升奖励权重（论文补丁，用于端到端）
 
     # 负向惩罚权重 (Penalty Reward R-)
