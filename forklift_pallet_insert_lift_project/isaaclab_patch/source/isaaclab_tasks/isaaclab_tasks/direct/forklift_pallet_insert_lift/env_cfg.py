@@ -73,10 +73,10 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     # 如果距离是 0.6m (在托盘外)，tip_x = -1.68m -> x_root = -3.55m
     stage1_init_x_min_m: float = -3.55
     stage1_init_x_max_m: float = -3.25
-    stage1_init_y_min_m: float = -0.05
-    stage1_init_y_max_m: float = 0.05
-    stage1_init_yaw_deg_min: float = -2.0
-    stage1_init_yaw_deg_max: float = 2.0
+    stage1_init_y_min_m: float = -0.5  # 6.0: 从 -0.05 放宽到 -0.5
+    stage1_init_y_max_m: float = 0.5   # 6.0: 从 0.05 放宽到 0.5
+    stage1_init_yaw_deg_min: float = -15.0 # 6.0: 从 -2.0 放宽到 -15.0
+    stage1_init_yaw_deg_max: float = 15.0  # 6.0: 从 2.0 放宽到 15.0
 
     # 相机参数：
     # - 训练默认 256x256，进一步提升视觉特征提取精度
@@ -365,7 +365,7 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     alpha_1: float = 5.0     # 距离托盘奖励权重 (exp)
     alpha_2: float = 5.0     # 横向对齐奖励权重 (exp) - 实验5.6：从1.0提升到5.0，平衡Shaping权重
     alpha_3: float = 5.0     # 偏航角对齐奖励权重 (exp) - 实验5.6：从1.0提升到5.0，平衡Shaping权重
-    alpha_4: float = 5000.0   # 到达托盘特殊奖励权重 (rg) - 实验5.9：核弹级奖励，用于能力嫁接
+    alpha_4: float = 200.0   # 到达托盘特殊奖励权重 (rg) - 实验6.0：回调至正常值，避免大角度对齐时变成推土机
     alpha_lift: float = 5.0  # 举升奖励权重（论文补丁，用于端到端）
 
     # 负向惩罚权重 (Penalty Reward R-)
