@@ -8,7 +8,7 @@ LOG_TYPE="train"
 NUM_ENVS="64"
 MAX_ITERATIONS="2000"
 RUN_NAME="exp5_9_nuclear_reward_early_stop_0.28"
-RESUME_DIR="2026-03-14_09-15-10_exp5_6_expert_reward_refactor_0.25"
+RESUME_DIR="2026-03-14_09-15-26_exp5_6_expert_reward_refactor_0.25"
 
 mkdir -p "${PROJECT_ROOT}/logs"
 BEIJING_TS="$(TZ=Asia/Shanghai date +%Y%m%d_%H%M%S)"
