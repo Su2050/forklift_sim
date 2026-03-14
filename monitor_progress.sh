@@ -1,23 +1,25 @@
 #!/bin/bash
-LOG_FILE="/home/uniubi/projects/forklift_sim/logs/20260314_081732_train_exp5_5_f_micro_step_0.28.log"
-OUT_FILE="/home/uniubi/projects/forklift_sim/docs/0310-0314experiments/exp5_5f_live_monitor.md"
-
-echo "# Exp 5.5f Live Monitor (Threshold: 0.28m, alpha_5: 3.0, from 5.5b)" > $OUT_FILE
-echo "Updated every 60 seconds. (Last updated: $(date))" >> $OUT_FILE
-echo "" >> $OUT_FILE
-echo "| Time | Iteration | rg (Success) | Yaw Err (deg) | Pallet Disp (m) |" >> $OUT_FILE
-echo "|---|---|---|---|---|" >> $OUT_FILE
+LOG_FILE="/home/uniubi/projects/forklift_sim/logs/20260314_091510_train_exp5_6_expert_reward_refactor_0.25.log"
+MD_FILE="/home/uniubi/projects/forklift_sim/docs/0310-0314experiments/exp5_6_live_monitor.md"
 
 while true; do
     if [ -f "$LOG_FILE" ]; then
-        TIME=$(date "+%H:%M:%S")
-        ITER=$(grep "Learning iteration" $LOG_FILE | tail -n 1 | sed -n 's/.*iteration \([0-9]*\/[0-9]*\).*/\1/p')
-        RG=$(grep "paper_reward/rg:" $LOG_FILE | tail -n 1 | awk '{print $2}')
-        YAW=$(grep "err/yaw_deg_mean:" $LOG_FILE | tail -n 1 | awk '{print $2}')
-        DISP=$(grep "diag/pallet_disp_xy_mean:" $LOG_FILE | tail -n 1 | awk '{print $2}')
+        # 提取最新的 Iteration
+        ITER=$(grep -a "Iteration:" "$LOG_FILE" | tail -n 1 | awk '{print $4}')
         
         if [ ! -z "$ITER" ]; then
-            echo "| $TIME | $ITER | $RG | $YAW | $DISP |" >> $OUT_FILE
+            # 提取各项指标
+            RG=$(grep -a "Episode Reward/rg:" "$LOG_FILE" | tail -n 1 | awk '{print $3}')
+            YAW=$(grep -a "Metrics/yaw_err_deg:" "$LOG_FILE" | tail -n 1 | awk '{print $2}')
+            LAT=$(grep -a "Metrics/lateral_err_m:" "$LOG_FILE" | tail -n 1 | awk '{print $2}')
+            DISP=$(grep -a "Metrics/pallet_disp_m:" "$LOG_FILE" | tail -n 1 | awk '{print $2}')
+            DIST=$(grep -a "Metrics/dist_front_m:" "$LOG_FILE" | tail -n 1 | awk '{print $2}')
+            
+            # 获取当前时间
+            TIME=$(date "+%H:%M:%S")
+            
+            # 写入 Markdown 表格
+            echo "| $TIME | $ITER | $RG | $YAW | $LAT | $DISP | $DIST |" >> "$MD_FILE"
         fi
     fi
     sleep 60
