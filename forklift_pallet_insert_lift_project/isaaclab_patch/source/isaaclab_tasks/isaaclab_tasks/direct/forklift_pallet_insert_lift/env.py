@@ -1239,8 +1239,8 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         # rg: 到达奖励 (当叉臂中心距离托盘中心很近，且姿态对准时)
         # 论文中是到达托盘，因为我们用了中心距离，所以阈值设为 0.1m
         rg = ((dist_center < self.cfg.paper_rg_dist_thresh) & 
-              (tip_y_err < 0.15) & 
-              (yaw_err_deg < 10.0)).float()
+              (tip_y_err < 0.20) & 
+              (yaw_err_deg < 15.0)).float()
 
         # r_lift: 举升奖励 (论文补丁，用于端到端训练)
         # 当叉车插入到位 (rg 触发) 时，根据举升高度给予奖励

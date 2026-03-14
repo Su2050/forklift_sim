@@ -363,8 +363,8 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     # ---- 实验 4: 论文原生 Reward (Paper Native Reward) ----
     # 正向奖励权重 (Positive Reward R+)
     alpha_1: float = 5.0     # 距离托盘奖励权重 (exp)
-    alpha_2: float = 1.0     # 横向对齐奖励权重 (exp) - 实验5.2：替换轨迹奖励为绝对姿态奖励
-    alpha_3: float = 1.0     # 偏航角对齐奖励权重 (exp) - 实验5.2：替换轨迹奖励为绝对姿态奖励
+    alpha_2: float = 5.0     # 横向对齐奖励权重 (exp) - 实验5.6：从1.0提升到5.0，平衡Shaping权重
+    alpha_3: float = 5.0     # 偏航角对齐奖励权重 (exp) - 实验5.6：从1.0提升到5.0，平衡Shaping权重
     alpha_4: float = 200.0   # 到达托盘特殊奖励权重 (rg) - 极大的终局奖励
     alpha_lift: float = 5.0  # 举升奖励权重（论文补丁，用于端到端）
 
@@ -380,7 +380,7 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     paper_fork_vel_thresh: float = 0.07    # 叉车超速阈值 (m/s)
     paper_ini_vel_thresh: float = 0.05     # 初始停滞速度阈值 (m/s)
     paper_ini_dist_thresh: float = 0.3     # 初始停滞距离阈值 (m)
-    paper_rg_dist_thresh: float = 0.28     # 触发 rg 的距离阈值 (m) - 实验5.5f：从0.3m微调到0.28m
+    paper_rg_dist_thresh: float = 0.25     # 触发 rg 的距离阈值 (m) - 实验5.6：配合放宽的姿态门槛，直接挑战0.25m
     paper_out_of_bounds_dist: float = 3.0  # 越界逃跑距离阈值 (m)
     paper_eps: float = 0.01                # 防止除零的极小值
 
