@@ -27,4 +27,4 @@ env TERM=xterm PYTHONUNBUFFERED=1 CONDA_PREFIX="" CONDA_DEFAULT_ENV="" \
   agent.obs_groups.policy='[image, proprio]' \
   agent.obs_groups.critic='[critic]' \
   agent.policy.imagenet_backbone_init=true \
-  agent.policy.freeze_backbone=true
+  agent.policy.freeze_backbone=false

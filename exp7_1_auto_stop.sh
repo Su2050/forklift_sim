@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-LOG_FILE=$(ls -t /home/uniubi/projects/forklift_sim/logs/*_train_exp7_1_camera_fov_75deg.log | head -n 1)
+LOG_FILE=$(ls -t /home/uniubi/projects/forklift_sim/logs/*_train_exp7_1_camera_fov_75deg_resnet34.log | head -n 1)
 
-echo "Auto-Stopping Monitor for Exp 7.1"
+echo "Auto-Stopping Monitor for Exp 7.1 (ResNet34)"
 echo "Target: rg > 0.7 AND yaw_deg_mean < 3.0"
 echo "Log file: $LOG_FILE"
 echo "--------------------------------------------------------"
