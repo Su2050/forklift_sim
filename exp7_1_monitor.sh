@@ -3,7 +3,7 @@ set -euo pipefail
 
 # 找到最新的 exp7_1 resnet34 日志文件
 LOG_FILE=$(ls -t /home/uniubi/projects/forklift_sim/logs/*_train_exp7_1_camera_fov_75deg_resnet34.log | head -n 1)
-OUTPUT_MD="/home/uniubi/projects/forklift_sim/docs/0310-0315experiments/exp7_1_live_monitor.md"
+OUTPUT_MD="/home/uniubi/projects/forklift_sim/docs/0310-0315experiments/exp7_camera_fov_fix/exp7_1_live_monitor.md"
 
 echo "# Exp 7.1 Live Monitor (Camera FOV 75°, ResNet34)" > "$OUTPUT_MD"
 echo "Log file: $LOG_FILE" >> "$OUTPUT_MD"
