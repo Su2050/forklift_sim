@@ -40,6 +40,22 @@ class ResNet18VisionBackbone(nn.Module):
         return feat.flatten(1)
 
 
+class ResNet34VisionBackbone(nn.Module):
+    """ResNet-34 visual backbone using standard ImageNet features."""
+
+    def __init__(self, imagenet_init: bool = True):
+        super().__init__()
+        weights = tv_models.ResNet34_Weights.IMAGENET1K_V1 if imagenet_init else None
+        resnet = tv_models.resnet34(weights=weights)
+        # Remove the final fully connected layer
+        self.features = nn.Sequential(*list(resnet.children())[:-1])
+
+    def forward(self, image: torch.Tensor) -> torch.Tensor:
+        # ResNet34 features output shape: (B, 512, 1, 1)
+        feat = self.features(image)
+        return feat.flatten(1)
+
+
 def freeze_module(module: nn.Module, frozen: bool = True) -> None:
     for param in module.parameters():
         param.requires_grad = not frozen

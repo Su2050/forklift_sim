@@ -72,6 +72,9 @@ class VisionActorCritic(nn.Module):
         elif backbone_type == "resnet18":
             from .vision_backbone import ResNet18VisionBackbone
             self.image_encoder = ResNet18VisionBackbone(imagenet_init=bool(imagenet_backbone_init))
+        elif backbone_type == "resnet34":
+            from .vision_backbone import ResNet34VisionBackbone
+            self.image_encoder = ResNet34VisionBackbone(imagenet_init=bool(imagenet_backbone_init))
         else:
             raise ValueError(f"Unknown backbone_type: {backbone_type}")
 
