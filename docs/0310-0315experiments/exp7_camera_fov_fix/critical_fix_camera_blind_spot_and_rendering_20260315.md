@@ -33,8 +33,8 @@ camera_rpy_local_deg: tuple[float, float, float] = (0.0, 75.0, 0.0)
 <video src="../images/camera_75deg_no_blind_spot.mp4" controls width="400"></video>
 *视频2：在 75度 视角下，叉车在整个接近和插入过程中，货叉根部和托盘始终清晰可见，消除了盲区。*
 
-![75度视角下的托盘与货叉](../images/camera_75deg_view.png)
-*图1：75度俯仰角下，即使托盘插到底部，依然清晰可见。*
+![75度视角下的托盘与货叉（渲染前）](../images/camera_75deg_view.png)
+*图1：75度俯仰角下，即使托盘插到底部，依然清晰可见。（注：此图为未加载完整材质时的静态截图，由于光照原因，黑色货叉与地面融合，容易产生视觉错觉，这也是我们后续需要修改渲染颜色的原因。）*
 
 ---
 
