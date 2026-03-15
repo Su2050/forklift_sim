@@ -41,6 +41,8 @@ camera_rpy_local_deg: tuple[float, float, float] = (0.0, 75.0, 0.0)
 ## 2. 渲染机制揭秘：为什么训练图像看起来像“灰度图”？
 
 在排查过程中，我们提取了神经网络在训练时真正接收到的图像张量（Tensor），发现画面极其简陋，物体只有黑、白、灰三种颜色，且货叉（黑色）与地面（深灰色）几乎融为一体。
+具体可以看下这个图片，/home/uniubi/projects/forklift_sim/docs/0310-0315experiments/images/camera_75deg_view.png，图片中根本看不到货叉已经插到底部了，/home/uniubi/projects/forklift_sim/docs/0310-0315experiments/images/camera_75deg_no_blind_spot.mp4视频对比起来看更加明显
+
 
 ### 2.1 现象背后的原因：性能与保真度的妥协
 这并非 Bug，而是大规模并行视觉 RL 训练中普遍存在的**工程妥协**。
