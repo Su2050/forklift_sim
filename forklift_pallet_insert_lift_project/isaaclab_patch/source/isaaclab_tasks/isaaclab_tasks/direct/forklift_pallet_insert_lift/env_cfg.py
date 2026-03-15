@@ -73,10 +73,10 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     # 如果距离是 0.6m (在托盘外)，tip_x = -1.68m -> x_root = -3.55m
     stage1_init_x_min_m: float = -3.55
     stage1_init_x_max_m: float = -3.25
-    stage1_init_y_min_m: float = -0.1  # 6.0b: 微步扩展，从 0.05 到 0.1
-    stage1_init_y_max_m: float = 0.1   # 6.0b: 微步扩展，从 0.05 到 0.1
-    stage1_init_yaw_deg_min: float = -5.0 # 6.0b: 微步扩展，从 2.0 到 5.0
-    stage1_init_yaw_deg_max: float = 5.0  # 6.0b: 微步扩展，从 2.0 到 5.0
+    stage1_init_y_min_m: float = -0.05  # 7.1 阶段：极窄范围重建核心能力
+    stage1_init_y_max_m: float = 0.05   
+    stage1_init_yaw_deg_min: float = -2.0 
+    stage1_init_yaw_deg_max: float = 2.0  
 
     # 相机参数：
     # - 训练默认 256x256，进一步提升视觉特征提取精度
@@ -89,7 +89,7 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     # 这里的值等价于前方 1.3m、上方 2.5m。
     camera_pos_local: tuple[float, float, float] = (130.0, 0.0, 250.0)
     # 在 world 约定下，pitch=+45° 表示相机向下俯视 45°。
-    camera_rpy_local_deg: tuple[float, float, float] = (0.0, 60.0, 0.0)
+    camera_rpy_local_deg: tuple[float, float, float] = (0.0, 75.0, 0.0)
 
     # easy8 + privileged 维度（供 obs 组装使用）
     easy8_dim: int = 8
