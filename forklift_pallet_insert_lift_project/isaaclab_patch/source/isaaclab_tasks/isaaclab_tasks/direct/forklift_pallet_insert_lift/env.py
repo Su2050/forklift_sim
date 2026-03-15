@@ -1312,9 +1312,9 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         
         # 更新持有时长计数器 (用于 success 判断)
         # 实验 4 修改：论文中没有举升阶段，只要插入且对准就算成功
-        # 修复历史 Bug: insert_norm 物理上限只有约 0.47，不能用 0.8 判断
         insert_norm = torch.clamp(insert_depth / (self.cfg.pallet_depth_m + 1e-6), 0.0, 1.0)
-        is_inserted = insert_norm > self.cfg.insert_fraction
+        # 修复历史遗留的硬编码 0.8 bug，使用配置中的 insert_fraction (0.40)
+        is_inserted = insert_norm >= self.cfg.insert_fraction
         is_aligned = (y_err < 0.1) & (yaw_err_deg < 5.0)
         # is_lifted = lift_height > 0.05
         
