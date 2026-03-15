@@ -19,7 +19,7 @@
 *   **后果**：模型在最后几厘米的关键冲刺阶段变成了“瞎子”，只能依靠本体感觉（proprioception）盲猜，导致无法精准停止，从而产生推盘行为。
 
 **调整前的问题演示 (60度视角)：**
-<video src="../images/camera_60deg_blind_spot.mp4" controls width="400"></video>
+<video src="/home/uniubi/projects/forklift_sim/IsaacLab/logs/rsl_rl/forklift_pallet_insert_lift/2026-03-15_07-52-04_exp6_0_b_micro_generalization_stage1/videos/exp6_0_b_best_1450_camera/rl-video-step-0.mp4" controls width="400"></video>
 *视频1：在 60度 视角下，当叉车接近并插入托盘时，托盘在最后阶段突然从画面下方消失，导致模型失去视觉目标。*
 
 ### 解决方案：调整为 75度
@@ -30,7 +30,7 @@ camera_rpy_local_deg: tuple[float, float, float] = (0.0, 75.0, 0.0)
 **效果**：通过动态视频验证，75度视角下，相机的视野能够完整覆盖整个货叉以及插入到底的托盘。托盘在整个插入过程中始终保持在视野内，彻底消除了视觉盲区。
 
 **调整后的效果演示 (75度视角)：**
-<video src="../images/camera_75deg_no_blind_spot.mp4" controls width="400"></video>
+<video src="/home/uniubi/projects/forklift_sim/IsaacLab/logs/rsl_rl/forklift_pallet_insert_lift/2026-03-15_07-52-04_exp6_0_b_micro_generalization_stage1/videos/test_75deg_dynamic_camera/rl-video-step-0.mp4" controls width="400"></video>
 *视频2：在 75度 视角下，叉车在整个接近和插入过程中，货叉根部和托盘始终清晰可见，消除了盲区。*
 
 ![75度视角下的托盘与货叉（渲染前）](../images/camera_75deg_view.png)
