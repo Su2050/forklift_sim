@@ -58,6 +58,7 @@ class ForkliftInsertLiftPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         freeze_backbone=False,  # 不冻结，从头训练
         freeze_backbone_updates=0,
         imagenet_backbone_init=True,
+        backbone_type="resnet34",
     )
 
     # PPO algorithm：优化与损失相关超参数
