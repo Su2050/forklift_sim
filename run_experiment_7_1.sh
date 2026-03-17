@@ -3,7 +3,7 @@ set -euo pipefail
 
 PROJECT_ROOT="/home/uniubi/projects/forklift_sim"
 ISAACLAB_DIR="${PROJECT_ROOT}/IsaacLab"
-RUN_NAME="exp7_1_camera_fov_75deg_narrow_init"
+RUN_NAME="exp7_1_camera_fov_75deg_frozen_resnet34"
 
 cd "${ISAACLAB_DIR}"
 
@@ -27,4 +27,4 @@ env TERM=xterm PYTHONUNBUFFERED=1 CONDA_PREFIX="" CONDA_DEFAULT_ENV="" \
   agent.obs_groups.policy='[image, proprio]' \
   agent.obs_groups.critic='[critic]' \
   agent.policy.imagenet_backbone_init=true \
-  agent.policy.freeze_backbone=false
+  agent.policy.freeze_backbone=true

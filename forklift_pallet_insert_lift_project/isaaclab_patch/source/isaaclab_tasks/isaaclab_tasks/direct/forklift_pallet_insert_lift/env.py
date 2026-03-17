@@ -1206,7 +1206,7 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
 
         dist_front = torch.clamp(s_front - s_tip, min=0.0)
         insert_depth = torch.clamp(s_tip - s_front, min=0.0)
-        
+
         # 仍需 insert_depth 用于 _apply_action 安全制动
         self._last_insert_depth = insert_depth.detach()
 
@@ -1323,7 +1323,7 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         
         # 记录 episode 成功率
         success = self._hold_counter >= self._hold_steps
-        
+
         # 记录 push-free success (成功且托盘位移小)
         pallet_init_pos_xy = torch.tensor(self.cfg.pallet_cfg.init_state.pos[:2], device=self.device)
         pallet_disp_xy = torch.norm(pallet_pos[:, :2] - pallet_init_pos_xy, dim=-1)

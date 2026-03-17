@@ -33,7 +33,7 @@ visual_material=sim_utils.PreviewSurfaceCfg(
     *   `stage1_init_yaw_deg_min`, `max`: `[-2.0, 2.0]`
 *   **奖励设置**：
     *   `paper_rg_dist_thresh`: `0.28` (物理可达的深度)
-    *   `alpha_4 (rg)`: `5000.0` (核弹奖励，提供极强的正向梯度)
+    *   `alpha_4 (rg)`: `50.0` (回归正常奖励，避免 Value Loss 爆炸)
     *   `alpha_5 (推盘惩罚)`: `3.0` (保持严格，防止养成坏习惯)
     *   `alpha_2, alpha_3 (姿态引导)`: `5.0` (全局姿态引导)
 *   **预期结果**：在 1000~1500 代内，成功率达到 70% 以上，yaw < 3°。
