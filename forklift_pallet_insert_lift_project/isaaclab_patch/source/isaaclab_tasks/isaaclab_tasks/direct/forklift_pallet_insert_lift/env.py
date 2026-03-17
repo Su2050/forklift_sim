@@ -192,6 +192,11 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self._traj_tangents = torch.zeros((self.num_envs, self.cfg.traj_num_samples, 2), device=self.device)
         self._traj_s_norm = torch.zeros((self.num_envs, self.cfg.traj_num_samples), device=self.device)
         self._prev_phi_traj = torch.zeros((self.num_envs,), device=self.device)
+        # _reset_idx 中引用的遗留缓存（必须初始化以防 AttributeError）
+        self._prev_phi_align = torch.zeros((self.num_envs,), device=self.device)
+        self._prev_phi_lift_progress = torch.zeros((self.num_envs,), device=self.device)
+        self._last_phi_total = torch.zeros((self.num_envs,), device=self.device)
+        self._last_lift_pos = torch.zeros((self.num_envs,), device=self.device)
         # S1.0Q: 死区撤退 shaping 状态量
         self._prev_insert_norm = torch.zeros((self.num_envs,), device=self.device)
         self._prev_in_dead_zone = torch.zeros((self.num_envs,), dtype=torch.bool, device=self.device)
