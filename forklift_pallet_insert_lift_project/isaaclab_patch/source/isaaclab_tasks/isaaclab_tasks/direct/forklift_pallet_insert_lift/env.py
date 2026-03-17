@@ -173,28 +173,25 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self._hold_counter = torch.zeros((self.num_envs,), dtype=torch.float32, device=self.device)
         self._lift_pos_target = torch.zeros((self.num_envs,), device=self.device)
 
-        # ---- S1.0k: 势函数 shaping 缓存 ----
+        # ---- 实验 B: 论文原生 Reward 缓存 ----
         self._is_first_step = torch.ones((self.num_envs,), dtype=torch.bool, device=self.device)
-        self._last_phi_total = torch.zeros((self.num_envs,), device=self.device)
-        self._last_lift_pos = torch.zeros((self.num_envs,), device=self.device)
-        # S1.0L: milestones + early-stop buffers
-        # S1.0M: 从 4 列扩展到 6 列（新增 fine_align + precise_align）
-        # S1.0N: 从 6 列扩展到 7 列（新增 gate_align）
         self._milestone_flags = torch.zeros((self.num_envs, 7), dtype=torch.bool, device=self.device)
-        # S1.0N: delta hold-align shaping 状态量
-        self._prev_phi_align = torch.zeros((self.num_envs,), device=self.device)
-        # S1.0O-A3: lift 进度 delta 势函数缓存
-        self._prev_phi_lift_progress = torch.zeros((self.num_envs,), device=self.device)
         self._fly_counter = torch.zeros((self.num_envs,), dtype=torch.int32, device=self.device)
         self._stall_counter = torch.zeros((self.num_envs,), dtype=torch.int32, device=self.device)
         self._early_stop_fly = torch.zeros((self.num_envs,), dtype=torch.bool, device=self.device)
         self._early_stop_stall = torch.zeros((self.num_envs,), dtype=torch.bool, device=self.device)
+        
         # S1.0Q Batch-3: dead-zone stuck detector
         self._dz_stuck_counter = torch.zeros((self.num_envs,), dtype=torch.int32, device=self.device)
         self._prev_y_err = torch.zeros((self.num_envs,), device=self.device)
         self._early_stop_dz_stuck = torch.zeros((self.num_envs,), dtype=torch.bool, device=self.device)
-        # S1.0Q Batch-4: penOnly 消融首次触发标记
         self._dz_stuck_fired = torch.zeros((self.num_envs,), dtype=torch.bool, device=self.device)
+        
+        # 实验 B: 轨迹缓存
+        self._traj_pts = torch.zeros((self.num_envs, self.cfg.traj_num_samples, 2), device=self.device)
+        self._traj_tangents = torch.zeros((self.num_envs, self.cfg.traj_num_samples, 2), device=self.device)
+        self._traj_s_norm = torch.zeros((self.num_envs, self.cfg.traj_num_samples), device=self.device)
+        self._prev_phi_traj = torch.zeros((self.num_envs,), device=self.device)
         # S1.0Q: 死区撤退 shaping 状态量
         self._prev_insert_norm = torch.zeros((self.num_envs,), device=self.device)
         self._prev_in_dead_zone = torch.zeros((self.num_envs,), dtype=torch.bool, device=self.device)
@@ -1447,7 +1444,7 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self._window_ptr[env_ids] = 0
         self._window_filled[env_ids] = False
 
-        # ==== 实验 3.1: 生成参考轨迹 ====
+        # ==== 实验 A: 生成参考轨迹 (仅用于兼容日志，不参与奖励) ====
         self._prev_phi_traj[env_ids] = 0.0
         self._build_reference_trajectory(env_ids)
 
@@ -1477,12 +1474,19 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
                 device=self.device,
             )
         else:
-            # _pallet_front_x ≈ -1.08m，fork_forward_offset ≈ 1.87m
-            # x_max 需满足: x_max + 1.87*cos(yaw_max) < -1.08 → x_max < -2.89m
-            # 取 -3.0m 留安全裕度，避免叉齿穿透托盘导致 PhysX 去穿透弹飞托盘
-            x = sample_uniform(-4.0, -3.0, (len(env_ids), 1), device=self.device)
-            y = sample_uniform(-0.6, 0.6, (len(env_ids), 1), device=self.device)
-            yaw = sample_uniform(-0.25, 0.25, (len(env_ids), 1), device=self.device)
+            # 实验 B: 保守随机初始分布 (1.5~2.5m 距离，±0.5m 横向，±15° 偏航)
+            # 托盘前沿在 -1.08m，叉尖在车体前方 1.87m
+            # 距离托盘前沿 d_m 时，车体 x = -1.08 - 1.87 - d = -2.95 - d
+            # d_m = 1.5m -> x = -4.45m
+            # d_m = 2.5m -> x = -5.45m
+            x = sample_uniform(-5.45, -4.45, (len(env_ids), 1), device=self.device)
+            y = sample_uniform(-0.5, 0.5, (len(env_ids), 1), device=self.device)
+            yaw = sample_uniform(
+                -15.0 * math.pi / 180.0,
+                15.0 * math.pi / 180.0,
+                (len(env_ids), 1),
+                device=self.device,
+            )
         z = torch.full((len(env_ids), 1), 0.03, device=self.device)
 
         pos = torch.cat([x, y, z], dim=1)
