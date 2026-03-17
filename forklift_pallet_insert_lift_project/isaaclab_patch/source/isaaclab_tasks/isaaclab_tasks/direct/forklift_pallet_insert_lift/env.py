@@ -1157,9 +1157,8 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         return obs_dict
 
     def _get_rewards(self) -> torch.Tensor:
-        """实验 4: 回归论文原生 Reward 体系 (Paper Native Reward)"""
+        """实验 B: 去过度设计版论文原生 Reward"""
         # ---- 从 PhysX view 刷新关节数据 ----
-        # _get_rewards() 在 _get_observations() 之前调用，需要先刷新
         self._joint_pos[:] = self.robot.root_physx_view.get_dof_positions()
         self._joint_vel[:] = self.robot.root_physx_view.get_dof_velocities()
 
@@ -1210,14 +1209,13 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         # 仍需 insert_depth 用于 _apply_action 安全制动
         self._last_insert_depth = insert_depth.detach()
 
-        # ---- 实验 4: 论文原生 Reward 计算 ----
+        # ---- 实验 B: 论文原生 Reward 计算 ----
         
-        # 1. 轨迹相关变量 (复用 3.1 的轨迹查询，仅用于日志)
+        # 1. 轨迹相关变量 (复用 3.1 的轨迹查询)
         d_traj, yaw_traj_err_deg, _ = self._query_reference_trajectory()
+        yaw_traj_err_rad = yaw_traj_err_deg * (math.pi / 180.0)
         
-        # 2. 距离 rd 的定义：叉臂中心到目标叉臂中心的距离 (修复重大几何Bug)
-        # 目标叉臂中心：当叉车完全插入时，叉根抵住托盘前沿。
-        # 托盘前沿坐标：
+        # 2. 距离 rd 的定义：叉臂中心到目标叉臂中心的距离
         pallet_yaw = _quat_to_yaw(self.pallet.data.root_quat_w)
         pallet_front_x = pallet_pos[:, 0] - (self.cfg.pallet_depth_m / 2.0) * torch.cos(pallet_yaw)
         pallet_front_y = pallet_pos[:, 1] - (self.cfg.pallet_depth_m / 2.0) * torch.sin(pallet_yaw)
@@ -1229,31 +1227,24 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         
         dist_center = torch.norm(fork_center[:, :2] - target_center, dim=-1)
 
-        # 3. 正向奖励 R+ (实验 5.3: 恢复 dist_center 保证插入过程有梯度)
-        # 之前用 dist_front 导致叉尖碰到托盘后梯度消失（因为 clamp 截断了负值）
-        r_dist = torch.exp(-dist_center / 1.0)
-        # 替换轨迹奖励为绝对姿态奖励，避免 Agent 为了保持轨迹而拒绝前进
-        r_lat = torch.exp(-tip_y_err / 0.2)
-        r_yaw = torch.exp(-yaw_err_rad / 0.2)
-
-        # 6.0b: 移除空间衰减，恢复全局姿态引导，逼迫它在远处就开始调整姿态
-        # decay_factor = torch.exp(-dist_center / 1.0)
+        # 3. 正向奖励 R+ (使用 exp 替代 1/x 防止数值爆炸)
+        r_d = torch.exp(-dist_center / 1.0)
+        r_cd = torch.exp(-d_traj / 0.2)
+        r_cpsi = torch.exp(-yaw_traj_err_rad / 0.2)
 
         # rg: 到达奖励 (当叉臂中心距离托盘中心很近，且姿态对准时)
-        # 论文中是到达托盘，因为我们用了中心距离，所以阈值设为 0.1m
         rg = ((dist_center < self.cfg.paper_rg_dist_thresh) & 
               (tip_y_err < 0.20) & 
               (yaw_err_deg < 15.0)).float()
 
-        # r_lift: 举升奖励 (论文补丁，用于端到端训练)
-        # 当叉车插入到位 (rg 触发) 时，根据举升高度给予奖励
+        # r_lift: 举升奖励 (纯 approach 阶段设为 0)
         lift_height_joint = self._joint_pos[:, self._lift_id]
         r_lift = rg * lift_height_joint * self.cfg.alpha_lift
 
         R_plus = (
-            self.cfg.alpha_1 * r_dist +
-            self.cfg.alpha_2 * r_lat +
-            self.cfg.alpha_3 * r_yaw +
+            self.cfg.alpha_1 * r_d +
+            self.cfg.alpha_2 * r_cd +
+            self.cfg.alpha_3 * r_cpsi +
             self.cfg.alpha_4 * rg +
             r_lift
         )
@@ -1274,8 +1265,7 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         # ra: 动作突变惩罚
         ra = -torch.norm(self.actions - self.previous_actions, dim=-1) ** 2
         
-        # rini: 初始停滞惩罚 (实验 5.2 修复: 改为投影速度，防止原地鬼畜)
-        # 计算向托盘的投影速度
+        # rini: 初始停滞惩罚 (已修复: proj_vel < 0.05 且 dist_front > 0.3)
         fork_vel_xy_vec = self.robot.data.root_vel_w[:, :2]
         proj_vel = torch.sum(fork_vel_xy_vec * u_in, dim=-1)
         rini = torch.where(
@@ -1284,8 +1274,7 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
             0.0
         )
 
-        # r_out: 越界逃跑惩罚 (新增漏洞补丁)
-        # 实验 5.2: 改用 dist_front，更直观
+        # r_out: 越界逃跑惩罚
         r_out = torch.where(
             dist_front > self.cfg.paper_out_of_bounds_dist,
             -1.0,
@@ -1311,12 +1300,9 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         # ==================================================================
         
         # 更新持有时长计数器 (用于 success 判断)
-        # 实验 4 修改：论文中没有举升阶段，只要插入且对准就算成功
         insert_norm = torch.clamp(insert_depth / (self.cfg.pallet_depth_m + 1e-6), 0.0, 1.0)
-        # 修复历史遗留的硬编码 0.8 bug，使用配置中的 insert_fraction (0.40)
         is_inserted = insert_norm >= self.cfg.insert_fraction
         is_aligned = (y_err < 0.1) & (yaw_err_deg < 5.0)
-        # is_lifted = lift_height > 0.05
         
         hold_cond = is_inserted & is_aligned
         self._hold_counter = torch.where(hold_cond, self._hold_counter + 1, 0.0)
@@ -1332,12 +1318,12 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         if "log" not in self.extras:
             self.extras["log"] = {}
 
-        # 实验 4 日志
+        # 实验 B 日志
         self.extras["log"]["paper_reward/R_plus"] = R_plus.mean()
         self.extras["log"]["paper_reward/R_minus"] = R_minus.mean()
-        self.extras["log"]["paper_reward/r_dist"] = r_dist.mean()
-        self.extras["log"]["paper_reward/r_lat"] = r_lat.mean()
-        self.extras["log"]["paper_reward/r_yaw"] = r_yaw.mean()
+        self.extras["log"]["paper_reward/r_d"] = r_d.mean()
+        self.extras["log"]["paper_reward/r_cd"] = r_cd.mean()
+        self.extras["log"]["paper_reward/r_cpsi"] = r_cpsi.mean()
         self.extras["log"]["paper_reward/rg"] = rg.mean()
         self.extras["log"]["paper_reward/r_lift"] = r_lift.mean()
         self.extras["log"]["paper_reward/rp"] = rp.mean()

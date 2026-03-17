@@ -360,20 +360,20 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     tip_align_exit_m: float = 0.16         # Schmitt exit: tip_y_err > this breaks hold
     tip_align_near_dist: float = 2.2       # tip constraint only active below this dist
 
-    # ---- 实验 4: 论文原生 Reward (Paper Native Reward) ----
+    # ---- 实验 B: 去过度设计版论文原生 Reward ----
     # 正向奖励权重 (Positive Reward R+)
-    alpha_1: float = 5.0     # 距离托盘奖励权重 (exp)
-    alpha_2: float = 5.0     # 横向对齐奖励权重 (exp)
-    alpha_3: float = 5.0     # 偏航角对齐奖励权重 (exp)
-    alpha_4: float = 50.0    # 到达托盘特殊奖励权重 (rg) - 回归正常值
-    alpha_lift: float = 5.0  # 举升奖励权重（论文补丁，用于端到端）
+    alpha_1: float = 5.0     # r_d 权重 (距离托盘)
+    alpha_2: float = 5.0     # r_cd 权重 (距离参考轨迹)
+    alpha_3: float = 5.0     # r_cpsi 权重 (偏航角对齐参考轨迹)
+    alpha_4: float = 50.0    # rg 权重 (到达托盘特殊奖励)
+    alpha_lift: float = 0.0  # 举升奖励权重（纯 approach 设为 0）
 
     # 负向惩罚权重 (Penalty Reward R-)
-    alpha_5: float = 3.0     # 推盘惩罚权重 (rp) - 实验5.5f：恢复3.0，保持高精度
-    alpha_6: float = 1.0     # 超速惩罚权重 (rv)
-    alpha_7: float = 1.0     # 动作突变惩罚权重 (ra)
-    alpha_8: float = 5.0     # 初始停滞惩罚权重 (rini) - 适当降低，因为现在shaping有界了
-    alpha_9: float = 50.0    # 越界逃跑惩罚权重 (r_out) - 惩罚倒车逃跑行为
+    alpha_5: float = 3.0     # rp 权重 (推盘惩罚)
+    alpha_6: float = 1.0     # rv 权重 (超速惩罚)
+    alpha_7: float = 1.0     # ra 权重 (动作突变惩罚)
+    alpha_8: float = 5.0     # rini 权重 (初始停滞惩罚)
+    alpha_9: float = 50.0    # r_out 权重 (越界逃跑惩罚)
     
     # 论文公式中的阈值
     paper_pallet_vel_thresh: float = 0.01  # 托盘移动速度阈值 (m/s)
