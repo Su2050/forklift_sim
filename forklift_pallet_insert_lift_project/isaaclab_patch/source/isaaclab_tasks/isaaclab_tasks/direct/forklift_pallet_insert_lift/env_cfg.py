@@ -381,7 +381,7 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     paper_ini_vel_thresh: float = 0.05     # 初始停滞速度阈值 (m/s)
     paper_ini_dist_thresh: float = 0.3     # 初始停滞距离阈值 (m)
     paper_rg_dist_thresh: float = 0.28     # 触发 rg 的距离阈值 (m) - 实验5.8：回归物理现实，从不可达的0.25m退回到0.28m
-    paper_out_of_bounds_dist: float = 3.0  # 越界逃跑距离阈值 (m)
+    paper_out_of_bounds_dist: float = 5.0  # 越界逃跑距离阈值 (m) - 修复：之前为3.0m，导致出生在远处的Agent直接被判定越界秒杀
     paper_eps: float = 0.01                # 防止除零的极小值
     paper_reward_c: float = 0.1            # 1/(x+c) 奖励形式的平滑常数，防止近距离数值爆炸
 
