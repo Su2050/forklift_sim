@@ -3,7 +3,7 @@ set -euo pipefail
 
 PROJECT_ROOT="/home/uniubi/projects/forklift_sim"
 ISAACLAB_DIR="${PROJECT_ROOT}/IsaacLab"
-RUN_NAME="branch_b_paper_native_inv_reward"
+RUN_NAME="branch_b_paper_native_inv_reward_fix_oob"
 LOG_TYPE="train"
 
 mkdir -p "${PROJECT_ROOT}/logs"
