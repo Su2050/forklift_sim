@@ -1230,9 +1230,10 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         dist_center = torch.norm(fork_center[:, :2] - target_center, dim=-1)
 
         # 3. 正向奖励 R+ (使用 exp 替代 1/x 防止数值爆炸)
-        r_d = torch.exp(-dist_center / 1.0)
-        r_cd = torch.exp(-d_traj / 0.2)
-        r_cpsi = torch.exp(-yaw_traj_err_rad / 0.2)
+        # 论文原生 1/(x+c) 形式，保持远场梯度，防止近场爆炸
+        r_d = 1.0 / (dist_center + self.cfg.paper_reward_c)
+        r_cd = 1.0 / (d_traj + self.cfg.paper_reward_c)
+        r_cpsi = 1.0 / (yaw_traj_err_rad + self.cfg.paper_reward_c)
 
         # rg: 到达奖励 (当叉臂中心距离托盘中心很近，且姿态对准时)
         rg = ((dist_center < self.cfg.paper_rg_dist_thresh) & 

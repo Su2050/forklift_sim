@@ -371,8 +371,8 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     # 负向惩罚权重 (Penalty Reward R-)
     alpha_5: float = 3.0     # rp 权重 (推盘惩罚)
     alpha_6: float = 1.0     # rv 权重 (超速惩罚)
-    alpha_7: float = 1.0     # ra 权重 (动作突变惩罚)
-    alpha_8: float = 5.0     # rini 权重 (初始停滞惩罚)
+    alpha_7: float = 0.5     # ra 权重 (动作突变惩罚) - 降低，鼓励探索
+    alpha_8: float = 20.0    # rini 权重 (初始停滞惩罚) - 提高，逼迫走出舒适区
     alpha_9: float = 50.0    # r_out 权重 (越界逃跑惩罚)
     
     # 论文公式中的阈值
@@ -383,6 +383,7 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     paper_rg_dist_thresh: float = 0.28     # 触发 rg 的距离阈值 (m) - 实验5.8：回归物理现实，从不可达的0.25m退回到0.28m
     paper_out_of_bounds_dist: float = 3.0  # 越界逃跑距离阈值 (m)
     paper_eps: float = 0.01                # 防止除零的极小值
+    paper_reward_c: float = 0.1            # 1/(x+c) 奖励形式的平滑常数，防止近距离数值爆炸
 
     # termination thresholds
     max_roll_pitch_rad: float = 0.45  # ~25 deg
