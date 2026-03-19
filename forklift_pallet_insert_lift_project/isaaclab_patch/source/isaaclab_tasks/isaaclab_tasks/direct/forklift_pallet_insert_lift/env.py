@@ -1256,10 +1256,13 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         lift_height_joint = self._joint_pos[:, self._lift_id]
         r_lift = rg * lift_height_joint * self.cfg.alpha_lift
 
+        # 动态放大近处的对齐奖励权重 (dist_front < 0.5m 时放大 3 倍)
+        alpha_3_dynamic = torch.where(dist_front < 0.5, self.cfg.alpha_3 * 3.0, self.cfg.alpha_3)
+
         R_plus = (
             self.cfg.alpha_1 * r_d +
             self.cfg.alpha_2 * r_cd +
-            self.cfg.alpha_3 * r_cpsi +
+            alpha_3_dynamic * r_cpsi +
             self.cfg.alpha_4 * rg +
             r_lift
         )
@@ -1279,6 +1282,10 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         
         # ra: 动作突变惩罚
         ra = -torch.norm(self.actions - self.previous_actions, dim=-1) ** 2
+        
+        # r_bound: 动作均值边界惩罚 (替代论文中的 L_bound 损失)
+        # 论文中 L_bound = ||mu(o_t)||，我们在这里用 ||a|| 作为 reward 惩罚，起到相同的正则化效果
+        r_bound = -torch.norm(self.actions, dim=-1)
         
         # rini: 初始停滞惩罚 (已修复: proj_vel < 0.05 且 dist_front > 0.3)
         fork_vel_xy_vec = self.robot.data.root_vel_w[:, :2]
@@ -1300,6 +1307,7 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
             self.cfg.alpha_5 * rp +
             self.cfg.alpha_6 * rv +
             self.cfg.alpha_7 * ra +
+            self.cfg.alpha_bound * r_bound +
             self.cfg.alpha_8 * rini +
             self.cfg.alpha_9 * r_out
         )

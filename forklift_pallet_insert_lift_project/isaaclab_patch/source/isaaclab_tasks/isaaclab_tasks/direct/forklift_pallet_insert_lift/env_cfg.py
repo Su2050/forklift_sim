@@ -372,6 +372,7 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     alpha_5: float = 0.5     # rp 权重 (推盘惩罚) - 大幅降低，允许初期试错
     alpha_6: float = 1.0     # rv 权重 (超速惩罚)
     alpha_7: float = 0.1     # ra 权重 (动作突变惩罚) - 降低，释放转向能力
+    alpha_bound: float = 0.5 # r_bound 权重 (动作绝对值惩罚，模拟论文中的 L_bound)
     alpha_8: float = 5.0     # rini 权重 (初始停滞惩罚) - 降回5.0，减少过度恐慌
     alpha_9: float = 50.0    # r_out 权重 (越界逃跑惩罚)
     
