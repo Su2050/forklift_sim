@@ -827,7 +827,9 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
     # ==========================================================================
     def _build_reference_trajectory(self, env_ids: torch.Tensor):
         """在 reset 时为每个 env 生成并缓存参考轨迹。
-        使用一段三次 Bézier 曲线连接起点和预对位点，再接一段直线进入托盘。
+        使用三次 Hermite 样条 (Cubic Hermite Spline) 作为 Clothoid 的近似，
+        连接起点和预对位点，再接一段直线进入托盘。
+        Hermite 样条能更好地保证起点和终点的切线方向，且曲率变化更平滑。
         """
         if len(env_ids) == 0:
             return
@@ -835,7 +837,7 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         # 1. 获取起点位姿
         p0 = self.robot.data.root_pos_w[env_ids, :2]  # (M, 2)
         yaw0 = _quat_to_yaw(self.robot.data.root_quat_w[env_ids])  # (M,)
-        h0 = torch.stack([torch.cos(yaw0), torch.sin(yaw0)], dim=-1)  # (M, 2)
+        t0 = torch.stack([torch.cos(yaw0), torch.sin(yaw0)], dim=-1)  # (M, 2)
 
         # 2. 获取托盘位姿与目标点
         pallet_pos = self.pallet.data.root_pos_w[env_ids, :2]  # (M, 2)
@@ -846,32 +848,42 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         p_goal = pallet_pos + s_front * u_in  # 托盘前沿中心点
         p_pre = pallet_pos + (s_front - self.cfg.traj_pre_dist_m) * u_in  # 预对位点
 
-        # 3. 构造三次 Bézier 控制点 (M, 4, 2)
-        B0 = p0
-        B1 = p0 + self.cfg.traj_ctrl_start_m * h0
-        B2 = p_pre - self.cfg.traj_ctrl_goal_m * u_in
-        B3 = p_pre
+        # 3. 构造三次 Hermite 样条
+        # 计算起点到预对位点的直线距离，用于控制切线长度 (影响曲线弯曲程度)
+        dist = torch.norm(p_pre - p0, dim=-1, keepdim=True)
+        # 经验常数 1.5，距离越远，切线越长，曲线越平缓，更符合 Clothoid 的特性
+        L = dist * 1.5
+        
+        m0 = t0 * L
+        m1 = u_in * L  # 终点切线方向必须对准托盘
 
         # 4. 离散化轨迹
         num_samples = self.cfg.traj_num_samples
-        # 预先分配采样点，前 70% 用于 Bézier，后 30% 用于直线
-        num_bezier = int(num_samples * 0.7)
-        num_line = num_samples - num_bezier
+        # 预先分配采样点，前 70% 用于 Hermite 曲线，后 30% 用于直线
+        num_curve = int(num_samples * 0.7)
+        num_line = num_samples - num_curve
 
-        t_bez = torch.linspace(0.0, 1.0, num_bezier, device=self.device).view(1, -1, 1)  # (1, num_bezier, 1)
-        # Bézier 曲线公式: (1-t)^3*B0 + 3*(1-t)^2*t*B1 + 3*(1-t)*t^2*B2 + t^3*B3
-        pts_bez = (
-            (1 - t_bez)**3 * B0.unsqueeze(1) +
-            3 * (1 - t_bez)**2 * t_bez * B1.unsqueeze(1) +
-            3 * (1 - t_bez) * t_bez**2 * B2.unsqueeze(1) +
-            t_bez**3 * B3.unsqueeze(1)
-        )  # (M, num_bezier, 2)
+        t = torch.linspace(0.0, 1.0, num_curve, device=self.device).view(1, -1, 1)  # (1, num_curve, 1)
+        t2 = t ** 2
+        t3 = t ** 3
+        
+        h00 = 2*t3 - 3*t2 + 1
+        h10 = t3 - 2*t2 + t
+        h01 = -2*t3 + 3*t2
+        h11 = t3 - t2
+        
+        p0_exp = p0.unsqueeze(1)
+        m0_exp = m0.unsqueeze(1)
+        p1_exp = p_pre.unsqueeze(1)
+        m1_exp = m1.unsqueeze(1)
+        
+        pts_curve = h00 * p0_exp + h10 * m0_exp + h01 * p1_exp + h11 * m1_exp  # (M, num_curve, 2)
 
         t_line = torch.linspace(0.0, 1.0, num_line, device=self.device).view(1, -1, 1)
         pts_line = (1 - t_line) * p_pre.unsqueeze(1) + t_line * p_goal.unsqueeze(1)  # (M, num_line, 2)
 
         # 拼接轨迹点
-        pts = torch.cat([pts_bez, pts_line], dim=1)  # (M, num_samples, 2)
+        pts = torch.cat([pts_curve, pts_line], dim=1)  # (M, num_samples, 2)
         self._traj_pts[env_ids] = pts
 
         # 5. 计算切线与累积弧长
