@@ -834,8 +834,9 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         if len(env_ids) == 0:
             return
 
-        # 1. 获取起点位姿
-        p0 = self.robot.data.root_pos_w[env_ids, :2]  # (M, 2)
+        # 1. 获取起点位姿 (必须是叉臂中心，而不是车体中心！)
+        fork_center = self._compute_fork_center()
+        p0 = fork_center[env_ids, :2]  # (M, 2)
         yaw0 = _quat_to_yaw(self.robot.data.root_quat_w[env_ids])  # (M,)
         t0 = torch.stack([torch.cos(yaw0), torch.sin(yaw0)], dim=-1)  # (M, 2)
 
@@ -903,17 +904,18 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self._traj_tangents[env_ids] = tangents
 
     def _query_reference_trajectory(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """查询当前位置在参考轨迹上的状态。
+        """查询当前叉臂中心在参考轨迹上的状态。
         返回:
             d_traj: 到轨迹的最短距离 (N,)
-            yaw_traj_err_deg: 车头朝向与最近点切线的偏航误差 (N,)
+            yaw_traj_err_deg: 叉臂朝向与最近点切线的偏航误差 (N,)
             s_traj_norm: 最近点在轨迹上的归一化进度 (N,)
         """
-        root_pos = self.robot.data.root_pos_w[:, :2]  # (N, 2)
+        fork_center = self._compute_fork_center()
+        query_pos = fork_center[:, :2]  # (N, 2)
         robot_yaw = _quat_to_yaw(self.robot.data.root_quat_w)  # (N,)
 
         # 计算到所有轨迹点的距离 (N, num_samples)
-        dists = torch.norm(self._traj_pts - root_pos.unsqueeze(1), dim=-1)
+        dists = torch.norm(self._traj_pts - query_pos.unsqueeze(1), dim=-1)
         
         # 找到最近点的索引
         min_dists, min_indices = torch.min(dists, dim=1)  # (N,), (N,)

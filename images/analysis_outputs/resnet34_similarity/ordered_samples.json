@@ -1,0 +1,72 @@
+[
+  {
+    "path": "insertion_seq_network_input/net_input_-0.8m.png",
+    "distance_m": -0.8,
+    "label": "-0.8m"
+  },
+  {
+    "path": "insertion_seq_network_input/net_input_-0.7m.png",
+    "distance_m": -0.7,
+    "label": "-0.7m"
+  },
+  {
+    "path": "insertion_seq_network_input/net_input_-0.6m.png",
+    "distance_m": -0.6,
+    "label": "-0.6m"
+  },
+  {
+    "path": "insertion_seq_network_input/net_input_-0.5m.png",
+    "distance_m": -0.5,
+    "label": "-0.5m"
+  },
+  {
+    "path": "insertion_seq_network_input/net_input_-0.4m.png",
+    "distance_m": -0.4,
+    "label": "-0.4m"
+  },
+  {
+    "path": "insertion_seq_network_input/net_input_-0.3m.png",
+    "distance_m": -0.3,
+    "label": "-0.3m"
+  },
+  {
+    "path": "insertion_seq_network_input/net_input_-0.2m.png",
+    "distance_m": -0.2,
+    "label": "-0.2m"
+  },
+  {
+    "path": "insertion_seq_network_input/net_input_-0.1m.png",
+    "distance_m": -0.1,
+    "label": "-0.1m"
+  },
+  {
+    "path": "insertion_seq_network_input/net_input_+0.0m.png",
+    "distance_m": 0.0,
+    "label": "+0.0m"
+  },
+  {
+    "path": "insertion_seq_network_input/net_input_+0.1m.png",
+    "distance_m": 0.1,
+    "label": "+0.1m"
+  },
+  {
+    "path": "insertion_seq_network_input/net_input_+0.2m.png",
+    "distance_m": 0.2,
+    "label": "+0.2m"
+  },
+  {
+    "path": "insertion_seq_network_input/net_input_+0.3m.png",
+    "distance_m": 0.3,
+    "label": "+0.3m"
+  },
+  {
+    "path": "insertion_seq_network_input/net_input_+0.4m.png",
+    "distance_m": 0.4,
+    "label": "+0.4m"
+  },
+  {
+    "path": "insertion_seq_network_input/net_input_+0.5m.png",
+    "distance_m": 0.5,
+    "label": "+0.5m"
+  }
+]

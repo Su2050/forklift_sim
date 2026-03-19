@@ -3,7 +3,7 @@ set -euo pipefail
 
 PROJECT_ROOT="/home/uniubi/projects/forklift_sim"
 ISAACLAB_DIR="${PROJECT_ROOT}/IsaacLab"
-RUN_NAME="exp8_1_clip20_rp0.5_ra0.1"
+RUN_NAME="exp8_2_clothoid_dynamic_w"
 LOG_TYPE="train"
 
 mkdir -p "${PROJECT_ROOT}/logs"
