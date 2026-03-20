@@ -177,6 +177,10 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
 
     # ---- 实验 3.1: 参考轨迹走廊 (Trajectory-lite) ----
     traj_pre_dist_m: float = 1.2       # 预对位点距离 (m)
+    # Exp8.3 第一轮主矩阵：
+    # - front: 轨迹终点停在托盘前沿中心（B0′ 基线）
+    # - success_center: 轨迹 terminal geometry package 平移到 success 等效 fork_center 深度（G1）
+    exp83_traj_goal_mode: str = "front"
     traj_ctrl_start_m: float = 0.8     # Bézier 起点切线长度 (m)
     traj_ctrl_goal_m: float = 1.0      # Bézier 终点切线长度 (m)
     traj_num_samples: int = 21         # 轨迹离散点数

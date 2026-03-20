@@ -1,27 +1,24 @@
 #!/usr/bin/env bash
-# Exp8.3 B0′ smoke：与 B0（20260319_215340）CLI 对齐，仅缩短 max_iterations。
+# Exp8.3 B0′ 正式基线：与 B0 CLI 对齐，max_iterations=400。
 # 用法：
-#   bash scripts/run_exp8_3_b0prime_smoke.sh
+#   bash scripts/run_exp8_3_b0prime_baseline.sh
 # 行为：
 #   - 先退出 conda，避免误用 base/python
-#   - 采用与 run_branch_b.sh 一致的 nohup + 后台启动方式
-#   - 日志写入 logs/YYYYMMDD_HHMMSS_train_exp8_3_b0prime_smoke.log
+#   - 采用与历史脚本一致的 nohup + 后台启动方式
+#   - 日志写入 logs/YYYYMMDD_HHMMSS_train_exp8_3_b0prime_baseline.log
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ISAACLAB="${ISAACLAB:-$ROOT/IsaacLab}"
-RUN_NAME="exp8_3_b0prime_smoke"
+RUN_NAME="exp8_3_b0prime_baseline"
 LOG_TYPE="train"
 BEIJING_TS="$(TZ=Asia/Shanghai date +%Y%m%d_%H%M%S)"
 LOG="$ROOT/logs/${BEIJING_TS}_${LOG_TYPE}_${RUN_NAME}.log"
 mkdir -p "$ROOT/logs"
 
-# IsaacLab/Isaac Sim 脚本里会调用 `tabs`，TERM=dumb 时容易报错。
 export TERM=xterm
 
-# 必须退出 conda：isaaclab.sh 在存在 CONDA_PREFIX 时会优先用 conda 的 python，
-# 而仓库此前成功脚本的稳定做法也是清空 CONDA_PREFIX/CONDA_DEFAULT_ENV。
 if command -v conda >/dev/null 2>&1; then
   eval "$(conda shell.bash hook 2>/dev/null)" || true
   while [[ "${CONDA_SHLVL:-0}" =~ ^[0-9]+$ ]] && [[ "${CONDA_SHLVL:-0}" -gt 0 ]]; do
@@ -42,7 +39,7 @@ nohup env TERM="$TERM" PYTHONUNBUFFERED=1 CONDA_PREFIX="" CONDA_DEFAULT_ENV="" \
   --headless \
   --enable_cameras \
   --num_envs 64 \
-  --max_iterations 80 \
+  --max_iterations 400 \
   agent.run_name="$RUN_NAME" \
   env.use_camera=true \
   env.use_asymmetric_critic=true \
@@ -57,7 +54,7 @@ nohup env TERM="$TERM" PYTHONUNBUFFERED=1 CONDA_PREFIX="" CONDA_DEFAULT_ENV="" \
   agent.policy.freeze_backbone=true \
   > "$LOG" 2>&1 &
 
-echo "Started Exp8.3 B0′ smoke training."
+echo "Started Exp8.3 B0′ baseline training."
 echo "log: $LOG"
 echo "run_name: $RUN_NAME"
 echo "pid: $!"

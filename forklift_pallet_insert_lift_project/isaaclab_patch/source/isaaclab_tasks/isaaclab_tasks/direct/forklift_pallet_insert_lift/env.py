@@ -847,6 +847,23 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         center_y = tip_y - 0.6 * sin_yaw
         return torch.stack([center_x, center_y, tip_z], dim=-1)
 
+    def _exp83_success_center_s(self) -> float:
+        """success 判定对应的 fork_center 轴向标量位置。"""
+        pallet_depth = float(self.cfg.pallet_depth_m)
+        s_front = -0.5 * pallet_depth
+        return s_front + (float(self.cfg.insert_fraction) * pallet_depth - 0.6)
+
+    def _exp83_traj_goal_s(self) -> float:
+        """当前参考轨迹终点的轴向标量位置。"""
+        pallet_depth = float(self.cfg.pallet_depth_m)
+        s_front = -0.5 * pallet_depth
+        mode = self.cfg.exp83_traj_goal_mode
+        if mode == "front":
+            return s_front
+        if mode == "success_center":
+            return self._exp83_success_center_s()
+        raise ValueError(f"Unsupported exp83_traj_goal_mode: {mode}")
+
     # ==========================================================================
     # 实验 3.1: 参考轨迹走廊 (Trajectory-lite)
     # ==========================================================================
@@ -890,9 +907,10 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
             pallet_yaw_v = pallet_yaw
         u_in = torch.stack([torch.cos(pallet_yaw_v), torch.sin(pallet_yaw_v)], dim=-1)  # (M, 2)
 
-        s_front = -0.5 * self.cfg.pallet_depth_m
-        p_goal = pallet_pos + s_front * u_in  # 托盘前沿中心点
-        p_pre = pallet_pos + (s_front - self.cfg.traj_pre_dist_m) * u_in  # 预对位点
+        s_goal = self._exp83_traj_goal_s()
+        p_goal = pallet_pos + s_goal * u_in
+        # 将 terminal geometry package 整体锚定到当前轨迹终点，保持末段直插距离不变。
+        p_pre = pallet_pos + (s_goal - self.cfg.traj_pre_dist_m) * u_in
 
         # 3. 构造三次 Hermite 样条
         # 计算起点到预对位点的直线距离，用于控制切线长度 (影响曲线弯曲程度)
@@ -1393,14 +1411,15 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
             self._geom_constants_logged = True
             _D = float(self.cfg.pallet_depth_m)
             _s_front = -0.5 * _D
+            _s_traj = self._exp83_traj_goal_s()
             _s_rd = _s_front + 0.6
-            _s_succ = _s_front + (float(self.cfg.insert_fraction) * _D - 0.6)
+            _s_succ = self._exp83_success_center_s()
             print(
-                f"[forklift_exp83_geom] geom/s_traj_end={_s_front:.6f} "
+                f"[forklift_exp83_geom] geom/s_traj_end={_s_traj:.6f} "
                 f"geom/s_rd_target={_s_rd:.6f} geom/s_success_center={_s_succ:.6f} "
                 "(s: pallet-centered axis along u_in)"
             )
-            self.extras["log"]["geom/s_traj_end"] = _s_front
+            self.extras["log"]["geom/s_traj_end"] = _s_traj
             self.extras["log"]["geom/s_rd_target"] = _s_rd
             self.extras["log"]["geom/s_success_center"] = _s_succ
 
