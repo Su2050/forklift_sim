@@ -8,7 +8,7 @@
 - `_reset_idx`：参考轨迹改为在写入 pallet / robot / joint **之后**生成，且 `_build_reference_trajectory` 使用 reset 张量显式传入，避免旧 episode 污染 `r_cd`/`r_cpsi`。  
 - `_get_rewards`：新增 `s_center_mean`、`s_tip_mean`、`err/root|center|tip_lateral_mean`、`phase/frac_rg`、`phase/frac_success`、`diag/out_of_bounds_frac`、`diag/success_term_frac` 及首步 `geom/s_*` 常量。  
 - 预检单测（无 Isaac）：`forklift_pallet_insert_lift_project/tests/test_exp83_geometry_preflight.py`（可直接 `python .../test_exp83_geometry_preflight.py`）。
-- B0′ smoke（需本机 Isaac 环境）：`bash scripts/run_exp8_3_b0prime_smoke.sh`（日志带时间戳写入 `logs/`）；跑前执行 `install_into_isaaclab.sh`。
+- B0′ smoke（需本机 Isaac 环境）：`bash scripts/run_exp8_3_b0prime_smoke.sh`（日志带时间戳写入 `logs/`）；脚本在 `TERM=dumb`（如 nohup）下会自动设为 `xterm-256color`，避免 `tabs: dumb` 报错。跑前执行 `install_into_isaaclab.sh`。
 
 ## 1. 问题发现
 

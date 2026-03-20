@@ -5,6 +5,13 @@
 # 日志：logs/YYYYMMDD_HHMMSS_train_exp8_3_b0prime_smoke.log
 
 set -euo pipefail
+
+# nohup / Cursor / CI 常见 TERM=dumb，会触发 `tabs: terminal type 'dumb' cannot reset tabs`
+# 并干扰 isaaclab.sh 内部分工具；非 dumb 时保留用户终端类型。
+if [[ -z "${TERM:-}" || "${TERM}" == "dumb" ]]; then
+  export TERM=xterm-256color
+fi
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ISAACLAB="${ISAACLAB:-$ROOT/IsaacLab}"
 LOG="$ROOT/logs/$(date +%Y%m%d_%H%M%S)_train_exp8_3_b0prime_smoke.log"
