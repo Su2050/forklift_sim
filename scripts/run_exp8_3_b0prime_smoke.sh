@@ -20,6 +20,17 @@ mkdir -p "$ROOT/logs"
 echo "[INFO] Log: $LOG"
 echo "[INFO] IsaacLab: $ISAACLAB"
 
+# 必须退出 conda：`isaaclab.sh` 在存在 CONDA_PREFIX 时会优先用 conda 里的 python；
+# 常见 base 环境没有 isaaclab → ModuleNotFoundError。本 smoke 依赖 Isaac Sim Kit 的 `_isaac_sim/python.sh`。
+if command -v conda >/dev/null 2>&1; then
+  eval "$(conda shell.bash hook 2>/dev/null)" || true
+  while [[ "${CONDA_SHLVL:-0}" =~ ^[0-9]+$ ]] && [[ "${CONDA_SHLVL:-0}" -gt 0 ]]; do
+    conda deactivate 2>/dev/null || break
+  done
+fi
+unset CONDA_PREFIX CONDA_DEFAULT_ENV CONDA_SHLVL CONDA_PROMPT_MODIFIER CONDA_PYTHON_EXE _CE_CONDA _CE_M 2>/dev/null || true
+echo "[INFO] 已清理 conda 环境变量（CONDA_PREFIX=${CONDA_PREFIX:-<空>}）"
+
 cd "$ISAACLAB"
 bash isaaclab.sh -p scripts/reinforcement_learning/rsl_rl/train.py \
   --task Isaac-Forklift-PalletInsertLift-Direct-v0 \
