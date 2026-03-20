@@ -227,6 +227,8 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self._traj_tangents = torch.zeros((self.num_envs, self.cfg.traj_num_samples, 2), device=self.device)
         self._traj_s_norm = torch.zeros((self.num_envs, self.cfg.traj_num_samples), device=self.device)
         self._prev_phi_traj = torch.zeros((self.num_envs,), device=self.device)
+        # Exp8.3：几何常量仅记录一次（与 summary 中 geom/* 一致）
+        self._geom_constants_logged = False
 
         # S1.0z: Episode 级别成功率统计
         self._ep_success_count = 0
@@ -822,28 +824,71 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         
         return torch.stack([center_x, center_y, center_z], dim=-1)
 
+    def _compute_fork_center_from_root_lift(
+        self,
+        root_pos: torch.Tensor,
+        root_quat: torch.Tensor,
+        lift_pos: torch.Tensor,
+    ) -> torch.Tensor:
+        """由已写入仿真的 root + lift 关节位姿计算 fork_center（与 _compute_fork_center 同源）。
+
+        Args:
+            root_pos: (M, 3)
+            root_quat: (M, 4) wxyz
+            lift_pos: (M,) 与 _lift_id 对应的举升关节位置
+        """
+        yaw = _quat_to_yaw(root_quat)
+        cos_yaw = torch.cos(yaw)
+        sin_yaw = torch.sin(yaw)
+        tip_x = root_pos[:, 0] + self._fork_forward_offset * cos_yaw
+        tip_y = root_pos[:, 1] + self._fork_forward_offset * sin_yaw
+        tip_z = root_pos[:, 2] + self._fork_z_base + lift_pos
+        center_x = tip_x - 0.6 * cos_yaw
+        center_y = tip_y - 0.6 * sin_yaw
+        return torch.stack([center_x, center_y, tip_z], dim=-1)
+
     # ==========================================================================
     # 实验 3.1: 参考轨迹走廊 (Trajectory-lite)
     # ==========================================================================
-    def _build_reference_trajectory(self, env_ids: torch.Tensor):
+    def _build_reference_trajectory(
+        self,
+        env_ids: torch.Tensor,
+        *,
+        fork_center_xy: torch.Tensor | None = None,
+        robot_yaw: torch.Tensor | None = None,
+        pallet_pos_xy: torch.Tensor | None = None,
+        pallet_yaw: torch.Tensor | None = None,
+    ):
         """在 reset 时为每个 env 生成并缓存参考轨迹。
         使用三次 Hermite 样条 (Cubic Hermite Spline) 作为 Clothoid 的近似，
         连接起点和预对位点，再接一段直线进入托盘。
         Hermite 样条能更好地保证起点和终点的切线方向，且曲率变化更平滑。
+
+        当提供 fork_center_xy / robot_yaw / pallet_pos_xy / pallet_yaw 时，
+        直接使用 reset 刚写入的张量，避免依赖 `robot.data` / `pallet.data` 同步时机（Exp8.3 B0′）。
+        张量形状均为 (M,·)，M = len(env_ids)。
         """
         if len(env_ids) == 0:
             return
 
         # 1. 获取起点位姿 (必须是叉臂中心，而不是车体中心！)
-        fork_center = self._compute_fork_center()
-        p0 = fork_center[env_ids, :2]  # (M, 2)
-        yaw0 = _quat_to_yaw(self.robot.data.root_quat_w[env_ids])  # (M,)
+        if fork_center_xy is None:
+            fork_center = self._compute_fork_center()
+            p0 = fork_center[env_ids, :2]  # (M, 2)
+            yaw0 = _quat_to_yaw(self.robot.data.root_quat_w[env_ids])  # (M,)
+        else:
+            p0 = fork_center_xy
+            yaw0 = robot_yaw
         t0 = torch.stack([torch.cos(yaw0), torch.sin(yaw0)], dim=-1)  # (M, 2)
 
         # 2. 获取托盘位姿与目标点
-        pallet_pos = self.pallet.data.root_pos_w[env_ids, :2]  # (M, 2)
-        pallet_yaw = _quat_to_yaw(self.pallet.data.root_quat_w[env_ids])  # (M,)
-        u_in = torch.stack([torch.cos(pallet_yaw), torch.sin(pallet_yaw)], dim=-1)  # (M, 2)
+        if pallet_pos_xy is None:
+            pallet_pos = self.pallet.data.root_pos_w[env_ids, :2]  # (M, 2)
+            pallet_yaw_v = _quat_to_yaw(self.pallet.data.root_quat_w[env_ids])  # (M,)
+        else:
+            pallet_pos = pallet_pos_xy
+            pallet_yaw_v = pallet_yaw
+        u_in = torch.stack([torch.cos(pallet_yaw_v), torch.sin(pallet_yaw_v)], dim=-1)  # (M, 2)
 
         s_front = -0.5 * self.cfg.pallet_depth_m
         p_goal = pallet_pos + s_front * u_in  # 托盘前沿中心点
@@ -1332,8 +1377,8 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         hold_cond = is_inserted & is_aligned
         self._hold_counter = torch.where(hold_cond, self._hold_counter + 1, 0.0)
         
-        # 记录 episode 成功率
-        success = self._hold_counter >= self._hold_steps
+        # 与 _get_dones 共用的终止掩码（用于 Exp8.3 诊断日志）
+        tipped, success, out_of_bounds = self._termination_masks()
 
         # 记录 push-free success (成功且托盘位移小)
         pallet_init_pos_xy = torch.tensor(self.cfg.pallet_cfg.init_state.pos[:2], device=self.device)
@@ -1342,6 +1387,26 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         
         if "log" not in self.extras:
             self.extras["log"] = {}
+
+        # Exp8.3：run 级几何常量（写入首步 summary，便于实验笔记对表）
+        if not self._geom_constants_logged:
+            self._geom_constants_logged = True
+            _D = float(self.cfg.pallet_depth_m)
+            _s_front = -0.5 * _D
+            _s_rd = _s_front + 0.6
+            _s_succ = _s_front + (float(self.cfg.insert_fraction) * _D - 0.6)
+            print(
+                f"[forklift_exp83_geom] geom/s_traj_end={_s_front:.6f} "
+                f"geom/s_rd_target={_s_rd:.6f} geom/s_success_center={_s_succ:.6f} "
+                "(s: pallet-centered axis along u_in)"
+            )
+            self.extras["log"]["geom/s_traj_end"] = _s_front
+            self.extras["log"]["geom/s_rd_target"] = _s_rd
+            self.extras["log"]["geom/s_success_center"] = _s_succ
+
+        # 沿托盘轴签名坐标（fork_center / tip）
+        rel_fc = fork_center[:, :2] - pallet_pos[:, :2]
+        s_center = torch.sum(rel_fc * u_in, dim=-1)
 
         # 实验 B 日志
         self.extras["log"]["paper_reward/R_plus"] = R_plus.mean()
@@ -1360,12 +1425,25 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         # 核心诊断指标
         self.extras["log"]["err/dist_front_mean"] = dist_front.mean()
         self.extras["log"]["err/lateral_mean"] = y_err.mean()
+        self.extras["log"]["err/root_lateral_mean"] = y_err.mean()
+        self.extras["log"]["err/center_lateral_mean"] = torch.abs(
+            torch.sum(rel_fc * v_lat, dim=-1)
+        ).mean()
+        self.extras["log"]["err/tip_lateral_mean"] = tip_y_err.mean()
         self.extras["log"]["err/yaw_deg_mean"] = yaw_err_deg.mean()
         
         self.extras["log"]["diag/pallet_disp_xy_mean"] = pallet_disp_xy.mean()
+        self.extras["log"]["s_center_mean"] = s_center.mean()
+        self.extras["log"]["s_tip_mean"] = s_tip.mean()
         
         self.extras["log"]["phase/frac_inserted"] = is_inserted.float().mean()
         self.extras["log"]["phase/frac_aligned"] = is_aligned.float().mean()
+        self.extras["log"]["phase/frac_rg"] = rg.mean()
+        self.extras["log"]["phase/frac_success"] = success.float().mean()
+        self.extras["log"]["diag/out_of_bounds_frac"] = out_of_bounds.float().mean()
+        self.extras["log"]["diag/success_term_frac"] = (
+            success & ~tipped & ~out_of_bounds
+        ).float().mean()
         
         # 轨迹指标
         self.extras["log"]["traj/d_traj_mean"] = d_traj.mean()
@@ -1373,39 +1451,36 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
 
         return rew
 
-    def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
-        # time out
-        time_out = self.episode_length_buf >= self.max_episode_length - 1
-
-        # success when hold counter reached
+    def _termination_masks(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """与 `_get_dones` 一致的 (tipped, success, out_of_bounds) 掩码，供日志复用。"""
         success = self._hold_counter >= self._hold_steps
 
-        # tip-over check via roll/pitch
         q = self.robot.data.root_quat_w
         w, x, y, z = q.unbind(-1)
-        # roll
         sinr_cosp = 2.0 * (w * x + y * z)
         cosr_cosp = 1.0 - 2.0 * (x * x + y * y)
         roll = torch.atan2(sinr_cosp, cosr_cosp)
-        # pitch
         sinp = 2.0 * (w * y - z * x)
         pitch = torch.asin(torch.clamp(sinp, -1.0, 1.0))
         tipped = (torch.abs(roll) > self.cfg.max_roll_pitch_rad) | (torch.abs(pitch) > self.cfg.max_roll_pitch_rad)
 
-        # out of bounds check (新增漏洞补丁，防止倒车逃跑)
         pallet_pos = self.pallet.data.root_pos_w
         fork_center = self._compute_fork_center()
-        
         pallet_yaw = _quat_to_yaw(self.pallet.data.root_quat_w)
         pallet_front_x = pallet_pos[:, 0] - (self.cfg.pallet_depth_m / 2.0) * torch.cos(pallet_yaw)
         pallet_front_y = pallet_pos[:, 1] - (self.cfg.pallet_depth_m / 2.0) * torch.sin(pallet_yaw)
         target_center_x = pallet_front_x + 0.6 * torch.cos(pallet_yaw)
         target_center_y = pallet_front_y + 0.6 * torch.sin(pallet_yaw)
         target_center = torch.stack([target_center_x, target_center_y], dim=-1)
-        
         dist_center = torch.norm(fork_center[:, :2] - target_center, dim=-1)
         out_of_bounds = dist_center > self.cfg.paper_out_of_bounds_dist
+        return tipped, success, out_of_bounds
 
+    def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
+        # time out
+        time_out = self.episode_length_buf >= self.max_episode_length - 1
+
+        tipped, success, out_of_bounds = self._termination_masks()
         terminated = tipped | success | out_of_bounds
         return terminated, time_out
 
@@ -1472,10 +1547,6 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self._window_ptr[env_ids] = 0
         self._window_filled[env_ids] = False
 
-        # ==== 实验 A: 生成参考轨迹 (仅用于兼容日志，不参与奖励) ====
-        self._prev_phi_traj[env_ids] = 0.0
-        self._build_reference_trajectory(env_ids)
-
         # ---- 托盘固定位姿（可选：后续可加随机化） ----
         pallet_pos = torch.tensor(self.cfg.pallet_cfg.init_state.pos, device=self.device).repeat(len(env_ids), 1)
         pallet_quat = torch.tensor(self.cfg.pallet_cfg.init_state.rot, device=self.device).repeat(len(env_ids), 1)
@@ -1531,6 +1602,21 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         joint_pos = self.robot.data.default_joint_pos[env_ids].clone()
         joint_vel = torch.zeros_like(joint_pos)
         self._write_joint_state(self.robot, joint_pos, joint_vel, env_ids)
+
+        # Exp8.3 B0′：在写入 pallet / robot / joint 之后，用 reset 张量生成参考轨迹，
+        # 避免旧 episode 位姿污染 r_cd / r_cpsi。
+        self._prev_phi_traj[env_ids] = 0.0
+        lift_j = joint_pos[:, self._lift_id]
+        fc3 = self._compute_fork_center_from_root_lift(pos, quat, lift_j)
+        p_yaw = _quat_to_yaw(pallet_quat)
+        r_yaw = _quat_to_yaw(quat)
+        self._build_reference_trajectory(
+            env_ids,
+            fork_center_xy=fc3[:, :2],
+            robot_yaw=r_yaw,
+            pallet_pos_xy=pallet_pos[:, :2],
+            pallet_yaw=p_yaw,
+        )
 
         # ---- 基线 fork tip 高度 ----
         # S1.0h 修复：不再调用 scene.write_data_to_sim() / sim.reset() / scene.update()

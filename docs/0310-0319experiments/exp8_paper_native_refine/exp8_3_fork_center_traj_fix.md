@@ -4,6 +4,11 @@
 **实验分支**：`exp/vision_cnn/exp8_paper_native_refine` (Run: `exp8_3_fork_center_traj`)
 **日志**：`logs/20260319_215340_train_exp8_3_fork_center_traj.log`
 
+**Exp8.3 验证计划实施分支（B0′ + 诊断日志 + U0/U1）**：`exp/exp8_3_geom_validation_b0prime`  
+- `_reset_idx`：参考轨迹改为在写入 pallet / robot / joint **之后**生成，且 `_build_reference_trajectory` 使用 reset 张量显式传入，避免旧 episode 污染 `r_cd`/`r_cpsi`。  
+- `_get_rewards`：新增 `s_center_mean`、`s_tip_mean`、`err/root|center|tip_lateral_mean`、`phase/frac_rg`、`phase/frac_success`、`diag/out_of_bounds_frac`、`diag/success_term_frac` 及首步 `geom/s_*` 常量。  
+- 预检单测（无 Isaac）：`forklift_pallet_insert_lift_project/tests/test_exp83_geometry_preflight.py`（可直接 `python .../test_exp83_geometry_preflight.py`）。
+
 ## 1. 问题发现
 
 在对 Exp 8.2 进行深度诊断时，通过 ResNet34 特征相似度分析排除了「视觉盲区」假设后，我们用 `check_traj_tangent.py` 脚本发现了一个**轨迹几何 Bug**：参考轨迹的生成与查询使用了 **车体中心（`root_pos`）**，而论文要求的是 **叉臂中心（center of the forks）**。
