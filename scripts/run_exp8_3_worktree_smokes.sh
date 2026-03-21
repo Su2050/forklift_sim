@@ -1,8 +1,15 @@
 #!/usr/bin/env bash
-# 顺序执行 Exp8.3 的 G2 / G2b / G3 smoke。
+# 顺序执行 Exp8.3 的 G2 / G2b / G3 训练。
+# 支持模式：
+#   - smoke
+#   - baseline400
+# 默认模式：smoke
 # 默认顺序：g2 -> g2b -> g3
-# 也可传子集，例如：
-#   bash scripts/run_exp8_3_worktree_smokes.sh g2 g3
+# 用法：
+#   bash scripts/run_exp8_3_worktree_smokes.sh
+#   bash scripts/run_exp8_3_worktree_smokes.sh smoke
+#   bash scripts/run_exp8_3_worktree_smokes.sh baseline400
+#   bash scripts/run_exp8_3_worktree_smokes.sh baseline400 g2 g3
 
 set -euo pipefail
 
@@ -10,6 +17,12 @@ ISAACLAB="${ISAACLAB:-/home/uniubi/projects/forklift_sim/IsaacLab}"
 POLL_SECONDS="${POLL_SECONDS:-30}"
 
 default_experiments=(g2 g2b g3)
+mode="smoke"
+if [[ "${1:-}" == "smoke" || "${1:-}" == "baseline400" ]]; then
+  mode="$1"
+  shift
+fi
+
 if [[ "$#" -gt 0 ]]; then
   experiments=("$@")
 else
@@ -31,18 +44,27 @@ print_resources() {
 }
 
 resolve_experiment() {
-  case "$1" in
-    g2)
+  case "$1:$2" in
+    smoke:g2)
       echo "/home/uniubi/projects/forklift_sim_wt_g2|scripts/run_exp8_3_g2_smoke.sh|50"
       ;;
-    g2b)
+    smoke:g2b)
       echo "/home/uniubi/projects/forklift_sim_wt_g2b|scripts/run_exp8_3_g2b_smoke.sh|50"
       ;;
-    g3)
+    smoke:g3)
       echo "/home/uniubi/projects/forklift_sim_wt_g3|scripts/run_exp8_3_g3_smoke.sh|50"
       ;;
+    baseline400:g2)
+      echo "/home/uniubi/projects/forklift_sim_wt_g2|scripts/run_exp8_3_g2_baseline.sh|400"
+      ;;
+    baseline400:g2b)
+      echo "/home/uniubi/projects/forklift_sim_wt_g2b|scripts/run_exp8_3_g2b_baseline.sh|400"
+      ;;
+    baseline400:g3)
+      echo "/home/uniubi/projects/forklift_sim_wt_g3|scripts/run_exp8_3_g3_baseline.sh|400"
+      ;;
     *)
-      echo "[ERROR] Unsupported experiment: $1" >&2
+      echo "[ERROR] Unsupported mode/experiment: $1 $2" >&2
       return 1
       ;;
   esac
@@ -69,7 +91,7 @@ else:
 PY
 }
 
-smoke_succeeded() {
+run_succeeded() {
   python3 - "$1" "$2" <<'PY'
 import pathlib
 import re
@@ -99,7 +121,7 @@ run_one_experiment() {
   local name="$1"
   local resolved worktree script_rel max_iters script_path branch head launch_output log_path pid
 
-  resolved="$(resolve_experiment "$name")"
+  resolved="$(resolve_experiment "$mode" "$name")"
   IFS="|" read -r worktree script_rel max_iters <<<"$resolved"
   script_path="$worktree/$script_rel"
 
@@ -141,18 +163,19 @@ run_one_experiment() {
     sleep "$POLL_SECONDS"
   done
 
-  echo "[INFO] $name process exited, validating smoke log"
-  if smoke_succeeded "$log_path" "$max_iters"; then
-    echo "[OK] $name smoke passed"
+  echo "[INFO] $name process exited, validating $mode log"
+  if run_succeeded "$log_path" "$max_iters"; then
+    echo "[OK] $name $mode passed"
   else
-    echo "[ERROR] $name smoke did not reach the expected final iteration" >&2
+    echo "[ERROR] $name $mode did not reach the expected final iteration" >&2
     return 1
   fi
 }
 
 echo "[INFO] Shared IsaacLab: $ISAACLAB"
+echo "[INFO] Requested mode: $mode"
 for experiment in "${experiments[@]}"; do
   run_one_experiment "$experiment"
 done
 
-echo "[DONE] All requested Exp8.3 worktree smokes completed."
+echo "[DONE] All requested Exp8.3 worktree $mode runs completed."
