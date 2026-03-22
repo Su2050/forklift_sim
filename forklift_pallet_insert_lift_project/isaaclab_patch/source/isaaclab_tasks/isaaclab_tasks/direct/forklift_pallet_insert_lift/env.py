@@ -229,6 +229,8 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self._prev_phi_traj = torch.zeros((self.num_envs,), device=self.device)
         # Exp8.3：几何常量仅记录一次（与 summary 中 geom/* 一致）
         self._geom_constants_logged = False
+        # Exp8.3 runtime U0：仅用于 sanity run 的一次性诊断日志开关。
+        self._runtime_u0_logged = False
 
         # S1.0z: Episode 级别成功率统计
         self._ep_success_count = 0
@@ -966,6 +968,72 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         tangents = torch.cat([tangents, tangents[:, -1:, :]], dim=1)  # (M, num_samples, 2)
         self._traj_tangents[env_ids] = tangents
 
+    def _run_runtime_u0_check(
+        self,
+        env_ids: torch.Tensor,
+        *,
+        fork_center_xy: torch.Tensor,
+        robot_yaw: torch.Tensor,
+        pallet_pos_xy: torch.Tensor,
+        pallet_yaw: torch.Tensor,
+    ) -> None:
+        """Exp8.3 runtime U0：在真实 env reset 后立即检查轨迹接线一致性。"""
+        if not bool(getattr(self.cfg, "exp83_runtime_u0_enable", False)):
+            return
+        if len(env_ids) == 0:
+            return
+
+        eps_pos = float(self.cfg.exp83_runtime_u0_eps_pos_m)
+        eps_yaw_deg = float(self.cfg.exp83_runtime_u0_eps_yaw_deg)
+        env_ids = env_ids.long()
+
+        traj_pts = self._traj_pts[env_ids]  # (M, S, 2)
+        traj_tangents = self._traj_tangents[env_ids]  # (M, S, 2)
+        p0 = traj_pts[:, 0, :]
+
+        u_in = torch.stack([torch.cos(pallet_yaw), torch.sin(pallet_yaw)], dim=-1)
+        s_goal = self._exp83_traj_goal_s()
+        p_goal = pallet_pos_xy + s_goal * u_in
+        p_end = traj_pts[:, -1, :]
+
+        d_start = torch.norm(p0 - fork_center_xy, dim=-1)
+        d_end = torch.norm(p_end - p_goal, dim=-1)
+
+        dists = torch.norm(traj_pts - fork_center_xy.unsqueeze(1), dim=-1)
+        d_traj, min_indices = torch.min(dists, dim=1)
+        env_arange = torch.arange(len(env_ids), device=self.device)
+        closest_tangent = traj_tangents[env_arange, min_indices]
+        traj_yaw = torch.atan2(closest_tangent[:, 1], closest_tangent[:, 0])
+        yaw_err = torch.atan2(
+            torch.sin(robot_yaw - traj_yaw),
+            torch.cos(robot_yaw - traj_yaw),
+        )
+        yaw_err_deg = torch.abs(yaw_err) * (180.0 / math.pi)
+
+        fail_mask = (d_start > eps_pos) | (d_end > eps_pos) | (d_traj > eps_pos) | (yaw_err_deg > eps_yaw_deg)
+        fail_count = int(fail_mask.sum().item())
+        total = int(len(env_ids))
+        max_d_start = float(d_start.max().item())
+        max_d_end = float(d_end.max().item())
+        max_d_traj = float(d_traj.max().item())
+        max_yaw_deg = float(yaw_err_deg.max().item())
+        summary = (
+            "[runtime_u0] "
+            f"fail={fail_count}/{total}, "
+            f"max_d_start={max_d_start:.6f}, "
+            f"max_d_end={max_d_end:.6f}, "
+            f"max_d_traj={max_d_traj:.6f}, "
+            f"max_yaw_deg={max_yaw_deg:.4f}, "
+            f"eps_pos={eps_pos:.6f}, "
+            f"eps_yaw_deg={eps_yaw_deg:.4f}"
+        )
+        if (not self._runtime_u0_logged) or fail_count > 0:
+            print(summary)
+            self._runtime_u0_logged = True
+
+        if fail_count > 0 and bool(getattr(self.cfg, "exp83_runtime_u0_fail_fast", True)):
+            raise RuntimeError(f"Exp8.3 runtime U0 failed: {summary}")
+
     def _query_reference_trajectory(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """查询当前叉臂中心在参考轨迹上的状态。
         返回:
@@ -1630,6 +1698,13 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         p_yaw = _quat_to_yaw(pallet_quat)
         r_yaw = _quat_to_yaw(quat)
         self._build_reference_trajectory(
+            env_ids,
+            fork_center_xy=fc3[:, :2],
+            robot_yaw=r_yaw,
+            pallet_pos_xy=pallet_pos[:, :2],
+            pallet_yaw=p_yaw,
+        )
+        self._run_runtime_u0_check(
             env_ids,
             fork_center_xy=fc3[:, :2],
             robot_yaw=r_yaw,

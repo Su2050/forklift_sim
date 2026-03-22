@@ -181,6 +181,13 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     # - front: 轨迹终点停在托盘前沿中心（B0′ 基线）
     # - success_center: 轨迹 terminal geometry package 平移到 success 等效 fork_center 深度（G1）
     exp83_traj_goal_mode: str = "front"
+    # Exp8.3 runtime U0（真实 env 路径）：
+    # - enable=true 时，在 reset 后立即验证 traj 起终点、d_traj 与 yaw 对齐
+    # - 推荐仅在 sanity run 中开启，不常驻正式长训
+    exp83_runtime_u0_enable: bool = False
+    exp83_runtime_u0_fail_fast: bool = True
+    exp83_runtime_u0_eps_pos_m: float = 1e-3
+    exp83_runtime_u0_eps_yaw_deg: float = 15.0
     traj_ctrl_start_m: float = 0.8     # Bézier 起点切线长度 (m)
     traj_ctrl_goal_m: float = 1.0      # Bézier 终点切线长度 (m)
     traj_num_samples: int = 21         # 轨迹离散点数

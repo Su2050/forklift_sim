@@ -6,14 +6,19 @@
 # 支持模式：
 #   - smoke
 #   - baseline400
+#   - confirm800
 # 默认模式：smoke
-# 默认顺序：g2 -> g2b -> g3
+# 默认顺序：
+#   - smoke / baseline400: g2 -> g2b -> g3
+#   - confirm800: g2b -> g3
 # 用法：
 #   bash scripts/run_exp8_3_worktree_smokes.sh
 #   bash scripts/run_exp8_3_worktree_smokes.sh --detach
 #   bash scripts/run_exp8_3_worktree_smokes.sh smoke
 #   bash scripts/run_exp8_3_worktree_smokes.sh baseline400
+#   bash scripts/run_exp8_3_worktree_smokes.sh confirm800
 #   bash scripts/run_exp8_3_worktree_smokes.sh --detach baseline400
+#   bash scripts/run_exp8_3_worktree_smokes.sh --detach confirm800
 #   bash scripts/run_exp8_3_worktree_smokes.sh baseline400 g2 g3
 
 set -euo pipefail
@@ -25,6 +30,7 @@ ISAACLAB="${ISAACLAB:-/home/uniubi/projects/forklift_sim/IsaacLab}"
 POLL_SECONDS="${POLL_SECONDS:-30}"
 
 default_experiments=(g2 g2b g3)
+confirm800_default_experiments=(g2b g3)
 detach_requested=0
 while [[ "${1:-}" == --* ]]; do
   case "$1" in
@@ -40,7 +46,7 @@ while [[ "${1:-}" == --* ]]; do
 done
 
 mode="smoke"
-if [[ "${1:-}" == "smoke" || "${1:-}" == "baseline400" ]]; then
+if [[ "${1:-}" == "smoke" || "${1:-}" == "baseline400" || "${1:-}" == "confirm800" ]]; then
   mode="$1"
   shift
 fi
@@ -48,7 +54,11 @@ fi
 if [[ "$#" -gt 0 ]]; then
   experiments=("$@")
 else
-  experiments=("${default_experiments[@]}")
+  if [[ "$mode" == "confirm800" ]]; then
+    experiments=("${confirm800_default_experiments[@]}")
+  else
+    experiments=("${default_experiments[@]}")
+  fi
 fi
 
 if [[ "$detach_requested" -eq 1 && "${DETACHED_ORCHESTRATOR:-0}" != "1" ]]; then
@@ -99,6 +109,12 @@ resolve_experiment() {
       ;;
     baseline400:g3)
       echo "/home/uniubi/projects/forklift_sim_wt_g3|scripts/run_exp8_3_g3_baseline.sh|400"
+      ;;
+    confirm800:g2b)
+      echo "/home/uniubi/projects/forklift_sim_wt_g2b|scripts/run_exp8_3_g2b_confirm800.sh|800"
+      ;;
+    confirm800:g3)
+      echo "/home/uniubi/projects/forklift_sim_wt_g3|scripts/run_exp8_3_g3_confirm800.sh|800"
       ;;
     *)
       echo "[ERROR] Unsupported mode/experiment: $1 $2" >&2
