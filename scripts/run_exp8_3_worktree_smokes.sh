@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 # 顺序执行 Exp8.3 的 G2 / G2b / G3 训练。
+# 支持启动方式：
+#   - 前台直接运行
+#   - --detach：总控自身用 nohup 脱离终端
 # 支持模式：
 #   - smoke
 #   - baseline400
@@ -7,16 +10,35 @@
 # 默认顺序：g2 -> g2b -> g3
 # 用法：
 #   bash scripts/run_exp8_3_worktree_smokes.sh
+#   bash scripts/run_exp8_3_worktree_smokes.sh --detach
 #   bash scripts/run_exp8_3_worktree_smokes.sh smoke
 #   bash scripts/run_exp8_3_worktree_smokes.sh baseline400
+#   bash scripts/run_exp8_3_worktree_smokes.sh --detach baseline400
 #   bash scripts/run_exp8_3_worktree_smokes.sh baseline400 g2 g3
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+SCRIPT_PATH="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
 ISAACLAB="${ISAACLAB:-/home/uniubi/projects/forklift_sim/IsaacLab}"
 POLL_SECONDS="${POLL_SECONDS:-30}"
 
 default_experiments=(g2 g2b g3)
+detach_requested=0
+while [[ "${1:-}" == --* ]]; do
+  case "$1" in
+    --detach)
+      detach_requested=1
+      shift
+      ;;
+    *)
+      echo "[ERROR] Unsupported option: $1" >&2
+      exit 1
+      ;;
+  esac
+done
+
 mode="smoke"
 if [[ "${1:-}" == "smoke" || "${1:-}" == "baseline400" ]]; then
   mode="$1"
@@ -27,6 +49,21 @@ if [[ "$#" -gt 0 ]]; then
   experiments=("$@")
 else
   experiments=("${default_experiments[@]}")
+fi
+
+if [[ "$detach_requested" -eq 1 && "${DETACHED_ORCHESTRATOR:-0}" != "1" ]]; then
+  mkdir -p "$ROOT/logs"
+  detach_ts="$(TZ=Asia/Shanghai date +%Y%m%d_%H%M%S)"
+  detach_log="$ROOT/logs/${detach_ts}_sanity_check_exp8_3_worktree_${mode}.log"
+  relay_args=("$mode")
+  relay_args+=("${experiments[@]}")
+
+  echo "[INFO] Detaching orchestrator with nohup"
+  echo "[INFO] detach_log: $detach_log"
+  nohup env DETACHED_ORCHESTRATOR=1 ISAACLAB="$ISAACLAB" POLL_SECONDS="$POLL_SECONDS" \
+    bash "$SCRIPT_PATH" "${relay_args[@]}" > "$detach_log" 2>&1 &
+  echo "[INFO] detached_pid: $!"
+  exit 0
 fi
 
 cleanup_train_processes() {
