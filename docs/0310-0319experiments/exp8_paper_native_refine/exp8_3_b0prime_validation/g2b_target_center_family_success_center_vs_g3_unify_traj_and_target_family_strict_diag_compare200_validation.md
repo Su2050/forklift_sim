@@ -26,7 +26,7 @@
   - `phase/frac_success_geom_strict`
   - `phase/frac_success_strict`
   - `phase/frac_push_free_success`
-- 本文要回答的问题是：**strict 口径是否改变我们对 `G2b` vs `G3` 的排序判断，以及 low-level 漏洞主要暴露在 z-valid、near-field alignment，还是 lift/hold 闭环。**
+- 本文要回答的问题是：**strict 口径是否改变我们对 `G2b` vs `G3` 的排序判断，以及 low-level 漏洞主要暴露在 z-valid、near-field alignment，还是 strict KPI 与当前 approach-only 阶段之间的口径错配。**
 
 ## 实际训练 CLI override
 
@@ -85,10 +85,10 @@ env.exp83_target_center_family_mode=success_center
 | `phase/frac_center_aligned_cfg` | 0.1444 | 0.1291 | `G2b` 在 center/yaw 严格对齐上略好 |
 | `phase/frac_tip_constraint_ok` | 0.1722 | 0.1706 | 两者几乎持平 |
 | `phase/frac_success_geom_strict` | 0.0056 | 0.0066 | `G3` 略多触发严格几何成功 |
-| `phase/frac_lifted_enough` | 0.0000 | 0.0000 | 两者都没有 lift closure |
-| `phase/frac_success_strict` | 0.0000 | 0.0000 | 两者都没有 strict success |
+| `phase/frac_lifted_enough` | 0.0000 | 0.0000 | 两者都未满足 strict KPI 中的 lift 条件（当前阶段无 lift 动作） |
+| `phase/frac_success_strict` | 0.0000 | 0.0000 | 由于 strict KPI 含 lift 条件，两者都未触发 |
 | `phase/frac_push_free` | 0.6309 | 0.6519 | `G3` 反而略更 push-free |
-| `phase/frac_push_free_success` | 0.0000 | 0.0000 | 两者都没有 push-free strict success |
+| `phase/frac_push_free_success` | 0.0000 | 0.0000 | 由于 strict KPI 含 lift 条件，两者都未触发 |
 | `phase/frac_rg` | 0.0259 | 0.0309 | `G3` 更常进入 `rg` |
 | `traj/d_traj_mean` | 0.4498 | 0.4523 | 两者近似持平，`G2b` 略贴近自身轨迹 |
 | `traj/yaw_traj_deg_mean` | 12.4191 | 12.7373 | `G2b` 略贴近自身轨迹切线 |
@@ -100,7 +100,7 @@ env.exp83_target_center_family_mode=success_center
 | `phase/frac_inserted > 0` | `47 / 50` | `50 / 50` | `G3` 的插入信号更连续 |
 | `phase/frac_inserted_z_valid > 0` | `47 / 50` | `50 / 50` | z-valid 口径下排序不变 |
 | `phase/frac_success_geom_strict > 0` | `17 / 50` | `18 / 50` | 两者都偶尔触达严格几何成功，`G3` 略多 |
-| `phase/frac_success_strict > 0` | `0 / 50` | `0 / 50` | 两者都没有 strict success 闭环 |
+| `phase/frac_success_strict > 0` | `0 / 50` | `0 / 50` | strict KPI 下均未触发，当前阶段不具判别力 |
 | `phase/frac_push_free_success > 0` | `0 / 50` | `0 / 50` | 两者都没有 push-free strict success |
 | `phase/frac_rg > 0` | `42 / 50` | `47 / 50` | `G3` 更常触达近场 `rg` |
 | `diag/max_hold_counter > 0` | `1 / 50` | `0 / 50` | `G2b` 只有一次短暂 hold blip，未形成闭环 |
@@ -109,7 +109,9 @@ env.exp83_target_center_family_mode=success_center
 
 - `G2b` 尾窗 `diag/max_hold_counter` 最大值为 `8.0`
 - `G3` 尾窗 `diag/max_hold_counter` 最大值为 `0.0`
-- 两者全程 `phase/frac_success` 窗口均值都为 `0.0`
+- 两者在尾窗 `150-199` 的 `phase/frac_success` 窗口均值都为 `0.0`
+- 但全程 `0-199` 中，`G3` 曾在 `iter 94` 打出一次真实 active success：`phase/frac_success=0.0156`、`diag/success_term_frac=0.0156`、`diag/max_hold_counter=9.0`
+- `G2b` 全程没有 active success；最接近的一次是 `iter 168`，当时 `diag/max_hold_counter=8.0`、`phase/frac_success=0.0`
 
 ## 窗口锚点
 
@@ -132,15 +134,15 @@ env.exp83_target_center_family_mode=success_center
 2. **z-valid 不是当前 `G2b / G3` 排序差异的主因。**  
    两条 run 的 `phase/frac_inserted` 与 `phase/frac_inserted_z_valid` 在尾窗里几乎完全同速同序，说明这次 strict compare 并没有看到“raw inserted 很高、但 z-valid 后大幅塌掉”的情况。也就是说，当前 `G2b` 的核心问题不是 z-valid 漏洞，而更像是几何推进保持力本身较弱。
 
-3. **真正暴露出来的瓶颈在 strict success 的后半段，而不是 insert 本身。**  
-   两条 run 都能偶尔打出 `phase/frac_success_geom_strict > 0`，但 `phase/frac_lifted_enough` 全程为 `0`，于是 `phase/frac_success_strict` 与 `phase/frac_push_free_success` 全程都为 `0`。这说明目前 `200 iter` compare 更像是在比较“approach + near-field geometry quality”，还没有进入“insert-lift 闭环已经打通”的阶段。
+3. **当前 full strict success 指标不具判别力，不应解读成“训练已经卡在 lift”。**  
+   两条 run 都能偶尔打出 `phase/frac_success_geom_strict > 0`，但 `phase/frac_lifted_enough` 全程为 `0`，于是 `phase/frac_success_strict` 与 `phase/frac_push_free_success` 全程都为 `0`。结合当前 task 仍是 `action_space=2` 的 approach-only 训练、lift 维度在环境内部被补零，这更说明 full strict success 含了一个当前阶段不会满足的 lift 条件，而不是策略已经推进到后段却卡在 lift。换句话说，这轮 `200 iter` compare 主要还是在比较“approach + near-field geometry quality”。
 
-4. **当前 active success 也没有闭环，只是 `G2b` 在尾窗里出现过一次短暂 hold blip。**  
-   `phase/frac_success` 的尾窗均值两者都是 `0`。`G2b` 尾窗里有一次 `diag/max_hold_counter=8` 的瞬时非零，但距离真正的 hold-based success 还差得很远；`G3` 在尾窗里则连这种短暂 hold 都没有保住。这个现象说明当前 reward/done 口径下，策略还没形成稳定的近场 hold 行为。
+4. **active success 的全程表现其实也支持 `G3`，只是这个信号没有保留到尾窗。**  
+   `phase/frac_success` 在尾窗 `150-199` 的均值两者都是 `0`，所以如果只看尾窗，会误以为两条 run 都从未碰到 active success。实际上，全程 `0-199` 中，`G3` 在 `iter 94` 出现过一次真实 active success：`phase/frac_success=0.0156`、`diag/success_term_frac=0.0156`，并且 `diag/max_hold_counter=9.0` 达到阈值；相对地，`G2b` 全程没有 active success，最接近的一次只是 `iter 168` 的 `diag/max_hold_counter=8.0` near-miss。这说明当前 reward/done 口径下，`G3` 不仅 strict 几何信号略优，连 active success 也比 `G2b` 更早摸到过一次。
 
 5. **因此，这轮 strict compare 的主结论不是“成功标准已经够严”，而是“strict 指标已经足以支持我们在 `G3` 上继续排查”。**  
-   下一步如果目标是继续比较几何底座，应当沿 `G3` 继续；如果目标是尽快逼近真正 success 闭环，则应当在 `G3` 上优先检查 why `lifted_enough` 永远为 `0`，以及当前 active success 与 strict success 的分工是否需要重新整理。
+   下一步如果目标是继续比较几何底座，应当沿 `G3` 继续；如果目标是收紧 active success，也应优先收紧到 `success_geom_strict` 这一层，而不是直接把含 lift 条件的 `success_strict` 当成当前阶段的训练门槛。
 
 ## 一句话结论
 
-**在 `strict diagnostics + 200 iter` 的同工作树对比里，`G3` 依旧比 `G2b` 更能稳定保住 `inserted_z_valid / rg` 信号，而且没有更脏；真正卡住两者的不是 z-valid，而是 strict success 的后半段 (`lifted_enough / hold` 闭环) 仍然完全没有建立，因此下一步更适合沿 `G3` 继续，而不是回到 `G2b`。**
+**在 `strict diagnostics + 200 iter` 的同工作树对比里，`G3` 依旧比 `G2b` 更能稳定保住 `inserted_z_valid / rg` 信号，而且没有更脏；进一步看全程日志，`G3` 还出现过一次真实 active success，而 `G2b` 只有 hold near-miss。当前主矛盾不是 z-valid，而是 full strict success 含了一个 approach-only 阶段不会满足的 lift 条件，因此下一步更适合沿 `G3` 继续，并把关注点放在 `success_geom_strict`，而不是回到 `G2b`。**
