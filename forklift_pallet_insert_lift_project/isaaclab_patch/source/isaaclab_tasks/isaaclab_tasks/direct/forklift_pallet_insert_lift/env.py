@@ -231,6 +231,8 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self._geom_constants_logged = False
         # Exp8.3 runtime U0：仅用于 sanity run 的一次性诊断日志开关。
         self._runtime_u0_logged = False
+        # Exp8.3 runtime U0.5/U1：target_center family 接线诊断日志开关。
+        self._runtime_u1_logged = False
 
         # S1.0z: Episode 级别成功率统计
         self._ep_success_count = 0
@@ -855,6 +857,60 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         s_front = -0.5 * pallet_depth
         return s_front + (float(self.cfg.insert_fraction) * pallet_depth - 0.6)
 
+    def _exp83_front_center_s(self) -> float:
+        """legacy target_center 对应的 fork_center 轴向标量位置。"""
+        pallet_depth = float(self.cfg.pallet_depth_m)
+        return -0.5 * pallet_depth + 0.6
+
+    def _exp83_target_center_family_s(self) -> float:
+        """当前 target_center family 统一使用的轴向标量位置。"""
+        mode = self.cfg.exp83_target_center_family_mode
+        if mode == "front_center":
+            return self._exp83_front_center_s()
+        if mode == "success_center":
+            return self._exp83_success_center_s()
+        raise ValueError(f"Unsupported exp83_target_center_family_mode: {mode}")
+
+    def _exp83_target_center_xy(
+        self,
+        pallet_pos_xy: torch.Tensor,
+        pallet_yaw: torch.Tensor,
+        s_target: float,
+    ) -> torch.Tensor:
+        """按给定轴向标量位置生成 fork_center 目标点。"""
+        u_in = torch.stack([torch.cos(pallet_yaw), torch.sin(pallet_yaw)], dim=-1)
+        return pallet_pos_xy + float(s_target) * u_in
+
+    def _exp83_target_center_family_dist(
+        self,
+        fork_center_xy: torch.Tensor,
+        pallet_pos_xy: torch.Tensor,
+        pallet_yaw: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """返回当前 family target_center 及其与 fork_center 的距离。"""
+        target_center_family = self._exp83_target_center_xy(
+            pallet_pos_xy, pallet_yaw, self._exp83_target_center_family_s()
+        )
+        dist_center_family = torch.norm(fork_center_xy - target_center_family, dim=-1)
+        return dist_center_family, target_center_family
+
+    def _exp83_rg_mask(
+        self,
+        dist_center_family: torch.Tensor,
+        tip_y_err: torch.Tensor,
+        yaw_err_deg: torch.Tensor,
+    ) -> torch.Tensor:
+        """当前 family 下的 rg 掩码。"""
+        return (
+            (dist_center_family < self.cfg.paper_rg_dist_thresh) &
+            (tip_y_err < 0.20) &
+            (yaw_err_deg < 15.0)
+        )
+
+    def _exp83_out_of_bounds_mask(self, dist_center_family: torch.Tensor) -> torch.Tensor:
+        """当前 family 下的 out_of_bounds 掩码。"""
+        return dist_center_family > self.cfg.paper_out_of_bounds_dist
+
     def _exp83_traj_goal_s(self) -> float:
         """当前参考轨迹终点的轴向标量位置。"""
         pallet_depth = float(self.cfg.pallet_depth_m)
@@ -1033,6 +1089,104 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
 
         if fail_count > 0 and bool(getattr(self.cfg, "exp83_runtime_u0_fail_fast", True)):
             raise RuntimeError(f"Exp8.3 runtime U0 failed: {summary}")
+
+    def _run_runtime_u1_target_center_family_check(
+        self,
+        env_ids: torch.Tensor,
+        *,
+        pallet_pos_xy: torch.Tensor,
+        pallet_yaw: torch.Tensor,
+    ) -> None:
+        """Exp8.3 runtime U0.5/U1：检查 r_d / rg / out_of_bounds 的 family 接线。"""
+        if not bool(getattr(self.cfg, "exp83_runtime_u1_enable", False)):
+            return
+        if len(env_ids) == 0:
+            return
+
+        eps_m = float(self.cfg.exp83_runtime_u1_eps_m)
+        probe_margin = float(self.cfg.exp83_runtime_u1_probe_margin_m)
+        env_ids = env_ids.long()
+
+        u_in = torch.stack([torch.cos(pallet_yaw), torch.sin(pallet_yaw)], dim=-1)
+
+        s_front_center = self._exp83_front_center_s()
+        s_success = self._exp83_success_center_s()
+        s_family = self._exp83_target_center_family_s()
+        s_traj = self._exp83_traj_goal_s()
+        if self.cfg.exp83_target_center_family_mode == "front_center":
+            s_alt = s_success
+        else:
+            s_alt = s_front_center
+
+        family_center = self._exp83_target_center_xy(pallet_pos_xy, pallet_yaw, s_family)
+        alt_center = self._exp83_target_center_xy(pallet_pos_xy, pallet_yaw, s_alt)
+        traj_goal_center = self._exp83_target_center_xy(pallet_pos_xy, pallet_yaw, s_traj)
+        oob_center = family_center + (self.cfg.paper_out_of_bounds_dist + probe_margin) * u_in
+
+        def _eval_probe(probe_center_xy: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+            dist_center_family, _ = self._exp83_target_center_family_dist(
+                probe_center_xy, pallet_pos_xy, pallet_yaw
+            )
+            tip_xy = probe_center_xy + 0.6 * u_in
+            v_lat = torch.stack([-u_in[:, 1], u_in[:, 0]], dim=-1)
+            tip_y_err = torch.abs(torch.sum((tip_xy - pallet_pos_xy) * v_lat, dim=-1))
+            yaw_err_deg = torch.zeros_like(dist_center_family)
+            rg = self._exp83_rg_mask(dist_center_family, tip_y_err, yaw_err_deg)
+            out_of_bounds = self._exp83_out_of_bounds_mask(dist_center_family)
+            r_d = torch.clip(1.0 / (dist_center_family + 1e-5), 0.0, self.cfg.paper_reward_max)
+            return dist_center_family, rg, out_of_bounds, r_d
+
+        family_dist, family_rg, family_oob, family_r_d = _eval_probe(family_center)
+        alt_dist, alt_rg, alt_oob, _ = _eval_probe(alt_center)
+        traj_dist, traj_rg, traj_oob, _ = _eval_probe(traj_goal_center)
+        oob_dist, oob_rg, oob_oob, _ = _eval_probe(oob_center)
+
+        expected_alt_dist = abs(s_alt - s_family)
+        expected_traj_dist = abs(s_traj - s_family)
+        expected_oob_dist = float(self.cfg.paper_out_of_bounds_dist) + probe_margin
+        expected_alt_rg = expected_alt_dist < float(self.cfg.paper_rg_dist_thresh)
+        expected_traj_rg = expected_traj_dist < float(self.cfg.paper_rg_dist_thresh)
+
+        fail_mask = (
+            (family_dist > eps_m) |
+            (~family_rg) |
+            family_oob |
+            (torch.abs(family_r_d - float(self.cfg.paper_reward_max)) > 1e-6) |
+            (torch.abs(alt_dist - expected_alt_dist) > eps_m) |
+            (alt_rg != expected_alt_rg) |
+            alt_oob |
+            (torch.abs(traj_dist - expected_traj_dist) > eps_m) |
+            (traj_rg != expected_traj_rg) |
+            traj_oob |
+            (torch.abs(oob_dist - expected_oob_dist) > eps_m) |
+            oob_rg |
+            (~oob_oob)
+        )
+
+        fail_count = int(fail_mask.sum().item())
+        total = int(len(env_ids))
+        summary = (
+            "[runtime_u1_target_family] "
+            f"fail={fail_count}/{total}, "
+            f"mode={self.cfg.exp83_target_center_family_mode}, "
+            f"s_front_center={s_front_center:.6f}, "
+            f"s_family={s_family:.6f}, "
+            f"s_traj={s_traj:.6f}, "
+            f"delta_alt={expected_alt_dist:.6f}, "
+            f"delta_traj={expected_traj_dist:.6f}, "
+            f"traj_goal_inside_rg={int(expected_traj_rg)}, "
+            f"max_family_d={float(family_dist.max().item()):.6f}, "
+            f"max_alt_d_err={float(torch.abs(alt_dist - expected_alt_dist).max().item()):.6f}, "
+            f"max_traj_d_err={float(torch.abs(traj_dist - expected_traj_dist).max().item()):.6f}, "
+            f"max_oob_d_err={float(torch.abs(oob_dist - expected_oob_dist).max().item()):.6f}, "
+            f"eps_m={eps_m:.6f}"
+        )
+        if (not self._runtime_u1_logged) or fail_count > 0:
+            print(summary)
+            self._runtime_u1_logged = True
+
+        if fail_count > 0 and bool(getattr(self.cfg, "exp83_runtime_u1_fail_fast", True)):
+            raise RuntimeError(f"Exp8.3 runtime U1 target-center-family failed: {summary}")
 
     def _query_reference_trajectory(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """查询当前叉臂中心在参考轨迹上的状态。
@@ -1362,28 +1516,20 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         d_traj, yaw_traj_err_deg, _ = self._query_reference_trajectory()
         yaw_traj_err_rad = yaw_traj_err_deg * (math.pi / 180.0)
         
-        # 2. 距离 rd 的定义：叉臂中心到目标叉臂中心的距离
+        # 2. 距离 rd 的定义：叉臂中心到当前 family target_center 的距离
         pallet_yaw = _quat_to_yaw(self.pallet.data.root_quat_w)
-        pallet_front_x = pallet_pos[:, 0] - (self.cfg.pallet_depth_m / 2.0) * torch.cos(pallet_yaw)
-        pallet_front_y = pallet_pos[:, 1] - (self.cfg.pallet_depth_m / 2.0) * torch.sin(pallet_yaw)
-        
-        # 叉臂长 1.2m，中心在叉根前方 0.6m
-        target_center_x = pallet_front_x + 0.6 * torch.cos(pallet_yaw)
-        target_center_y = pallet_front_y + 0.6 * torch.sin(pallet_yaw)
-        target_center = torch.stack([target_center_x, target_center_y], dim=-1)
-        
-        dist_center = torch.norm(fork_center[:, :2] - target_center, dim=-1)
+        dist_center_family, _ = self._exp83_target_center_family_dist(
+            fork_center[:, :2], pallet_pos[:, :2], pallet_yaw
+        )
 
         # 3. 正向奖励 R+ (使用 exp 替代 1/x 防止数值爆炸)
         # 论文原生 1/x 形式，使用 clip 防止近场爆炸，释放远场原生引力
-        r_d = torch.clip(1.0 / (dist_center + 1e-5), 0.0, self.cfg.paper_reward_max)
+        r_d = torch.clip(1.0 / (dist_center_family + 1e-5), 0.0, self.cfg.paper_reward_max)
         r_cd = torch.clip(1.0 / (d_traj + 1e-5), 0.0, self.cfg.paper_reward_max)
         r_cpsi = torch.clip(1.0 / (yaw_traj_err_rad + 1e-5), 0.0, self.cfg.paper_reward_max)
 
         # rg: 到达奖励 (当叉臂中心距离托盘中心很近，且姿态对准时)
-        rg = ((dist_center < self.cfg.paper_rg_dist_thresh) & 
-              (tip_y_err < 0.20) & 
-              (yaw_err_deg < 15.0)).float()
+        rg = self._exp83_rg_mask(dist_center_family, tip_y_err, yaw_err_deg).float()
 
         # r_lift: 举升奖励 (纯 approach 阶段设为 0)
         lift_height_joint = self._joint_pos[:, self._lift_id]
@@ -1459,9 +1605,24 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         insert_norm = torch.clamp(insert_depth / (self.cfg.pallet_depth_m + 1e-6), 0.0, 1.0)
         is_inserted = insert_norm >= self.cfg.insert_fraction
         is_aligned = (y_err < 0.1) & (yaw_err_deg < 5.0)
-        
+
         hold_cond = is_inserted & is_aligned
         self._hold_counter = torch.where(hold_cond, self._hold_counter + 1, 0.0)
+
+        # 仅做诊断：更严格的成功口径，不改变当前训练正在使用的 success / done。
+        rel_fc = fork_center[:, :2] - pallet_pos[:, :2]
+        center_y_err = torch.abs(torch.sum(rel_fc * v_lat, dim=-1))
+        pallet_lift_height = pallet_pos[:, 2] - self.cfg.pallet_cfg.init_state.pos[2]
+        z_err = torch.abs(lift_height - pallet_lift_height)
+        is_inserted_z_valid = is_inserted & (z_err < self.cfg.max_insert_z_err)
+        is_center_aligned_cfg = (
+            (center_y_err <= self.cfg.max_lateral_err_m) &
+            (yaw_err_deg <= self.cfg.max_yaw_err_deg)
+        )
+        is_near_field = dist_front <= self.cfg.tip_align_near_dist
+        is_tip_aligned_near = is_near_field & (tip_y_err <= self.cfg.tip_align_entry_m)
+        is_tip_constraint_ok = (~is_near_field) | (tip_y_err <= self.cfg.tip_align_entry_m)
+        lifted_enough = lift_height >= self.cfg.lift_delta_m
         
         # 与 _get_dones 共用的终止掩码（用于 Exp8.3 诊断日志）
         tipped, success, out_of_bounds = self._termination_masks()
@@ -1469,18 +1630,20 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         # 记录 push-free success (成功且托盘位移小)
         pallet_init_pos_xy = torch.tensor(self.cfg.pallet_cfg.init_state.pos[:2], device=self.device)
         pallet_disp_xy = torch.norm(pallet_pos[:, :2] - pallet_init_pos_xy, dim=-1)
-        push_free = pallet_disp_xy < 0.08
-        
+        push_free = pallet_disp_xy < self.cfg.push_free_disp_thresh_m
+        success_geom_strict = is_inserted_z_valid & is_center_aligned_cfg & is_tip_constraint_ok
+        success_strict = success_geom_strict & lifted_enough
+        push_free_success_strict = success_strict & push_free
+        max_hold_counter = self._hold_counter.max()
+
         if "log" not in self.extras:
             self.extras["log"] = {}
 
         # Exp8.3：run 级几何常量（写入首步 summary，便于实验笔记对表）
         if not self._geom_constants_logged:
             self._geom_constants_logged = True
-            _D = float(self.cfg.pallet_depth_m)
-            _s_front = -0.5 * _D
             _s_traj = self._exp83_traj_goal_s()
-            _s_rd = _s_front + 0.6
+            _s_rd = self._exp83_target_center_family_s()
             _s_succ = self._exp83_success_center_s()
             print(
                 f"[forklift_exp83_geom] geom/s_traj_end={_s_traj:.6f} "
@@ -1492,7 +1655,6 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
             self.extras["log"]["geom/s_success_center"] = _s_succ
 
         # 沿托盘轴签名坐标（fork_center / tip）
-        rel_fc = fork_center[:, :2] - pallet_pos[:, :2]
         s_center = torch.sum(rel_fc * u_in, dim=-1)
 
         # 实验 B 日志
@@ -1518,13 +1680,27 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         ).mean()
         self.extras["log"]["err/tip_lateral_mean"] = tip_y_err.mean()
         self.extras["log"]["err/yaw_deg_mean"] = yaw_err_deg.mean()
-        
+
         self.extras["log"]["diag/pallet_disp_xy_mean"] = pallet_disp_xy.mean()
+        self.extras["log"]["diag/z_err_mean"] = z_err.mean()
+        self.extras["log"]["diag/lift_height_mean"] = lift_height.mean()
+        self.extras["log"]["diag/max_hold_counter"] = max_hold_counter
+        self.extras["log"]["diag/max_hold_counter_frac"] = max_hold_counter / float(self._hold_steps)
         self.extras["log"]["s_center_mean"] = s_center.mean()
         self.extras["log"]["s_tip_mean"] = s_tip.mean()
-        
+
         self.extras["log"]["phase/frac_inserted"] = is_inserted.float().mean()
+        self.extras["log"]["phase/frac_inserted_z_valid"] = is_inserted_z_valid.float().mean()
         self.extras["log"]["phase/frac_aligned"] = is_aligned.float().mean()
+        self.extras["log"]["phase/frac_center_aligned_cfg"] = is_center_aligned_cfg.float().mean()
+        self.extras["log"]["phase/frac_near_field"] = is_near_field.float().mean()
+        self.extras["log"]["phase/frac_tip_aligned_near"] = is_tip_aligned_near.float().mean()
+        self.extras["log"]["phase/frac_tip_constraint_ok"] = is_tip_constraint_ok.float().mean()
+        self.extras["log"]["phase/frac_lifted_enough"] = lifted_enough.float().mean()
+        self.extras["log"]["phase/frac_success_geom_strict"] = success_geom_strict.float().mean()
+        self.extras["log"]["phase/frac_success_strict"] = success_strict.float().mean()
+        self.extras["log"]["phase/frac_push_free"] = push_free.float().mean()
+        self.extras["log"]["phase/frac_push_free_success"] = push_free_success_strict.float().mean()
         self.extras["log"]["phase/frac_rg"] = rg.mean()
         self.extras["log"]["phase/frac_success"] = success.float().mean()
         self.extras["log"]["diag/out_of_bounds_frac"] = out_of_bounds.float().mean()
@@ -1554,13 +1730,10 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         pallet_pos = self.pallet.data.root_pos_w
         fork_center = self._compute_fork_center()
         pallet_yaw = _quat_to_yaw(self.pallet.data.root_quat_w)
-        pallet_front_x = pallet_pos[:, 0] - (self.cfg.pallet_depth_m / 2.0) * torch.cos(pallet_yaw)
-        pallet_front_y = pallet_pos[:, 1] - (self.cfg.pallet_depth_m / 2.0) * torch.sin(pallet_yaw)
-        target_center_x = pallet_front_x + 0.6 * torch.cos(pallet_yaw)
-        target_center_y = pallet_front_y + 0.6 * torch.sin(pallet_yaw)
-        target_center = torch.stack([target_center_x, target_center_y], dim=-1)
-        dist_center = torch.norm(fork_center[:, :2] - target_center, dim=-1)
-        out_of_bounds = dist_center > self.cfg.paper_out_of_bounds_dist
+        dist_center_family, _ = self._exp83_target_center_family_dist(
+            fork_center[:, :2], pallet_pos[:, :2], pallet_yaw
+        )
+        out_of_bounds = self._exp83_out_of_bounds_mask(dist_center_family)
         return tipped, success, out_of_bounds
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
@@ -1708,6 +1881,11 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
             env_ids,
             fork_center_xy=fc3[:, :2],
             robot_yaw=r_yaw,
+            pallet_pos_xy=pallet_pos[:, :2],
+            pallet_yaw=p_yaw,
+        )
+        self._run_runtime_u1_target_center_family_check(
+            env_ids,
             pallet_pos_xy=pallet_pos[:, :2],
             pallet_yaw=p_yaw,
         )
