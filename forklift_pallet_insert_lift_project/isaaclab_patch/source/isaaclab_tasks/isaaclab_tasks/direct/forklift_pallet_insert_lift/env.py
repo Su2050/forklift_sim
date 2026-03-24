@@ -24,7 +24,6 @@ by sull
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
 from typing import Tuple
 
 import torch
@@ -37,6 +36,7 @@ from isaaclab.sim.spawners.from_files import spawn_ground_plane
 from isaaclab.utils.math import sample_uniform
 
 from .env_cfg import ForkliftPalletInsertLiftEnvCfg
+from .hold_logic import HoldLogicConfig, compute_hold_logic
 
 
 def _quat_to_yaw(q: torch.Tensor) -> torch.Tensor:
@@ -251,6 +251,20 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         # 成功判定需要的 hold 步数
         ctrl_dt = self.cfg.sim.dt * self.cfg.decimation
         self._hold_steps = max(1, int(self.cfg.hold_time_s / ctrl_dt))
+        self._hold_logic_cfg = HoldLogicConfig(
+            insert_thresh=self._insert_thresh,
+            max_lateral_err_m=self.cfg.max_lateral_err_m,
+            max_yaw_err_deg=self.cfg.max_yaw_err_deg,
+            hysteresis_ratio=self.cfg.hysteresis_ratio,
+            insert_exit_epsilon=self.cfg.insert_exit_epsilon,
+            lift_delta_m=self.cfg.lift_delta_m,
+            lift_exit_epsilon=self.cfg.lift_exit_epsilon,
+            hold_counter_decay=self.cfg.hold_counter_decay,
+            tip_align_entry_m=self.cfg.tip_align_entry_m,
+            tip_align_exit_m=self.cfg.tip_align_exit_m,
+            tip_align_near_dist=self.cfg.tip_align_near_dist,
+            require_lift=not (self._stage_1_mode and self.cfg.stage1_success_without_lift),
+        )
 
         # 便捷引用（从 PhysX view 手动刷新，因为 robot.data.joint_pos 在
         # Fabric clone 失败时不会被 scene.update() 刷新——所有值恒为 0）
@@ -1510,6 +1524,10 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         # 仍需 insert_depth 用于 _apply_action 安全制动
         self._last_insert_depth = insert_depth.detach()
 
+        # ---- 成功/hold 诊断口径（fork center frame）----
+        rel_fc = fork_center[:, :2] - pallet_pos[:, :2]
+        center_y_err = torch.abs(torch.sum(rel_fc * v_lat, dim=-1))
+
         # ---- 实验 B: 论文原生 Reward 计算 ----
         
         # 1. 轨迹相关变量 (复用 3.1 的轨迹查询)
@@ -1602,26 +1620,28 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         # ==================================================================
         
         # 更新持有时长计数器 (用于 success 判断)
-        insert_norm = torch.clamp(insert_depth / (self.cfg.pallet_depth_m + 1e-6), 0.0, 1.0)
-        is_inserted = insert_norm >= self.cfg.insert_fraction
-        is_aligned = (y_err < 0.1) & (yaw_err_deg < 5.0)
-
-        hold_cond = is_inserted & is_aligned
-        self._hold_counter = torch.where(hold_cond, self._hold_counter + 1, 0.0)
+        hold_state = compute_hold_logic(
+            center_y_err=center_y_err,
+            yaw_err_deg=yaw_err_deg,
+            insert_depth=insert_depth,
+            lift_height=lift_height,
+            tip_y_err=tip_y_err,
+            dist_front=dist_front,
+            hold_counter=self._hold_counter,
+            cfg=self._hold_logic_cfg,
+        )
+        self._hold_counter = hold_state.hold_counter_next
 
         # 仅做诊断：更严格的成功口径，不改变当前训练正在使用的 success / done。
-        rel_fc = fork_center[:, :2] - pallet_pos[:, :2]
-        center_y_err = torch.abs(torch.sum(rel_fc * v_lat, dim=-1))
         pallet_lift_height = pallet_pos[:, 2] - self.cfg.pallet_cfg.init_state.pos[2]
         z_err = torch.abs(lift_height - pallet_lift_height)
+        is_inserted = hold_state.insert_entry
         is_inserted_z_valid = is_inserted & (z_err < self.cfg.max_insert_z_err)
-        is_center_aligned_cfg = (
-            (center_y_err <= self.cfg.max_lateral_err_m) &
-            (yaw_err_deg <= self.cfg.max_yaw_err_deg)
-        )
-        is_near_field = dist_front <= self.cfg.tip_align_near_dist
-        is_tip_aligned_near = is_near_field & (tip_y_err <= self.cfg.tip_align_entry_m)
-        is_tip_constraint_ok = (~is_near_field) | (tip_y_err <= self.cfg.tip_align_entry_m)
+        is_center_aligned_cfg = hold_state.align_entry
+        is_near_field = hold_state.tip_gate_active
+        is_tip_aligned_near = hold_state.tip_gate_active & hold_state.tip_entry
+        is_tip_constraint_ok = hold_state.tip_entry
+        is_aligned = hold_state.align_entry
         lifted_enough = lift_height >= self.cfg.lift_delta_m
         
         # 与 _get_dones 共用的终止掩码（用于 Exp8.3 诊断日志）
@@ -1696,6 +1716,8 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self.extras["log"]["phase/frac_near_field"] = is_near_field.float().mean()
         self.extras["log"]["phase/frac_tip_aligned_near"] = is_tip_aligned_near.float().mean()
         self.extras["log"]["phase/frac_tip_constraint_ok"] = is_tip_constraint_ok.float().mean()
+        self.extras["log"]["phase/frac_hold_entry"] = hold_state.hold_entry.float().mean()
+        self.extras["log"]["phase/grace_zone_frac"] = hold_state.grace_zone.float().mean()
         self.extras["log"]["phase/frac_lifted_enough"] = lifted_enough.float().mean()
         self.extras["log"]["phase/frac_success_geom_strict"] = success_geom_strict.float().mean()
         self.extras["log"]["phase/frac_success_strict"] = success_strict.float().mean()
@@ -1704,6 +1726,7 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self.extras["log"]["phase/frac_rg"] = rg.mean()
         self.extras["log"]["phase/frac_success"] = success.float().mean()
         self.extras["log"]["diag/out_of_bounds_frac"] = out_of_bounds.float().mean()
+        self.extras["log"]["diag/hold_exit_exceeded_frac"] = hold_state.any_exit_exceeded.float().mean()
         self.extras["log"]["diag/success_term_frac"] = (
             success & ~tipped & ~out_of_bounds
         ).float().mean()

@@ -7,8 +7,33 @@
 from __future__ import annotations
 
 import math
+import sys
+import importlib.util
+from pathlib import Path
 
 import torch
+
+
+TEST_ROOT = Path(__file__).resolve().parents[1]
+TASK_SOURCE_ROOT = TEST_ROOT / "isaaclab_patch/source/isaaclab_tasks"
+if str(TASK_SOURCE_ROOT) not in sys.path:
+    sys.path.insert(0, str(TASK_SOURCE_ROOT))
+
+HOLD_LOGIC_PATH = (
+    TASK_SOURCE_ROOT
+    / "isaaclab_tasks/direct/forklift_pallet_insert_lift/hold_logic.py"
+)
+HOLD_LOGIC_SPEC = importlib.util.spec_from_file_location(
+    "exp83_hold_logic",
+    HOLD_LOGIC_PATH,
+)
+assert HOLD_LOGIC_SPEC is not None and HOLD_LOGIC_SPEC.loader is not None
+_hold_logic = importlib.util.module_from_spec(HOLD_LOGIC_SPEC)
+sys.modules[HOLD_LOGIC_SPEC.name] = _hold_logic
+HOLD_LOGIC_SPEC.loader.exec_module(_hold_logic)
+
+HoldLogicConfig = _hold_logic.HoldLogicConfig
+compute_hold_logic = _hold_logic.compute_hold_logic
 
 
 # --- 与 env 中单测计划一致的容差 ---
@@ -198,9 +223,87 @@ def test_u1_insert_norm_rotated_pallet():
     assert ins_deep.item() > ins_f + EPS_INS
 
 
+def _hold_cfg(*, require_lift: bool) -> HoldLogicConfig:
+    return HoldLogicConfig(
+        insert_thresh=0.86,
+        max_lateral_err_m=0.15,
+        max_yaw_err_deg=8.0,
+        hysteresis_ratio=1.2,
+        insert_exit_epsilon=0.02,
+        lift_delta_m=0.30,
+        lift_exit_epsilon=0.08,
+        hold_counter_decay=0.8,
+        tip_align_entry_m=0.12,
+        tip_align_exit_m=0.16,
+        tip_align_near_dist=2.2,
+        require_lift=require_lift,
+    )
+
+
+def test_phase1_hold_logic_skips_lift_but_keeps_tip_gate():
+    state = compute_hold_logic(
+        center_y_err=torch.tensor([0.14]),
+        yaw_err_deg=torch.tensor([7.5]),
+        insert_depth=torch.tensor([0.90]),
+        lift_height=torch.tensor([0.0]),
+        tip_y_err=torch.tensor([0.10]),
+        dist_front=torch.tensor([0.0]),
+        hold_counter=torch.tensor([0.0]),
+        cfg=_hold_cfg(require_lift=False),
+    )
+    assert state.hold_entry.item()
+    assert state.hold_counter_next.item() == 1.0
+
+    tip_blocked = compute_hold_logic(
+        center_y_err=torch.tensor([0.14]),
+        yaw_err_deg=torch.tensor([7.5]),
+        insert_depth=torch.tensor([0.90]),
+        lift_height=torch.tensor([0.0]),
+        tip_y_err=torch.tensor([0.13]),
+        dist_front=torch.tensor([0.0]),
+        hold_counter=torch.tensor([3.0]),
+        cfg=_hold_cfg(require_lift=False),
+    )
+    assert not tip_blocked.hold_entry.item()
+    assert tip_blocked.grace_zone.item()
+    assert tip_blocked.hold_counter_next.item() == 3.0
+
+
+def test_hold_logic_hysteresis_and_decay():
+    grace_state = compute_hold_logic(
+        center_y_err=torch.tensor([0.16]),
+        yaw_err_deg=torch.tensor([8.5]),
+        insert_depth=torch.tensor([0.85]),
+        lift_height=torch.tensor([0.26]),
+        tip_y_err=torch.tensor([0.14]),
+        dist_front=torch.tensor([0.0]),
+        hold_counter=torch.tensor([5.0]),
+        cfg=_hold_cfg(require_lift=True),
+    )
+    assert not grace_state.hold_entry.item()
+    assert grace_state.grace_zone.item()
+    assert grace_state.hold_counter_next.item() == 5.0
+
+    decay_state = compute_hold_logic(
+        center_y_err=torch.tensor([0.19]),
+        yaw_err_deg=torch.tensor([8.5]),
+        insert_depth=torch.tensor([0.85]),
+        lift_height=torch.tensor([0.26]),
+        tip_y_err=torch.tensor([0.14]),
+        dist_front=torch.tensor([0.0]),
+        hold_counter=torch.tensor([5.0]),
+        cfg=_hold_cfg(require_lift=True),
+    )
+    assert decay_state.any_exit_exceeded.item()
+    assert not decay_state.grace_zone.item()
+    assert abs(decay_state.hold_counter_next.item() - 4.0) < 1e-6
+
+
 if __name__ == "__main__":
     test_u0_traj_endpoints_and_monotone_s()
     test_u0_query_d_traj_zero_at_start()
     test_u1_insert_norm_at_success_center_yaw0()
     test_u1_insert_norm_rotated_pallet()
+    test_phase1_hold_logic_skips_lift_but_keeps_tip_gate()
+    test_hold_logic_hysteresis_and_decay()
     print("exp83_geometry_preflight: OK")
