@@ -20,6 +20,31 @@ from isaaclab.sensors import TiledCameraCfg
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
 
+def _find_repo_root() -> str | None:
+    """Resolve the shared project root from either source tree layout."""
+    here = os.path.abspath(os.path.dirname(__file__))
+    for levels_up in (6, 7):
+        root = os.path.abspath(os.path.join(here, *([".."] * levels_up)))
+        if os.path.isfile(os.path.join(root, "assets", "forklift_c.usd")):
+            return root
+    return None
+
+
+def _prefer_local_usd(local_name: str, remote_path: str) -> str:
+    """Use a checked-in local USD when available, otherwise fall back to Nucleus."""
+    repo_root = _find_repo_root()
+    if repo_root is None:
+        return remote_path
+    local_path = os.path.join(repo_root, "assets", local_name)
+    return local_path if os.path.isfile(local_path) else remote_path
+
+
+_DEFAULT_FORKLIFT_USD_PATH = _prefer_local_usd(
+    "forklift_c.usd",
+    f"{ISAAC_NUCLEUS_DIR}/Robots/IsaacSim/ForkliftC/forklift_c.usd",
+)
+
+
 @configclass
 class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     """Configuration for the Forklift Pallet Insert+Lift environment (direct workflow).
@@ -129,7 +154,7 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     )
 
     # ===== 资产路径 =====
-    forklift_usd_path: str = f"{ISAAC_NUCLEUS_DIR}/Robots/IsaacSim/ForkliftC/forklift_c.usd"
+    forklift_usd_path: str = _DEFAULT_FORKLIFT_USD_PATH
     pallet_usd_path: str = f"{ISAAC_NUCLEUS_DIR}/Props/Pallet/pallet.usd"
 
     # ===== 托盘几何参数（欧标托盘，按 1.8x 缩放）=====
@@ -160,7 +185,17 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     
     # 实验 0：push-free 判定阈值
     push_free_disp_thresh_m: float = 0.05
-    
+    # ---- Exp8.3 clean insert / hold: post-insert reward gate ----
+    clean_insert_reward_gate_enable: bool = True
+    clean_insert_gate_start_frac: float = 0.25   # 开始对 post-insert 正奖励做 clean gate
+    clean_insert_gate_ramp_frac: float = 0.15    # 0.25 -> 0.40 逐步切到 clean gate 主导
+    clean_insert_gate_floor: float = 0.15        # 保留少量梯度，避免近场奖励完全熄火
+    clean_insert_center_sigma_m: float = 0.10    # fork center 横向 clean 尺度
+    clean_insert_yaw_sigma_deg: float = 6.0      # clean insert 偏航尺度
+    clean_insert_tip_sigma_m: float = 0.10       # fork tip 横向 clean 尺度
+    clean_insert_use_push_gate: bool = True
+    clean_insert_push_sigma_m: float = 0.10      # 托盘位移越大，post-insert 正奖励衰减越强
+
     # ---- 防作弊与终局优化 ----
     max_insert_z_err: float = 0.4       # 最大允许的货叉与托盘高度差（防止隔空飞越作弊）
     rew_stay_still: float = 0.5         # 成功后保持静止的奖励
@@ -416,7 +451,7 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     robot_cfg: ArticulationCfg = ArticulationCfg(
         prim_path="/World/envs/env_.*/Robot",
         spawn=sim_utils.UsdFileCfg(
-            usd_path=f"{ISAAC_NUCLEUS_DIR}/Robots/IsaacSim/ForkliftC/forklift_c.usd",
+            usd_path=_DEFAULT_FORKLIFT_USD_PATH,
             visual_material=sim_utils.PreviewSurfaceCfg(
                 diffuse_color=(1.0, 0.0, 0.0),  # 强制将整个叉车涂成亮红色，解决 headless 下看不见的问题
                 metallic=0.5,

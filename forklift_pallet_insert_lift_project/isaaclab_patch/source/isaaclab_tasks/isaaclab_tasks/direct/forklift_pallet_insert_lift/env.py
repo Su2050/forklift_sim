@@ -1539,12 +1539,56 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         dist_center_family, _ = self._exp83_target_center_family_dist(
             fork_center[:, :2], pallet_pos[:, :2], pallet_yaw
         )
+        insert_norm = torch.clamp(insert_depth / (self.cfg.pallet_depth_m + 1e-6), 0.0, 1.0)
+        pallet_init_pos_xy = torch.tensor(self.cfg.pallet_cfg.init_state.pos[:2], device=self.device)
+        pallet_disp_xy = torch.norm(pallet_pos[:, :2] - pallet_init_pos_xy, dim=-1)
 
         # 3. 正向奖励 R+ (使用 exp 替代 1/x 防止数值爆炸)
         # 论文原生 1/x 形式，使用 clip 防止近场爆炸，释放远场原生引力
-        r_d = torch.clip(1.0 / (dist_center_family + 1e-5), 0.0, self.cfg.paper_reward_max)
+        r_d_raw = torch.clip(1.0 / (dist_center_family + 1e-5), 0.0, self.cfg.paper_reward_max)
         r_cd = torch.clip(1.0 / (d_traj + 1e-5), 0.0, self.cfg.paper_reward_max)
         r_cpsi = torch.clip(1.0 / (yaw_traj_err_rad + 1e-5), 0.0, self.cfg.paper_reward_max)
+
+        if self.cfg.clean_insert_reward_gate_enable:
+            clean_insert_progress = smoothstep(
+                (insert_norm - self.cfg.clean_insert_gate_start_frac)
+                / max(self.cfg.clean_insert_gate_ramp_frac, 1e-6)
+            )
+            clean_center_gate = torch.exp(
+                -(center_y_err / max(self.cfg.clean_insert_center_sigma_m, 1e-6)) ** 2
+            )
+            clean_yaw_gate = torch.exp(
+                -(yaw_err_deg / max(self.cfg.clean_insert_yaw_sigma_deg, 1e-6)) ** 2
+            )
+            clean_tip_gate = torch.where(
+                dist_front <= self.cfg.tip_align_near_dist,
+                torch.exp(
+                    -(tip_y_err / max(self.cfg.clean_insert_tip_sigma_m, 1e-6)) ** 2
+                ),
+                torch.ones_like(tip_y_err),
+            )
+            clean_insert_gate_core = clean_center_gate * clean_yaw_gate * clean_tip_gate
+            if self.cfg.clean_insert_use_push_gate:
+                clean_push_gate = torch.exp(
+                    -(pallet_disp_xy / max(self.cfg.clean_insert_push_sigma_m, 1e-6)) ** 2
+                )
+                clean_insert_gate_core = clean_insert_gate_core * clean_push_gate
+            else:
+                clean_push_gate = torch.ones_like(clean_insert_gate_core)
+
+            clean_insert_gate = 1.0 - clean_insert_progress + clean_insert_progress * (
+                self.cfg.clean_insert_gate_floor
+                + (1.0 - self.cfg.clean_insert_gate_floor) * clean_insert_gate_core
+            )
+        else:
+            clean_insert_progress = torch.zeros_like(insert_norm)
+            clean_center_gate = torch.ones_like(insert_norm)
+            clean_yaw_gate = torch.ones_like(insert_norm)
+            clean_tip_gate = torch.ones_like(insert_norm)
+            clean_push_gate = torch.ones_like(insert_norm)
+            clean_insert_gate = torch.ones_like(insert_norm)
+
+        r_d = r_d_raw * clean_insert_gate
 
         # rg: 到达奖励 (当叉臂中心距离托盘中心很近，且姿态对准时)
         rg = self._exp83_rg_mask(dist_center_family, tip_y_err, yaw_err_deg).float()
@@ -1648,13 +1692,23 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         tipped, success, out_of_bounds = self._termination_masks()
 
         # 记录 push-free success (成功且托盘位移小)
-        pallet_init_pos_xy = torch.tensor(self.cfg.pallet_cfg.init_state.pos[:2], device=self.device)
-        pallet_disp_xy = torch.norm(pallet_pos[:, :2] - pallet_init_pos_xy, dim=-1)
         push_free = pallet_disp_xy < self.cfg.push_free_disp_thresh_m
         success_geom_strict = is_inserted_z_valid & is_center_aligned_cfg & is_tip_constraint_ok
         success_strict = success_geom_strict & lifted_enough
         push_free_success_strict = success_strict & push_free
         max_hold_counter = self._hold_counter.max()
+
+        def _masked_mean(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+            mask_f = mask.float()
+            return torch.sum(values * mask_f) / mask_f.sum().clamp_min(1.0)
+
+        inserted_push_free = is_inserted & push_free
+        clean_insert_ready = is_inserted & is_center_aligned_cfg & is_tip_constraint_ok & push_free
+        inserted_center_lateral_mean = _masked_mean(center_y_err, is_inserted)
+        inserted_tip_lateral_mean = _masked_mean(tip_y_err, is_inserted)
+        inserted_yaw_deg_mean = _masked_mean(yaw_err_deg, is_inserted)
+        inserted_pallet_disp_xy_mean = _masked_mean(pallet_disp_xy, is_inserted)
+        clean_insert_gate_inserted_mean = _masked_mean(clean_insert_gate, is_inserted)
 
         if "log" not in self.extras:
             self.extras["log"] = {}
@@ -1680,6 +1734,8 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         # 实验 B 日志
         self.extras["log"]["paper_reward/R_plus"] = R_plus.mean()
         self.extras["log"]["paper_reward/R_minus"] = R_minus.mean()
+        self.extras["log"]["paper_reward/r_d_raw"] = r_d_raw.mean()
+        self.extras["log"]["paper_reward/r_d_clean_gate"] = clean_insert_gate.mean()
         self.extras["log"]["paper_reward/r_d"] = r_d.mean()
         self.extras["log"]["paper_reward/r_cd"] = r_cd.mean()
         self.extras["log"]["paper_reward/r_cpsi"] = r_cpsi.mean()
@@ -1698,24 +1754,31 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self.extras["log"]["err/center_lateral_mean"] = torch.abs(
             torch.sum(rel_fc * v_lat, dim=-1)
         ).mean()
+        self.extras["log"]["err/center_lateral_inserted_mean"] = inserted_center_lateral_mean
         self.extras["log"]["err/tip_lateral_mean"] = tip_y_err.mean()
+        self.extras["log"]["err/tip_lateral_inserted_mean"] = inserted_tip_lateral_mean
         self.extras["log"]["err/yaw_deg_mean"] = yaw_err_deg.mean()
+        self.extras["log"]["err/yaw_deg_inserted_mean"] = inserted_yaw_deg_mean
 
         self.extras["log"]["diag/pallet_disp_xy_mean"] = pallet_disp_xy.mean()
+        self.extras["log"]["diag/pallet_disp_xy_inserted_mean"] = inserted_pallet_disp_xy_mean
         self.extras["log"]["diag/z_err_mean"] = z_err.mean()
         self.extras["log"]["diag/lift_height_mean"] = lift_height.mean()
         self.extras["log"]["diag/max_hold_counter"] = max_hold_counter
         self.extras["log"]["diag/max_hold_counter_frac"] = max_hold_counter / float(self._hold_steps)
+        self.extras["log"]["diag/clean_insert_gate_inserted_mean"] = clean_insert_gate_inserted_mean
         self.extras["log"]["s_center_mean"] = s_center.mean()
         self.extras["log"]["s_tip_mean"] = s_tip.mean()
 
         self.extras["log"]["phase/frac_inserted"] = is_inserted.float().mean()
         self.extras["log"]["phase/frac_inserted_z_valid"] = is_inserted_z_valid.float().mean()
+        self.extras["log"]["phase/frac_inserted_push_free"] = inserted_push_free.float().mean()
         self.extras["log"]["phase/frac_aligned"] = is_aligned.float().mean()
         self.extras["log"]["phase/frac_center_aligned_cfg"] = is_center_aligned_cfg.float().mean()
         self.extras["log"]["phase/frac_near_field"] = is_near_field.float().mean()
         self.extras["log"]["phase/frac_tip_aligned_near"] = is_tip_aligned_near.float().mean()
         self.extras["log"]["phase/frac_tip_constraint_ok"] = is_tip_constraint_ok.float().mean()
+        self.extras["log"]["phase/frac_clean_insert_ready"] = clean_insert_ready.float().mean()
         self.extras["log"]["phase/frac_hold_entry"] = hold_state.hold_entry.float().mean()
         self.extras["log"]["phase/grace_zone_frac"] = hold_state.grace_zone.float().mean()
         self.extras["log"]["phase/frac_lifted_enough"] = lifted_enough.float().mean()
