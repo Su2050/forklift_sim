@@ -1546,8 +1546,8 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         # 3. 正向奖励 R+ (使用 exp 替代 1/x 防止数值爆炸)
         # 论文原生 1/x 形式，使用 clip 防止近场爆炸，释放远场原生引力
         r_d_raw = torch.clip(1.0 / (dist_center_family + 1e-5), 0.0, self.cfg.paper_reward_max)
-        r_cd = torch.clip(1.0 / (d_traj + 1e-5), 0.0, self.cfg.paper_reward_max)
-        r_cpsi = torch.clip(1.0 / (yaw_traj_err_rad + 1e-5), 0.0, self.cfg.paper_reward_max)
+        r_cd_raw = torch.clip(1.0 / (d_traj + 1e-5), 0.0, self.cfg.paper_reward_max)
+        r_cpsi_raw = torch.clip(1.0 / (yaw_traj_err_rad + 1e-5), 0.0, self.cfg.paper_reward_max)
 
         if self.cfg.clean_insert_reward_gate_enable:
             clean_insert_progress = smoothstep(
@@ -1567,14 +1567,15 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
                 ),
                 torch.ones_like(tip_y_err),
             )
-            clean_insert_gate_core = clean_center_gate * clean_yaw_gate * clean_tip_gate
+            clean_align_gate = clean_center_gate * clean_yaw_gate * clean_tip_gate
             if self.cfg.clean_insert_use_push_gate:
                 clean_push_gate = torch.exp(
                     -(pallet_disp_xy / max(self.cfg.clean_insert_push_sigma_m, 1e-6)) ** 2
                 )
-                clean_insert_gate_core = clean_insert_gate_core * clean_push_gate
             else:
-                clean_push_gate = torch.ones_like(clean_insert_gate_core)
+                clean_push_gate = torch.ones_like(clean_align_gate)
+
+            clean_insert_gate_core = clean_align_gate * clean_push_gate
 
             clean_insert_gate = 1.0 - clean_insert_progress + clean_insert_progress * (
                 self.cfg.clean_insert_gate_floor
@@ -1586,9 +1587,23 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
             clean_yaw_gate = torch.ones_like(insert_norm)
             clean_tip_gate = torch.ones_like(insert_norm)
             clean_push_gate = torch.ones_like(insert_norm)
+            clean_align_gate = torch.ones_like(insert_norm)
             clean_insert_gate = torch.ones_like(insert_norm)
 
         r_d = r_d_raw * clean_insert_gate
+        r_cd = r_cd_raw * clean_insert_gate if self.cfg.clean_insert_gate_r_cd else r_cd_raw
+        r_cpsi = (
+            r_cpsi_raw * clean_insert_gate
+            if self.cfg.clean_insert_gate_r_cpsi
+            else r_cpsi_raw
+        )
+
+        if self.cfg.clean_insert_dirty_penalty_enable:
+            r_dirty_insert = -self.cfg.clean_insert_dirty_penalty_weight * clean_insert_progress * (
+                1.0 - clean_push_gate
+            )
+        else:
+            r_dirty_insert = torch.zeros_like(clean_insert_progress)
 
         # rg: 到达奖励 (当叉臂中心距离托盘中心很近，且姿态对准时)
         rg = self._exp83_rg_mask(dist_center_family, tip_y_err, yaw_err_deg).float()
@@ -1650,7 +1665,8 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
             self.cfg.alpha_7 * ra +
             self.cfg.alpha_bound * r_bound +
             self.cfg.alpha_8 * rini +
-            self.cfg.alpha_9 * r_out
+            self.cfg.alpha_9 * r_out +
+            r_dirty_insert
         )
         
         # 4. 总奖励
@@ -1704,11 +1720,14 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
 
         inserted_push_free = is_inserted & push_free
         clean_insert_ready = is_inserted & is_center_aligned_cfg & is_tip_constraint_ok & push_free
+        dirty_insert = is_inserted & ~push_free
         inserted_center_lateral_mean = _masked_mean(center_y_err, is_inserted)
         inserted_tip_lateral_mean = _masked_mean(tip_y_err, is_inserted)
         inserted_yaw_deg_mean = _masked_mean(yaw_err_deg, is_inserted)
         inserted_pallet_disp_xy_mean = _masked_mean(pallet_disp_xy, is_inserted)
         clean_insert_gate_inserted_mean = _masked_mean(clean_insert_gate, is_inserted)
+        clean_align_gate_inserted_mean = _masked_mean(clean_align_gate, is_inserted)
+        clean_push_gate_inserted_mean = _masked_mean(clean_push_gate, is_inserted)
 
         if "log" not in self.extras:
             self.extras["log"] = {}
@@ -1737,8 +1756,11 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self.extras["log"]["paper_reward/r_d_raw"] = r_d_raw.mean()
         self.extras["log"]["paper_reward/r_d_clean_gate"] = clean_insert_gate.mean()
         self.extras["log"]["paper_reward/r_d"] = r_d.mean()
+        self.extras["log"]["paper_reward/r_cd_raw"] = r_cd_raw.mean()
         self.extras["log"]["paper_reward/r_cd"] = r_cd.mean()
+        self.extras["log"]["paper_reward/r_cpsi_raw"] = r_cpsi_raw.mean()
         self.extras["log"]["paper_reward/r_cpsi"] = r_cpsi.mean()
+        self.extras["log"]["paper_reward/r_dirty_insert"] = r_dirty_insert.mean()
         self.extras["log"]["paper_reward/rg"] = rg.mean()
         self.extras["log"]["paper_reward/r_lift"] = r_lift.mean()
         self.extras["log"]["paper_reward/rp"] = rp.mean()
@@ -1767,12 +1789,15 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self.extras["log"]["diag/max_hold_counter"] = max_hold_counter
         self.extras["log"]["diag/max_hold_counter_frac"] = max_hold_counter / float(self._hold_steps)
         self.extras["log"]["diag/clean_insert_gate_inserted_mean"] = clean_insert_gate_inserted_mean
+        self.extras["log"]["diag/clean_align_gate_inserted_mean"] = clean_align_gate_inserted_mean
+        self.extras["log"]["diag/clean_push_gate_inserted_mean"] = clean_push_gate_inserted_mean
         self.extras["log"]["s_center_mean"] = s_center.mean()
         self.extras["log"]["s_tip_mean"] = s_tip.mean()
 
         self.extras["log"]["phase/frac_inserted"] = is_inserted.float().mean()
         self.extras["log"]["phase/frac_inserted_z_valid"] = is_inserted_z_valid.float().mean()
         self.extras["log"]["phase/frac_inserted_push_free"] = inserted_push_free.float().mean()
+        self.extras["log"]["phase/frac_dirty_insert"] = dirty_insert.float().mean()
         self.extras["log"]["phase/frac_aligned"] = is_aligned.float().mean()
         self.extras["log"]["phase/frac_center_aligned_cfg"] = is_center_aligned_cfg.float().mean()
         self.extras["log"]["phase/frac_near_field"] = is_near_field.float().mean()
