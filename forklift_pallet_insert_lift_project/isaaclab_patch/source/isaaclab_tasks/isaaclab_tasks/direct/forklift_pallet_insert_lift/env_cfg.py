@@ -189,16 +189,18 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     clean_insert_reward_gate_enable: bool = True
     clean_insert_gate_start_frac: float = 0.25   # 开始对 post-insert 正奖励做 clean gate
     clean_insert_gate_ramp_frac: float = 0.15    # 0.25 -> 0.40 逐步切到 clean gate 主导
-    clean_insert_gate_floor: float = 0.05        # dirty insert 时让正奖励塌得更明显
-    clean_insert_center_sigma_m: float = 0.08    # fork center 横向 clean 尺度
-    clean_insert_yaw_sigma_deg: float = 5.0      # clean insert 偏航尺度
-    clean_insert_tip_sigma_m: float = 0.08       # fork tip 横向 clean 尺度
+    clean_insert_gate_floor: float = 0.15        # 回到 B0：dirty insert 时保留少量正奖励，避免直接压死 insertion
+    clean_insert_center_sigma_m: float = 0.10    # 回到 B0：fork center 横向 clean 尺度
+    clean_insert_yaw_sigma_deg: float = 6.0      # 回到 B0：clean insert 偏航尺度
+    clean_insert_tip_sigma_m: float = 0.10       # 回到 B0：fork tip 横向 clean 尺度
     clean_insert_use_push_gate: bool = True
-    clean_insert_push_sigma_m: float = 0.06      # 托盘位移越大，post-insert 正奖励衰减越强
-    clean_insert_gate_r_cd: bool = True          # gate r_cd，避免 dirty insert 仍吃满轨迹奖励
-    clean_insert_gate_r_cpsi: bool = True        # gate r_cpsi，避免 dirty insert 仍吃满偏航奖励
-    clean_insert_dirty_penalty_enable: bool = True
+    clean_insert_push_sigma_m: float = 0.10      # 回到 B0：托盘位移越大，post-insert 正奖励衰减越强
+    clean_insert_gate_r_cd: bool = False         # 回到 B0：不额外 gate r_cd
+    clean_insert_gate_r_cpsi: bool = False       # 回到 B0：不额外 gate r_cpsi
+    clean_insert_dirty_penalty_enable: bool = False
     clean_insert_dirty_penalty_weight: float = 8.0
+    clean_insert_push_free_bonus_enable: bool = True
+    clean_insert_push_free_bonus_weight: float = 1.0
 
     # ---- 防作弊与终局优化 ----
     max_insert_z_err: float = 0.4       # 最大允许的货叉与托盘高度差（防止隔空飞越作弊）

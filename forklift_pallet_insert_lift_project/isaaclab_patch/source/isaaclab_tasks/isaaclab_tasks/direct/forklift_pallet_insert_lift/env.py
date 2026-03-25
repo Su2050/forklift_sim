@@ -24,6 +24,7 @@ by sull
 from __future__ import annotations
 
 import math
+import os
 from typing import Tuple
 
 import torch
@@ -63,6 +64,58 @@ def smoothstep(x: torch.Tensor) -> torch.Tensor:
     """Hermite smoothstep: 0→1 with zero-derivative at both ends."""
     x = torch.clamp(x, 0.0, 1.0)
     return x * x * (3.0 - 2.0 * x)
+
+
+def _spawn_ground_plane_with_fallback(prim_path: str, cfg) -> None:
+    """Spawn the default Isaac ground plane, but fall back to a local mesh floor on asset load glitches."""
+    usd_path = str(getattr(cfg, "usd_path", "") or "")
+    if not usd_path or not os.path.isfile(usd_path):
+        print(
+            "[warn] Ground plane USD is not a verified local file; using local mesh fallback directly: "
+            f"usd_path={usd_path or '<empty>'}"
+        )
+        _spawn_local_ground_plane(prim_path=prim_path, cfg=cfg)
+        return
+
+    try:
+        spawn_ground_plane(prim_path=prim_path, cfg=cfg)
+        return
+    except Exception as exc:
+        error_text = str(exc)
+        recoverable = "Stage.GetPrimAtPath(Stage, NoneType)" in error_text
+        if not recoverable:
+            raise
+        print(
+            "[warn] spawn_ground_plane failed while resolving the default grid plane "
+            f"('{error_text}'); falling back to a local mesh ground plane."
+        )
+    _spawn_local_ground_plane(prim_path=prim_path, cfg=cfg)
+
+
+def _spawn_local_ground_plane(prim_path: str, cfg) -> None:
+    """Create a simple box-mesh floor without depending on remote USD assets."""
+    import trimesh
+    from isaaclab.terrains.utils import create_prim_from_mesh
+
+    size_x, size_y = cfg.size
+    thickness = 0.02
+    mesh = trimesh.creation.box(extents=(float(size_x), float(size_y), thickness))
+
+    visual_material = None
+    if getattr(cfg, "color", None) is not None:
+        visual_material = sim_utils.PreviewSurfaceCfg(diffuse_color=cfg.color)
+
+    create_prim_from_mesh(
+        prim_path,
+        mesh,
+        translation=(0.0, 0.0, -0.5 * thickness),
+        visual_material=visual_material,
+        physics_material=getattr(cfg, "physics_material", None),
+    )
+    print(
+        "[info] Local mesh ground plane created successfully: "
+        f"path={prim_path}, size=({float(size_x):.1f}, {float(size_y):.1f}), thickness={thickness:.3f}"
+    )
 
 
 def _force_pallet_dynamic(stage, pallet_prim_path: str):
@@ -711,7 +764,7 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self._fix_lift_joint_drive()
 
         # ground
-        spawn_ground_plane(prim_path="/World/ground", cfg=self.cfg.ground_cfg)
+        _spawn_ground_plane_with_fallback(prim_path="/World/ground", cfg=self.cfg.ground_cfg)
 
         # clone envs
         self.scene.clone_environments(copy_from_source=False)
@@ -1542,6 +1595,8 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         insert_norm = torch.clamp(insert_depth / (self.cfg.pallet_depth_m + 1e-6), 0.0, 1.0)
         pallet_init_pos_xy = torch.tensor(self.cfg.pallet_cfg.init_state.pos[:2], device=self.device)
         pallet_disp_xy = torch.norm(pallet_pos[:, :2] - pallet_init_pos_xy, dim=-1)
+        push_free = pallet_disp_xy < self.cfg.push_free_disp_thresh_m
+        inserted_push_free_reward = (insert_depth >= self._insert_thresh) & push_free
 
         # 3. 正向奖励 R+ (使用 exp 替代 1/x 防止数值爆炸)
         # 论文原生 1/x 形式，使用 clip 防止近场爆炸，释放远场原生引力
@@ -1605,6 +1660,14 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         else:
             r_dirty_insert = torch.zeros_like(clean_insert_progress)
 
+        if self.cfg.clean_insert_push_free_bonus_enable:
+            r_clean_insert_bonus = (
+                self.cfg.clean_insert_push_free_bonus_weight
+                * inserted_push_free_reward.float()
+            )
+        else:
+            r_clean_insert_bonus = torch.zeros_like(clean_insert_progress)
+
         # rg: 到达奖励 (当叉臂中心距离托盘中心很近，且姿态对准时)
         rg = self._exp83_rg_mask(dist_center_family, tip_y_err, yaw_err_deg).float()
 
@@ -1620,7 +1683,8 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
             self.cfg.alpha_2 * r_cd +
             alpha_3_dynamic * r_cpsi +
             self.cfg.alpha_4 * rg +
-            r_lift
+            r_lift +
+            r_clean_insert_bonus
         )
         
         # 3. 负向惩罚 R- (Eq.7)
@@ -1708,7 +1772,6 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         tipped, success, out_of_bounds = self._termination_masks()
 
         # 记录 push-free success (成功且托盘位移小)
-        push_free = pallet_disp_xy < self.cfg.push_free_disp_thresh_m
         success_geom_strict = is_inserted_z_valid & is_center_aligned_cfg & is_tip_constraint_ok
         success_strict = success_geom_strict & lifted_enough
         push_free_success_strict = success_strict & push_free
@@ -1761,6 +1824,7 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self.extras["log"]["paper_reward/r_cpsi_raw"] = r_cpsi_raw.mean()
         self.extras["log"]["paper_reward/r_cpsi"] = r_cpsi.mean()
         self.extras["log"]["paper_reward/r_dirty_insert"] = r_dirty_insert.mean()
+        self.extras["log"]["paper_reward/r_clean_insert_bonus"] = r_clean_insert_bonus.mean()
         self.extras["log"]["paper_reward/rg"] = rg.mean()
         self.extras["log"]["paper_reward/r_lift"] = r_lift.mean()
         self.extras["log"]["paper_reward/rp"] = rp.mean()
