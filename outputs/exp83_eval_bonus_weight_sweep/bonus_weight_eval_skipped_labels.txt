@@ -1,0 +1,9 @@
+exp83_eval_bonusw0p5_seed42
+exp83_eval_bonusw0p5_seed43
+exp83_eval_bonusw0p5_seed44
+exp83_eval_bonusw1p0_seed42
+exp83_eval_bonusw1p0_seed43
+exp83_eval_bonusw1p0_seed44
+exp83_eval_bonusw1p5_seed42
+exp83_eval_bonusw1p5_seed43
+exp83_eval_bonusw1p5_seed44
