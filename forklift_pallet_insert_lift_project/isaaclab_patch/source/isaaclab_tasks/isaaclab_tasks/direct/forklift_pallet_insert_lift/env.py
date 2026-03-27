@@ -237,6 +237,7 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         # S1.0Q Batch-3: dead-zone stuck detector
         self._dz_stuck_counter = torch.zeros((self.num_envs,), dtype=torch.int32, device=self.device)
         self._prev_y_err = torch.zeros((self.num_envs,), device=self.device)
+        self._prev_yaw_err_deg = torch.zeros((self.num_envs,), device=self.device)
         self._early_stop_dz_stuck = torch.zeros((self.num_envs,), dtype=torch.bool, device=self.device)
         self._dz_stuck_fired = torch.zeros((self.num_envs,), dtype=torch.bool, device=self.device)
         
@@ -1668,6 +1669,59 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         else:
             r_clean_insert_bonus = torch.zeros_like(clean_insert_progress)
 
+        if self.cfg.preinsert_align_reward_enable:
+            preinsert_dist_gate = smoothstep(
+                (self.cfg.preinsert_active_dist_max_m - dist_front)
+                / max(self.cfg.preinsert_active_dist_ramp_m, 1e-6)
+            )
+            preinsert_insert_gate = (insert_norm < self.cfg.preinsert_insert_frac_max).float()
+            preinsert_active = preinsert_dist_gate * preinsert_insert_gate
+
+            y_delta = torch.clamp(
+                self._prev_y_err - y_err,
+                min=-self.cfg.preinsert_delta_clip_y_m,
+                max=self.cfg.preinsert_delta_clip_y_m,
+            )
+            yaw_delta = torch.clamp(
+                self._prev_yaw_err_deg - yaw_err_deg,
+                min=-self.cfg.preinsert_delta_clip_yaw_deg,
+                max=self.cfg.preinsert_delta_clip_yaw_deg,
+            )
+            dist_delta = torch.clamp(
+                self._prev_dist_front - dist_front,
+                min=-self.cfg.preinsert_delta_clip_dist_m,
+                max=self.cfg.preinsert_delta_clip_dist_m,
+            )
+
+            y_delta_pos = torch.clamp(
+                y_delta / max(self.cfg.preinsert_delta_clip_y_m, 1e-6), min=0.0, max=1.0
+            )
+            yaw_delta_pos = torch.clamp(
+                yaw_delta / max(self.cfg.preinsert_delta_clip_yaw_deg, 1e-6), min=0.0, max=1.0
+            )
+            dist_delta_pos = torch.clamp(
+                dist_delta / max(self.cfg.preinsert_delta_clip_dist_m, 1e-6), min=0.0, max=1.0
+            )
+            retreat_delta = torch.clamp(
+                -dist_delta / max(self.cfg.preinsert_delta_clip_dist_m, 1e-6), min=0.0, max=1.0
+            )
+
+            r_preinsert_align = preinsert_active * (
+                self.cfg.preinsert_y_err_delta_weight * y_delta_pos
+                + self.cfg.preinsert_yaw_err_delta_weight * yaw_delta_pos
+                + self.cfg.preinsert_dist_front_delta_weight * dist_delta_pos
+            )
+            r_preinsert_retreat = -preinsert_active * (
+                self.cfg.preinsert_retreat_penalty_weight * retreat_delta
+            )
+        else:
+            preinsert_active = torch.zeros_like(insert_norm)
+            y_delta = torch.zeros_like(y_err)
+            yaw_delta = torch.zeros_like(yaw_err_deg)
+            dist_delta = torch.zeros_like(dist_front)
+            r_preinsert_align = torch.zeros_like(insert_norm)
+            r_preinsert_retreat = torch.zeros_like(insert_norm)
+
         # rg: 到达奖励 (当叉臂中心距离托盘中心很近，且姿态对准时)
         rg = self._exp83_rg_mask(dist_center_family, tip_y_err, yaw_err_deg).float()
 
@@ -1684,7 +1738,8 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
             alpha_3_dynamic * r_cpsi +
             self.cfg.alpha_4 * rg +
             r_lift +
-            r_clean_insert_bonus
+            r_clean_insert_bonus +
+            r_preinsert_align
         )
         
         # 3. 负向惩罚 R- (Eq.7)
@@ -1730,7 +1785,8 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
             self.cfg.alpha_bound * r_bound +
             self.cfg.alpha_8 * rini +
             self.cfg.alpha_9 * r_out +
-            r_dirty_insert
+            r_dirty_insert +
+            r_preinsert_retreat
         )
         
         # 4. 总奖励
@@ -1825,6 +1881,8 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self.extras["log"]["paper_reward/r_cpsi"] = r_cpsi.mean()
         self.extras["log"]["paper_reward/r_dirty_insert"] = r_dirty_insert.mean()
         self.extras["log"]["paper_reward/r_clean_insert_bonus"] = r_clean_insert_bonus.mean()
+        self.extras["log"]["paper_reward/r_preinsert_align"] = r_preinsert_align.mean()
+        self.extras["log"]["paper_reward/r_preinsert_retreat"] = r_preinsert_retreat.mean()
         self.extras["log"]["paper_reward/rg"] = rg.mean()
         self.extras["log"]["paper_reward/r_lift"] = r_lift.mean()
         self.extras["log"]["paper_reward/rp"] = rp.mean()
@@ -1855,6 +1913,10 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self.extras["log"]["diag/clean_insert_gate_inserted_mean"] = clean_insert_gate_inserted_mean
         self.extras["log"]["diag/clean_align_gate_inserted_mean"] = clean_align_gate_inserted_mean
         self.extras["log"]["diag/clean_push_gate_inserted_mean"] = clean_push_gate_inserted_mean
+        self.extras["log"]["diag/preinsert_active_frac"] = preinsert_active.mean()
+        self.extras["log"]["diag/preinsert_y_delta_mean"] = y_delta.mean()
+        self.extras["log"]["diag/preinsert_yaw_delta_mean"] = yaw_delta.mean()
+        self.extras["log"]["diag/preinsert_dist_delta_mean"] = dist_delta.mean()
         self.extras["log"]["s_center_mean"] = s_center.mean()
         self.extras["log"]["s_tip_mean"] = s_tip.mean()
 
@@ -1886,6 +1948,10 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         # 轨迹指标
         self.extras["log"]["traj/d_traj_mean"] = d_traj.mean()
         self.extras["log"]["traj/yaw_traj_deg_mean"] = yaw_traj_err_deg.mean()
+
+        self._prev_y_err[:] = y_err.detach()
+        self._prev_yaw_err_deg[:] = yaw_err_deg.detach()
+        self._prev_dist_front[:] = dist_front.detach()
 
         return rew
 
@@ -1954,6 +2020,7 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         # S1.0Q Batch-3: dead-zone stuck detector
         self._dz_stuck_counter[env_ids] = 0
         self._prev_y_err[env_ids] = 0.0
+        self._prev_yaw_err_deg[env_ids] = 0.0
         self._early_stop_dz_stuck[env_ids] = False
         # S1.0Q Batch-4: penOnly 首次触发标记
         self._dz_stuck_fired[env_ids] = False
@@ -2103,6 +2170,8 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
 
         # 实验 3.2: 近场 commit 状态量初始化 (使用真实的叉尖距离)
         self._prev_dist_front[env_ids] = true_dist_front_reset.detach()
+        self._prev_y_err[env_ids] = y_err_reset.detach()
+        self._prev_yaw_err_deg[env_ids] = yaw_err_deg_reset.detach()
 
         # 计算 phi1 初始值
         e_band_reset = torch.where(
