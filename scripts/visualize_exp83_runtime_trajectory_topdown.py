@@ -188,6 +188,33 @@ def _write_traj_csv(path: Path, geom: dict[str, object]) -> None:
             )
 
 
+def _to_pallet_frame(points_xy: np.ndarray, pallet_pos: np.ndarray, u_in: np.ndarray, v_lat: np.ndarray) -> np.ndarray:
+    rel = points_xy - pallet_pos.reshape(1, 2)
+    s = rel @ u_in.reshape(2, 1)
+    lat = rel @ v_lat.reshape(2, 1)
+    return np.concatenate([s, lat], axis=1)
+
+
+def _scalar_geometry(geom: dict[str, object]) -> dict[str, float]:
+    pallet_pos = np.asarray(geom["pallet_pos"])
+    fork_center = np.asarray(geom["fork_center"])
+    p_pre = np.asarray(geom["p_pre"])
+    p_goal = np.asarray(geom["p_goal"])
+    u_in = np.asarray(geom["u_in"])
+    v_lat = np.asarray(geom["v_lat"])
+    s_goal = float(np.dot(p_goal - pallet_pos, u_in))
+    s_pre = float(np.dot(p_pre - pallet_pos, u_in))
+    s_start = float(np.dot(fork_center - pallet_pos, u_in))
+    y_start = float(np.dot(fork_center - pallet_pos, v_lat))
+    return {
+        "s_goal": s_goal,
+        "s_pre": s_pre,
+        "s_start": s_start,
+        "delta_s": s_start - s_pre,
+        "y_start": y_start,
+    }
+
+
 def _plot_case(
     png_path: Path,
     geom: dict[str, object],
@@ -210,15 +237,20 @@ def _plot_case(
     u_in = np.asarray(geom["u_in"])
     v_lat = np.asarray(geom["v_lat"])
     pallet_depth_m = float(geom["pallet_depth_m"])
-    pallet_yaw = float(geom["pallet_yaw"])
     root_yaw = float(geom["root_yaw"])
+    scalar = _scalar_geometry(geom)
+    s_goal = scalar["s_goal"]
+    s_pre = scalar["s_pre"]
+    s_start = scalar["s_start"]
+    y_start = scalar["y_start"]
+    delta_s = scalar["delta_s"]
 
-    fig, ax = plt.subplots(figsize=(8, 8))
+    fig, (ax_world, ax_pf) = plt.subplots(1, 2, figsize=(14, 6.8))
 
     # Reference trajectory.
-    ax.plot(traj_pts[:, 0], traj_pts[:, 1], color="tab:blue", linewidth=2.5, label="reference traj")
+    ax_world.plot(traj_pts[:, 0], traj_pts[:, 1], color="tab:blue", linewidth=2.5, label="reference traj")
     tangent_ix = np.arange(0, traj_pts.shape[0], max(int(tangent_stride), 1))
-    ax.quiver(
+    ax_world.quiver(
         traj_pts[tangent_ix, 0],
         traj_pts[tangent_ix, 1],
         traj_tangents[tangent_ix, 0],
@@ -234,7 +266,7 @@ def _plot_case(
     # Pallet axes / landmarks.
     axis_len = 0.9
     lat_len = 0.6
-    ax.arrow(
+    ax_world.arrow(
         pallet_pos[0],
         pallet_pos[1],
         u_in[0] * axis_len,
@@ -245,7 +277,7 @@ def _plot_case(
         linewidth=2.0,
         label="pallet insert axis",
     )
-    ax.arrow(
+    ax_world.arrow(
         pallet_pos[0],
         pallet_pos[1],
         v_lat[0] * lat_len,
@@ -259,18 +291,18 @@ def _plot_case(
     front_center = pallet_pos + (-0.5 * pallet_depth_m) * u_in
     front_a = front_center + 0.35 * v_lat
     front_b = front_center - 0.35 * v_lat
-    ax.plot([front_a[0], front_b[0]], [front_a[1], front_b[1]], color="tab:red", linewidth=3.0, alpha=0.8)
+    ax_world.plot([front_a[0], front_b[0]], [front_a[1], front_b[1]], color="tab:red", linewidth=3.0, alpha=0.8)
 
     # Key points.
-    ax.scatter([traj_pts[0, 0]], [traj_pts[0, 1]], color="tab:green", s=70, label="traj start")
-    ax.scatter([p_pre[0]], [p_pre[1]], color="tab:purple", s=60, label="p_pre")
-    ax.scatter([p_goal[0]], [p_goal[1]], color="tab:brown", s=60, label="p_goal")
-    ax.scatter([pallet_pos[0]], [pallet_pos[1]], color="tab:red", s=60, label="pallet center")
+    ax_world.scatter([traj_pts[0, 0]], [traj_pts[0, 1]], color="tab:green", s=70, label="traj start")
+    ax_world.scatter([p_pre[0]], [p_pre[1]], color="tab:purple", s=60, label="p_pre")
+    ax_world.scatter([p_goal[0]], [p_goal[1]], color="tab:brown", s=60, label="p_goal")
+    ax_world.scatter([pallet_pos[0]], [pallet_pos[1]], color="tab:red", s=60, label="pallet center")
 
     # Robot initial pose.
-    ax.scatter([root_pos[0]], [root_pos[1]], color="black", s=50, label="root start")
-    ax.scatter([fork_center[0]], [fork_center[1]], color="tab:green", s=45, marker="x", label="fork center start")
-    ax.arrow(
+    ax_world.scatter([root_pos[0]], [root_pos[1]], color="black", s=50, label="root start")
+    ax_world.scatter([fork_center[0]], [fork_center[1]], color="tab:green", s=45, marker="x", label="fork center start")
+    ax_world.arrow(
         root_pos[0],
         root_pos[1],
         math.cos(root_yaw) * 0.5,
@@ -285,10 +317,10 @@ def _plot_case(
         fc_path = np.asarray(rollout["fork_center_path"])
         root_path = np.asarray(rollout["root_path"])
         if fc_path.size > 0:
-            ax.plot(fc_path[:, 0], fc_path[:, 1], color="tab:green", linewidth=2.0, alpha=0.85, label="rollout fork_center")
-            ax.scatter([fc_path[-1, 0]], [fc_path[-1, 1]], color="tab:green", s=35)
+            ax_world.plot(fc_path[:, 0], fc_path[:, 1], color="tab:green", linewidth=2.0, alpha=0.85, label="rollout fork_center")
+            ax_world.scatter([fc_path[-1, 0]], [fc_path[-1, 1]], color="tab:green", s=35)
         if root_path.size > 0:
-            ax.plot(root_path[:, 0], root_path[:, 1], color="gray", linewidth=1.2, alpha=0.75, label="rollout root")
+            ax_world.plot(root_path[:, 0], root_path[:, 1], color="gray", linewidth=1.2, alpha=0.75, label="rollout root")
 
     all_pts = [traj_pts, np.asarray([p_pre, p_goal, pallet_pos, root_pos, fork_center])]
     if rollout is not None:
@@ -301,19 +333,102 @@ def _plot_case(
     stacked = np.concatenate(all_pts, axis=0)
     x_min, y_min = stacked.min(axis=0) - axis_pad_m
     x_max, y_max = stacked.max(axis=0) + axis_pad_m
-    ax.set_xlim(float(x_min), float(x_max))
-    ax.set_ylim(float(y_min), float(y_max))
-    ax.set_aspect("equal", adjustable="box")
-    ax.grid(True, alpha=0.25)
+    ax_world.set_xlim(float(x_min), float(x_max))
+    ax_world.set_ylim(float(y_min), float(y_max))
+    ax_world.set_aspect("equal", adjustable="box")
+    ax_world.grid(True, alpha=0.25)
+
+    # Pallet-frame view.
+    traj_pf = _to_pallet_frame(traj_pts, pallet_pos, u_in, v_lat)
+    traj_tang_pf = np.stack(
+        [
+            traj_tangents[:, 0] * u_in[0] + traj_tangents[:, 1] * u_in[1],
+            traj_tangents[:, 0] * v_lat[0] + traj_tangents[:, 1] * v_lat[1],
+        ],
+        axis=1,
+    )
+    root_pf = _to_pallet_frame(root_pos.reshape(1, 2), pallet_pos, u_in, v_lat)[0]
+    fc_pf = _to_pallet_frame(fork_center.reshape(1, 2), pallet_pos, u_in, v_lat)[0]
+    p_pre_pf = _to_pallet_frame(p_pre.reshape(1, 2), pallet_pos, u_in, v_lat)[0]
+    p_goal_pf = _to_pallet_frame(p_goal.reshape(1, 2), pallet_pos, u_in, v_lat)[0]
+    pallet_pf = np.array([0.0, 0.0], dtype=np.float32)
+
+    ax_pf.plot(traj_pf[:, 0], traj_pf[:, 1], color="tab:blue", linewidth=2.5, label="reference traj")
+    ax_pf.quiver(
+        traj_pf[tangent_ix, 0],
+        traj_pf[tangent_ix, 1],
+        traj_tang_pf[tangent_ix, 0],
+        traj_tang_pf[tangent_ix, 1],
+        angles="xy",
+        scale_units="xy",
+        scale=6.0,
+        width=0.003,
+        color="tab:blue",
+        alpha=0.55,
+    )
+    ax_pf.axhline(0.0, color="tab:orange", linewidth=1.5, alpha=0.75, label="lateral = 0")
+    ax_pf.axvline(-0.5 * pallet_depth_m, color="tab:red", linewidth=2.5, alpha=0.75, label="pallet front")
+    ax_pf.scatter([fc_pf[0]], [fc_pf[1]], color="tab:green", s=45, marker="x", label="fork center start")
+    ax_pf.scatter([root_pf[0]], [root_pf[1]], color="black", s=50, label="root start")
+    ax_pf.scatter([p_pre_pf[0]], [p_pre_pf[1]], color="tab:purple", s=60, label="p_pre")
+    ax_pf.scatter([p_goal_pf[0]], [p_goal_pf[1]], color="tab:brown", s=60, label="p_goal")
+    ax_pf.scatter([pallet_pf[0]], [pallet_pf[1]], color="tab:red", s=60, label="pallet center")
+
+    if rollout is not None:
+        fc_path = np.asarray(rollout["fork_center_path"])
+        root_path = np.asarray(rollout["root_path"])
+        if fc_path.size > 0:
+            fc_path_pf = _to_pallet_frame(fc_path, pallet_pos, u_in, v_lat)
+            ax_pf.plot(fc_path_pf[:, 0], fc_path_pf[:, 1], color="tab:green", linewidth=2.0, alpha=0.85, label="rollout fork_center")
+            ax_pf.scatter([fc_path_pf[-1, 0]], [fc_path_pf[-1, 1]], color="tab:green", s=35)
+        if root_path.size > 0:
+            root_path_pf = _to_pallet_frame(root_path, pallet_pos, u_in, v_lat)
+            ax_pf.plot(root_path_pf[:, 0], root_path_pf[:, 1], color="gray", linewidth=1.2, alpha=0.75, label="rollout root")
+
+    pf_all = [traj_pf, np.asarray([p_pre_pf, p_goal_pf, root_pf, fc_pf])]
+    if rollout is not None:
+        if fc_path.size > 0:
+            pf_all.append(fc_path_pf)
+        if root_path.size > 0:
+            pf_all.append(root_path_pf)
+    pf_stacked = np.concatenate(pf_all, axis=0)
+    s_min, lat_min = pf_stacked.min(axis=0) - axis_pad_m
+    s_max, lat_max = pf_stacked.max(axis=0) + axis_pad_m
+    ax_pf.set_xlim(float(s_min), float(s_max))
+    ax_pf.set_ylim(float(lat_min), float(lat_max))
+    ax_pf.set_aspect("equal", adjustable="box")
+    ax_pf.grid(True, alpha=0.25)
+    ax_pf.set_xlabel("s along pallet axis (m)")
+    ax_pf.set_ylabel("lateral y (m)")
+    ax_pf.set_title("Pallet-frame view")
+
+    text = (
+        f"s_start = {s_start:+.3f} m\n"
+        f"s_pre   = {s_pre:+.3f} m\n"
+        f"s_goal  = {s_goal:+.3f} m\n"
+        f"delta_s = s_start - s_pre = {delta_s:+.3f} m\n"
+        f"y_start = {y_start:+.3f} m"
+    )
+    ax_pf.text(
+        0.02,
+        0.98,
+        text,
+        transform=ax_pf.transAxes,
+        va="top",
+        ha="left",
+        fontsize=10,
+        bbox={"facecolor": "white", "alpha": 0.85, "edgecolor": "0.7"},
+    )
 
     mode_suffix = " + rollout" if rollout is not None else ""
     if force_zero_steer:
         mode_suffix += " [zero-steer]"
-    ax.set_title(
+    ax_world.set_title(
         f"{label}{mode_suffix}\n"
         f"reset: x={args.x_root:.2f}, y={y_m:+.3f}, yaw={yaw_deg:+.1f} deg"
     )
-    ax.legend(loc="best", fontsize=8)
+    ax_world.legend(loc="best", fontsize=8)
+    ax_pf.legend(loc="best", fontsize=8)
     fig.tight_layout()
     fig.savefig(png_path, dpi=180)
     plt.close(fig)
@@ -365,6 +480,7 @@ def main(env_cfg, agent_cfg):
 
             _set_fixed_stage1_reset(raw_env, args.seed, args.x_root, y_m, yaw_deg)
             geom = _compute_case_geometry(raw_env)
+            scalar = _scalar_geometry(geom)
 
             rollout = None
             if args.rollout_steps > 0 and policy_nn is not None:
@@ -408,6 +524,11 @@ def main(env_cfg, agent_cfg):
                 "fork_center": np.asarray(geom["fork_center"]).tolist(),
                 "p_pre": np.asarray(geom["p_pre"]).tolist(),
                 "p_goal": np.asarray(geom["p_goal"]).tolist(),
+                "s_start_m": scalar["s_start"],
+                "s_pre_m": scalar["s_pre"],
+                "s_goal_m": scalar["s_goal"],
+                "delta_s_start_minus_pre_m": scalar["delta_s"],
+                "y_start_m": scalar["y_start"],
                 "traj_num_points": int(np.asarray(geom["traj_pts"]).shape[0]),
                 "traj_csv": str(csv_path),
                 "png": str(png_path),
