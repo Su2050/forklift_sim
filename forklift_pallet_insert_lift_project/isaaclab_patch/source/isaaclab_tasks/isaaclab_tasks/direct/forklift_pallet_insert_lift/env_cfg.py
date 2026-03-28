@@ -98,13 +98,13 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     # 如果距离是 0.6m (在托盘外)，tip_x = -1.68m -> x_root = -3.55m
     stage1_init_x_min_m: float = -3.55
     stage1_init_x_max_m: float = -3.25
-    # Steering curriculum v1:
-    # - 保持 x 不变，只放宽 y / yaw
-    # - 目标是让 Stage 1 不能再靠“直着往前叉”吃掉主要成功率
-    stage1_init_y_min_m: float = -0.10
-    stage1_init_y_max_m: float = 0.10
-    stage1_init_yaw_deg_min: float = -4.0
-    stage1_init_yaw_deg_max: float = 4.0
+    # Steering curriculum v2:
+    # - 保持 x 不变
+    # - 比旧版更需要 steering，但比 v1 更不容易直接塌成 no-insert
+    stage1_init_y_min_m: float = -0.08
+    stage1_init_y_max_m: float = 0.08
+    stage1_init_yaw_deg_min: float = -3.0
+    stage1_init_yaw_deg_max: float = 3.0
 
     # 相机参数：
     # - 训练默认 256x256，进一步提升视觉特征提取精度
@@ -205,16 +205,17 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     clean_insert_push_free_bonus_enable: bool = True
     clean_insert_push_free_bonus_weight: float = 1.0
 
-    # ---- Steering curriculum v1: pre-insert correction shaping ----
-    # 在真正插入前，提前奖励“横向 / 偏航 / 前向距离变好”，并惩罚 near-field retreat。
+    # ---- Steering curriculum v2: pre-insert correction shaping ----
+    # 在真正插入前，继续奖励“横向 / 偏航 / 前向距离变好”，
+    # 但 v2 更强调横向/偏航纠偏，弱化“继续往前顶”的驱动。
     preinsert_align_reward_enable: bool = True
     preinsert_active_dist_max_m: float = 0.80
     preinsert_active_dist_ramp_m: float = 0.20
     preinsert_insert_frac_max: float = 0.20
     preinsert_y_err_delta_weight: float = 1.0
-    preinsert_yaw_err_delta_weight: float = 0.5
-    preinsert_dist_front_delta_weight: float = 0.75
-    preinsert_retreat_penalty_weight: float = 1.0
+    preinsert_yaw_err_delta_weight: float = 1.0
+    preinsert_dist_front_delta_weight: float = 0.30
+    preinsert_retreat_penalty_weight: float = 0.50
     preinsert_delta_clip_y_m: float = 0.02
     preinsert_delta_clip_yaw_deg: float = 1.5
     preinsert_delta_clip_dist_m: float = 0.05
