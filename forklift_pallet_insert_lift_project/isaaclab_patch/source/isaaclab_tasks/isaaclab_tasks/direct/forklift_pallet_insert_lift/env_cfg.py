@@ -98,9 +98,12 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     # 如果距离是 0.6m (在托盘外)，tip_x = -1.68m -> x_root = -3.55m
     stage1_init_x_min_m: float = -3.55
     stage1_init_x_max_m: float = -3.25
-    # Steering curriculum v2:
-    # - 保持 x 不变
-    # - 比旧版更需要 steering，但比 v1 更不容易直接塌成 no-insert
+    # Entry-geometry v3:
+    # - 优先修正 fork_center start 相对 p_pre 的轴向关系
+    # - 将 near-field 起点整体后移，避免一开始就越过 p_pre
+    # - 保持 y/yaw 与 v2 一致，先单独验证 entry geometry
+    stage1_init_x_min_m: float = -3.60
+    stage1_init_x_max_m: float = -3.45
     stage1_init_y_min_m: float = -0.08
     stage1_init_y_max_m: float = 0.08
     stage1_init_yaw_deg_min: float = -3.0
@@ -235,7 +238,7 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     gamma: float = 1.0
 
     # ---- 实验 3.1: 参考轨迹走廊 (Trajectory-lite) ----
-    traj_pre_dist_m: float = 1.2       # 预对位点距离 (m)
+    traj_pre_dist_m: float = 1.05      # v3: 将 p_pre 适当前移，确保 s_start < s_pre
     # Exp8.3 第一轮主矩阵：
     # - front: 轨迹终点停在托盘前沿中心（B0′ 基线）
     # - success_center: 轨迹 terminal geometry package 平移到 success 等效 fork_center 深度（G1）
