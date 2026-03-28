@@ -10,6 +10,7 @@ GRID_X_ROOT="-3.50"
 Y_VALUES="-0.15,-0.10,-0.05,0.0,0.05,0.10,0.15"
 YAW_VALUES="-6,-4,-2,0,2,4,6"
 SEED="20260328"
+GRID_TIMEOUT_S="${GRID_TIMEOUT_S:-2400}"
 
 mkdir -p "$OUT_DIR" "$LOG_DIR"
 FAILED_LIST="$OUT_DIR/failed_labels.txt"
@@ -53,6 +54,7 @@ run_grid() {
     cd "$ISAACLAB"
     exec env -u CONDA_PREFIX -u CONDA_DEFAULT_ENV -u CONDA_SHLVL -u CONDA_PROMPT_MODIFIER -u CONDA_PYTHON_EXE -u _CE_CONDA -u _CE_M \
       TERM=xterm PYTHONUNBUFFERED=1 \
+      timeout --signal=TERM --kill-after=30 "${GRID_TIMEOUT_S}" \
       ./isaaclab.sh -p ../scripts/eval_exp83_misalignment_grid.py \
       --task "$TASK" \
       --headless \
@@ -75,7 +77,11 @@ run_grid() {
     return 0
   fi
 
-  echo "[FAIL] $label $mode status=$status log=$log"
+  if [[ $status -eq 124 || $status -eq 137 ]]; then
+    echo "[TIMEOUT] $label $mode timeout=${GRID_TIMEOUT_S}s log=$log"
+  else
+    echo "[FAIL] $label $mode status=$status log=$log"
+  fi
   echo "${label}_${mode}" >> "$FAILED_LIST"
   return 0
 }
