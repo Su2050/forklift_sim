@@ -262,11 +262,14 @@ def main(env_cfg, agent_cfg):
     env_cfg.scene.num_envs = args.num_envs
     env_cfg.seed = args.seed
     env_cfg.sim.device = "cuda:0"
-    env_cfg.use_camera = True
-    env_cfg.use_asymmetric_critic = True
-    env_cfg.stage_1_mode = True
-    env_cfg.camera_width = 256
-    env_cfg.camera_height = 256
+    print(
+        "[INFO] Effective env overrides before gym.make: "
+        f"use_camera={getattr(env_cfg, 'use_camera', None)} "
+        f"use_asymmetric_critic={getattr(env_cfg, 'use_asymmetric_critic', None)} "
+        f"stage_1_mode={getattr(env_cfg, 'stage_1_mode', None)} "
+        f"camera=({getattr(env_cfg, 'camera_width', None)}x{getattr(env_cfg, 'camera_height', None)})",
+        flush=True,
+    )
 
     env = gym.make(args.task, cfg=env_cfg)
     env_wrapped = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)

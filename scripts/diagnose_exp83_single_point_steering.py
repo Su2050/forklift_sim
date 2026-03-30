@@ -203,7 +203,7 @@ def _collect_step_metrics(
     right_steer_pos = dof_pos[env_id, raw_env._right_rotator_id[0]]
     mean_steer_pos = 0.5 * (left_steer_pos + right_steer_pos)
 
-    easy8 = raw_env._get_easy8()[env_id].detach().cpu().numpy()
+    actor_proprio = raw_env._get_easy8()[env_id].detach().cpu().numpy()
     raw_drive = float("nan") if raw_action is None else float(raw_action[0])
     raw_steer = float("nan") if raw_action is None else float(raw_action[1])
     applied_drive = float("nan") if applied_action is None else float(applied_action[0])
@@ -257,14 +257,18 @@ def _collect_step_metrics(
         "clean_insert_ready": hold_entry and bool(push_free[env_id].item()),
         "dirty_insert": dirty_insert,
         "success": success,
-        "policy_vx_r": float(easy8[0]),
-        "policy_vy_r": float(easy8[1]),
-        "policy_yaw_rate": float(easy8[2]),
-        "policy_lift_pos": float(easy8[3]),
-        "policy_lift_vel": float(easy8[4]),
-        "policy_prev_drive": float(easy8[5]),
-        "policy_prev_steer": float(easy8[6]),
-        "policy_prev_lift": float(easy8[7]),
+        "policy_vx_r": float(actor_proprio[0]),
+        "policy_vy_r": float(actor_proprio[1]),
+        "policy_yaw_rate": float(actor_proprio[2]),
+        "policy_lift_pos": float(actor_proprio[3]),
+        "policy_lift_vel": float(actor_proprio[4]),
+        "policy_prev_drive": float(actor_proprio[5]),
+        "policy_prev_steer": float(actor_proprio[6]),
+        "policy_prev_lift": float(actor_proprio[7]),
+        "policy_y_err_obs": float(actor_proprio[8]) if actor_proprio.shape[0] > 8 else float("nan"),
+        "policy_yaw_err_obs": float(actor_proprio[9]) if actor_proprio.shape[0] > 9 else float("nan"),
+        "policy_d_traj_signed_obs": float(actor_proprio[10]) if actor_proprio.shape[0] > 10 else float("nan"),
+        "policy_yaw_traj_err_obs": float(actor_proprio[11]) if actor_proprio.shape[0] > 11 else float("nan"),
     }
 
 
@@ -588,12 +592,23 @@ def main(env_cfg, agent_cfg):
         "actor_obs_probe_keys": policy_keys,
         "actor_policy_value_type": policy_type,
         "camera_enabled": bool(raw_env._camera_enabled),
-        "easy8_dim": int(raw_env.cfg.easy8_dim),
+        "actor_proprio_dim": int(raw_env.cfg.easy8_dim),
+        "actor_proprio_fields": [
+            "v_x_r",
+            "v_y_r",
+            "yaw_rate",
+            "lift_pos",
+            "lift_vel",
+            "prev_drive",
+            "prev_steer",
+            "prev_lift",
+            "y_err_obs",
+            "yaw_err_obs",
+            "d_traj_signed_obs",
+            "yaw_traj_err_obs",
+        ],
         "critic_privileged_dim": int(raw_env.cfg.privileged_dim),
-        "note": (
-            "With camera-enabled policy obs, actor uses image + easy8 proprio. "
-            "Signed y/yaw alignment terms are not directly part of actor proprio."
-        ),
+        "note": "With camera-enabled policy obs, actor uses image + proprio; inspect actor_proprio_fields for whether signed alignment is present.",
         "modes": mode_summaries,
     }
     summary_path = output_dir / f"{args.label}_summary.json"
