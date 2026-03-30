@@ -180,6 +180,49 @@ def _collect_step_metrics(
         torch.cos(robot_yaw[env_id] - traj_yaw),
     )
 
+    y_signed_norm = torch.clamp(
+        center_y_signed / max(float(raw_env.cfg.y_err_obs_scale), 1e-6),
+        -1.0,
+        1.0,
+    )
+    yaw_signed_norm = torch.clamp(
+        yaw_err_signed / (15.0 * math.pi / 180.0),
+        -1.0,
+        1.0,
+    )
+    d_traj_signed_norm = torch.clamp(
+        d_traj_signed / max(float(raw_env.cfg.sigma_traj_d), 1e-6),
+        -1.0,
+        1.0,
+    )
+    yaw_traj_signed_norm = torch.clamp(
+        yaw_traj_signed / (float(raw_env.cfg.sigma_traj_yaw_deg) * math.pi / 180.0),
+        -1.0,
+        1.0,
+    )
+    steer_target = torch.clamp(
+        raw_env.cfg.preinsert_steer_target_center_y_weight * y_signed_norm
+        + raw_env.cfg.preinsert_steer_target_yaw_weight * yaw_signed_norm
+        + raw_env.cfg.preinsert_steer_target_traj_y_weight * d_traj_signed_norm
+        + raw_env.cfg.preinsert_steer_target_traj_yaw_weight * yaw_traj_signed_norm,
+        -1.0,
+        1.0,
+    )
+    steer_target_mag = torch.abs(steer_target)
+    steer_guidance_gate = torch.clamp(
+        (steer_target_mag - raw_env.cfg.preinsert_steer_target_deadzone)
+        / max(1.0 - raw_env.cfg.preinsert_steer_target_deadzone, 1e-6),
+        min=0.0,
+        max=1.0,
+    )
+    steer_enforce_gate = torch.clamp(
+        (raw_env.cfg.preinsert_steer_enforce_dist_max_m - dist_front)
+        / max(raw_env.cfg.preinsert_steer_enforce_dist_ramp_m, 1e-6),
+        min=0.0,
+        max=1.0,
+    )
+    steer_penalty_gate = steer_guidance_gate * steer_enforce_gate
+
     center_y_err = torch.abs(center_y_signed)
     tip_y_err = torch.abs(tip_y_signed)
     lift_height = tip[:, 2] - raw_env._fork_tip_z0
@@ -208,6 +251,15 @@ def _collect_step_metrics(
     raw_steer = float("nan") if raw_action is None else float(raw_action[1])
     applied_drive = float("nan") if applied_action is None else float(applied_action[0])
     applied_steer = float("nan") if applied_action is None else float(applied_action[1])
+
+    raw_steer_tensor = torch.tensor(raw_steer if not math.isnan(raw_steer) else 0.0, device=raw_env.device)
+    steer_match = torch.clamp(1.0 - torch.abs(raw_steer_tensor - steer_target), min=0.0, max=1.0)
+    steer_wrong_sign = ((raw_steer_tensor * steer_target) < 0.0).float()
+    steer_shortfall = torch.clamp(
+        steer_target_mag - raw_steer_tensor * torch.sign(steer_target),
+        min=0.0,
+        max=1.0,
+    )
 
     steer_target_rad = float("nan") if applied_action is None else float(applied_action[1] * raw_env.cfg.steer_angle_rad)
     drive_target_rad_s = float("nan") if applied_action is None else float(applied_action[0] * raw_env.cfg.wheel_speed_rad_s)
@@ -269,6 +321,14 @@ def _collect_step_metrics(
         "policy_yaw_err_obs": float(actor_proprio[9]) if actor_proprio.shape[0] > 9 else float("nan"),
         "policy_d_traj_signed_obs": float(actor_proprio[10]) if actor_proprio.shape[0] > 10 else float("nan"),
         "policy_yaw_traj_err_obs": float(actor_proprio[11]) if actor_proprio.shape[0] > 11 else float("nan"),
+        "steer_target_cmd": float(steer_target.item()),
+        "steer_target_abs": float(steer_target_mag.item()),
+        "steer_guidance_gate": float(steer_guidance_gate.item()),
+        "steer_enforce_gate": float(steer_enforce_gate[env_id].item()),
+        "steer_penalty_gate": float(steer_penalty_gate[env_id].item()),
+        "steer_match": float(steer_match.item()),
+        "steer_wrong_sign": bool(steer_wrong_sign.item()),
+        "steer_shortfall": float(steer_shortfall.item()),
     }
 
 
@@ -291,6 +351,14 @@ def _build_mode_summary(
     def _max_abs(key: str) -> float:
         vals = [abs(float(r[key])) for r in step_rows if not math.isnan(float(r[key]))]
         return max(vals) if vals else 0.0
+
+    def _mean(key: str) -> float:
+        vals = [float(r[key]) for r in step_rows if not math.isnan(float(r[key]))]
+        return float(sum(vals) / len(vals)) if vals else 0.0
+
+    def _frac_true(key: str) -> float:
+        vals = [bool(r[key]) for r in step_rows]
+        return float(sum(vals) / len(vals)) if vals else 0.0
 
     def _first_step(key: str, predicate) -> int:
         for row in step_rows:
@@ -332,6 +400,14 @@ def _build_mode_summary(
         "max_abs_raw_steer": _max_abs("raw_steer"),
         "max_abs_applied_steer": _max_abs("applied_steer"),
         "max_abs_joint_steer_rad": _max_abs("mean_steer_joint_pos_rad"),
+        "mean_steer_target_cmd": _mean("steer_target_cmd"),
+        "mean_abs_steer_target_cmd": _mean("steer_target_abs"),
+        "mean_steer_guidance_gate": _mean("steer_guidance_gate"),
+        "mean_steer_enforce_gate": _mean("steer_enforce_gate"),
+        "mean_steer_penalty_gate": _mean("steer_penalty_gate"),
+        "mean_steer_match": _mean("steer_match"),
+        "mean_steer_shortfall": _mean("steer_shortfall"),
+        "steer_wrong_sign_frac": _frac_true("steer_wrong_sign"),
         "first_abs_raw_steer_gt_0p1_step": _first_step("raw_steer", lambda v: abs(float(v)) > 0.1),
         "first_insert_step": _first_step("inserted", lambda v: bool(v)),
         "first_hold_step": _first_step("hold_entry", lambda v: bool(v)),
