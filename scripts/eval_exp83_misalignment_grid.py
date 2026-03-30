@@ -11,7 +11,10 @@ import argparse
 import csv
 import json
 import math
+import signal
 import sys
+import time
+import traceback
 from pathlib import Path
 
 import numpy as np
@@ -28,6 +31,7 @@ parser.add_argument("--y_values", type=str, default="-0.15,-0.10,-0.05,0.0,0.05,
 parser.add_argument("--yaw_deg_values", type=str, default="-6,-4,-2,0,2,4,6")
 parser.add_argument("--episodes_per_point", type=int, default=1)
 parser.add_argument("--force_zero_steer", action="store_true")
+parser.add_argument("--steer_scale", type=float, default=1.0)
 parser.add_argument(
     "--output_dir",
     type=str,
@@ -55,6 +59,26 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 from isaaclab_tasks.direct.forklift_pallet_insert_lift.hold_logic import compute_hold_logic
 
 
+TERMINATION_REQUESTED = False
+TERMINATION_REASON = ""
+
+
+def _request_termination(signum, _frame):
+    global TERMINATION_REQUESTED, TERMINATION_REASON
+    if TERMINATION_REQUESTED:
+        return
+    TERMINATION_REQUESTED = True
+    TERMINATION_REASON = signal.Signals(signum).name
+    print(
+        f"[WARN] Received {TERMINATION_REASON}; stopping after the current step and writing partial outputs.",
+        flush=True,
+    )
+
+
+signal.signal(signal.SIGTERM, _request_termination)
+signal.signal(signal.SIGINT, _request_termination)
+
+
 def _quat_to_yaw(q: torch.Tensor) -> torch.Tensor:
     w, x, y, z = q.unbind(-1)
     siny_cosp = 2.0 * (w * z + x * y)
@@ -64,6 +88,97 @@ def _quat_to_yaw(q: torch.Tensor) -> torch.Tensor:
 
 def _parse_list(spec: str) -> list[float]:
     return [float(v.strip()) for v in spec.split(",") if v.strip()]
+
+
+def _safe_mean(rows: list[dict[str, float | int | str]], key: str) -> float:
+    if not rows:
+        return 0.0
+    first = rows[0]
+    if key not in first:
+        return 0.0
+    return sum(float(row[key]) for row in rows) / len(rows)
+
+
+def _mode_tag(force_zero_steer: bool, steer_scale: float) -> str:
+    effective_scale = 0.0 if force_zero_steer else steer_scale
+    if abs(effective_scale) < 1e-8:
+        return "zero_steer"
+    if abs(effective_scale - 1.0) < 1e-8:
+        return "normal"
+    if abs(effective_scale - 0.5) < 1e-8:
+        return "half_steer"
+    if abs(effective_scale + 1.0) < 1e-8:
+        return "flip_steer"
+    return f"steer_scale_{effective_scale:+.2f}".replace("+", "p").replace("-", "m").replace(".", "p")
+
+
+def _write_rows(rows_path: Path, rows: list[dict[str, float | int | str]]):
+    if not rows:
+        rows_path.write_text("")
+        return
+    fieldnames = list(rows[0].keys())
+    with rows_path.open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _build_summary(
+    rows: list[dict[str, float | int | str]],
+    *,
+    label: str,
+    checkpoint: str,
+    mode_tag: str,
+    total_grid_points: int,
+    total_point_repeats: int,
+    completed_point_repeats: int,
+    x_root: float,
+    y_values: list[float],
+    yaw_values: list[float],
+    start_time_s: float,
+    complete: bool,
+    termination_requested: bool,
+    termination_reason: str,
+    error: str | None,
+) -> dict[str, float | int | str | bool | list[float] | None]:
+    return {
+        "label": label,
+        "checkpoint": str(Path(checkpoint).resolve()),
+        "mode": mode_tag,
+        "steer_scale": 0.0 if args.force_zero_steer else args.steer_scale,
+        "num_envs": args.num_envs,
+        "episodes_per_point": args.episodes_per_point,
+        "total_grid_points": total_grid_points,
+        "total_point_repeats": total_point_repeats,
+        "completed_point_repeats": completed_point_repeats,
+        "planned_episodes": total_point_repeats * args.num_envs,
+        "total_episodes": len(rows),
+        "x_root": x_root,
+        "y_values": y_values,
+        "yaw_deg_values": yaw_values,
+        "success_rate_ep": _safe_mean(rows, "success"),
+        "ever_inserted_rate": _safe_mean(rows, "ever_inserted"),
+        "ever_inserted_push_free_rate": _safe_mean(rows, "ever_inserted_push_free"),
+        "ever_hold_entry_rate": _safe_mean(rows, "ever_hold_entry"),
+        "ever_clean_insert_ready_rate": _safe_mean(rows, "ever_clean_insert_ready"),
+        "ever_dirty_insert_rate": _safe_mean(rows, "ever_dirty_insert"),
+        "timeout_frac": _safe_mean(rows, "timeout"),
+        "mean_episode_length": _safe_mean(rows, "episode_length"),
+        "mean_max_pallet_disp_xy": _safe_mean(rows, "max_pallet_disp_xy"),
+        "mean_max_hold_counter": _safe_mean(rows, "max_hold_counter"),
+        "mean_min_dist_front": _safe_mean(rows, "min_dist_front"),
+        "mean_abs_steer_raw": _safe_mean(rows, "mean_abs_steer_raw"),
+        "mean_max_abs_steer_raw": _safe_mean(rows, "max_abs_steer_raw"),
+        "mean_steer_raw": _safe_mean(rows, "mean_steer_raw"),
+        "mean_steer_applied": _safe_mean(rows, "mean_steer_applied"),
+        "mean_abs_steer_applied": _safe_mean(rows, "mean_abs_steer_applied"),
+        "mean_max_abs_steer_applied": _safe_mean(rows, "max_abs_steer_applied"),
+        "complete": complete,
+        "termination_requested": termination_requested,
+        "termination_reason": termination_reason or "",
+        "error": error,
+        "elapsed_sec": time.time() - start_time_s,
+    }
 
 
 def _reseed_fixed_stage1_reset(raw_env, seed_val: int, x_root: float, y_m: float, yaw_deg: float):
@@ -169,17 +284,46 @@ def main(env_cfg, agent_cfg):
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    mode_tag = "zero_steer" if args.force_zero_steer else "normal"
+    mode_tag = _mode_tag(args.force_zero_steer, args.steer_scale)
     rows_path = output_dir / f"{args.label}_{mode_tag}_rows.csv"
     summary_path = output_dir / f"{args.label}_{mode_tag}_summary.json"
+    partial_rows_path = output_dir / f"{args.label}_{mode_tag}_partial_rows.csv"
+    partial_summary_path = output_dir / f"{args.label}_{mode_tag}_partial_summary.json"
 
     rows: list[dict[str, float | int | str]] = []
     max_steps = int(raw_env.max_episode_length) + 5
+    total_grid_points = len(y_values) * len(yaw_values)
+    total_point_repeats = total_grid_points * args.episodes_per_point
+    completed_point_repeats = 0
+    start_time_s = time.time()
+    error_msg: str | None = None
 
+    point_specs: list[tuple[int, float, float, int, int]] = []
+    point_idx = 0
     for yaw_deg in yaw_values:
         for y_m in y_values:
             for rep in range(args.episodes_per_point):
+                point_idx += 1
                 seed_val = args.seed + rep
+                point_specs.append((point_idx, yaw_deg, y_m, rep, seed_val))
+
+    try:
+        for point_idx, yaw_deg, y_m, rep, seed_val in point_specs:
+            if TERMINATION_REQUESTED:
+                print(
+                    f"[WARN] Stop requested before point {point_idx}/{total_point_repeats}; writing partial outputs.",
+                    flush=True,
+                )
+                break
+            point_start_s = time.time()
+            print(
+                (
+                    f"[PROGRESS] point {point_idx}/{total_point_repeats} start "
+                    f"mode={mode_tag} y={y_m:+.3f} yaw_deg={yaw_deg:+.1f} rep={rep} seed={seed_val}"
+                ),
+                flush=True,
+            )
+            try:
                 _reseed_fixed_stage1_reset(raw_env, seed_val, args.x_root, y_m, yaw_deg)
                 obs = env_wrapped.get_observations()
                 done_mask = torch.zeros(args.num_envs, dtype=torch.bool, device=raw_env.device)
@@ -194,17 +338,25 @@ def main(env_cfg, agent_cfg):
                 ep_min_dist_front = torch.full((args.num_envs,), float("inf"), dtype=torch.float32, device=raw_env.device)
                 ep_max_abs_steer_raw = torch.zeros(args.num_envs, dtype=torch.float32, device=raw_env.device)
                 ep_mean_abs_steer_raw = torch.zeros(args.num_envs, dtype=torch.float32, device=raw_env.device)
+                ep_mean_steer_raw = torch.zeros(args.num_envs, dtype=torch.float32, device=raw_env.device)
+                ep_max_abs_steer_applied = torch.zeros(args.num_envs, dtype=torch.float32, device=raw_env.device)
+                ep_mean_abs_steer_applied = torch.zeros(args.num_envs, dtype=torch.float32, device=raw_env.device)
+                ep_mean_steer_applied = torch.zeros(args.num_envs, dtype=torch.float32, device=raw_env.device)
                 ep_mean_abs_drive_raw = torch.zeros(args.num_envs, dtype=torch.float32, device=raw_env.device)
                 ep_len = torch.zeros(args.num_envs, dtype=torch.int32, device=raw_env.device)
                 ep_done_len = torch.full((args.num_envs,), -1, dtype=torch.int32, device=raw_env.device)
 
                 step_count = 0
                 while not done_mask.all() and step_count < max_steps:
+                    if TERMINATION_REQUESTED:
+                        break
                     with torch.inference_mode():
                         raw_actions = policy_nn.act_inference(obs)
                         applied_actions = raw_actions.clone()
                         if args.force_zero_steer:
                             applied_actions[:, 1] = 0.0
+                        else:
+                            applied_actions[:, 1] = raw_actions[:, 1] * args.steer_scale
                         obs, _, dones, _ = env_wrapped.step(applied_actions)
 
                     step_count += 1
@@ -212,6 +364,9 @@ def main(env_cfg, agent_cfg):
                     active = ~done_mask
                     if int(active.sum().item()) > 0:
                         raw_steer = torch.abs(raw_actions[:, 1])
+                        signed_raw_steer = raw_actions[:, 1]
+                        applied_steer = torch.abs(applied_actions[:, 1])
+                        signed_applied_steer = applied_actions[:, 1]
                         raw_drive = torch.abs(raw_actions[:, 0])
 
                         ep_inserted[active] |= state["inserted"][active]
@@ -225,6 +380,10 @@ def main(env_cfg, agent_cfg):
                         ep_min_dist_front[active] = torch.minimum(ep_min_dist_front[active], state["dist_front"][active])
                         ep_max_abs_steer_raw[active] = torch.maximum(ep_max_abs_steer_raw[active], raw_steer[active])
                         ep_mean_abs_steer_raw[active] += raw_steer[active]
+                        ep_mean_steer_raw[active] += signed_raw_steer[active]
+                        ep_max_abs_steer_applied[active] = torch.maximum(ep_max_abs_steer_applied[active], applied_steer[active])
+                        ep_mean_abs_steer_applied[active] += applied_steer[active]
+                        ep_mean_steer_applied[active] += signed_applied_steer[active]
                         ep_mean_abs_drive_raw[active] += raw_drive[active]
                         ep_len[active] += 1
 
@@ -235,6 +394,12 @@ def main(env_cfg, agent_cfg):
                     ep_done_len[newly_done] = ep_len[newly_done]
                     done_mask |= newly_done
 
+                point_success_count = 0
+                point_inserted_count = 0
+                point_clean_count = 0
+                point_hold_count = 0
+                point_timeout_count = 0
+
                 for env_id in range(args.num_envs):
                     ep_length = int(ep_done_len[env_id].item())
                     if ep_length < 0:
@@ -243,81 +408,109 @@ def main(env_cfg, agent_cfg):
                     timeout = int(ep_length >= int(raw_env.max_episode_length) - 1 and not bool(ep_success[env_id].item()))
                     init_pos = raw_env.robot.data.root_pos_w[env_id]
                     init_yaw = math.degrees(float(_quat_to_yaw(raw_env.robot.data.root_quat_w[env_id:env_id + 1])[0].item()))
-                    rows.append(
-                        {
-                            "label": args.label,
-                            "mode": mode_tag,
-                            "rep": rep,
-                            "seed": seed_val,
-                            "grid_x_root": args.x_root,
-                            "grid_y_m": y_m,
-                            "grid_yaw_deg": yaw_deg,
-                            "init_x_root_actual": float(init_pos[0].item()),
-                            "init_y_root_actual": float(init_pos[1].item()),
-                            "init_yaw_deg_actual": init_yaw,
-                            "success": int(ep_success[env_id].item()),
-                            "ever_inserted": int(ep_inserted[env_id].item()),
-                            "ever_inserted_push_free": int(ep_inserted_push_free[env_id].item()),
-                            "ever_hold_entry": int(ep_hold_entry[env_id].item()),
-                            "ever_clean_insert_ready": int(ep_clean_insert_ready[env_id].item()),
-                            "ever_dirty_insert": int(ep_dirty_insert[env_id].item()),
-                            "timeout": timeout,
-                            "episode_length": ep_length,
-                            "max_pallet_disp_xy": float(ep_max_pallet_disp[env_id].item()),
-                            "max_hold_counter": float(ep_max_hold_counter[env_id].item()),
-                            "min_dist_front": float(ep_min_dist_front[env_id].item()),
-                            "mean_abs_drive_raw": float((ep_mean_abs_drive_raw[env_id] / denom).item()),
-                            "mean_abs_steer_raw": float((ep_mean_abs_steer_raw[env_id] / denom).item()),
-                            "max_abs_steer_raw": float(ep_max_abs_steer_raw[env_id].item()),
-                        }
-                    )
+                    row = {
+                        "label": args.label,
+                        "mode": mode_tag,
+                        "rep": rep,
+                        "seed": seed_val,
+                        "grid_point_index": point_idx,
+                        "grid_point_total": total_point_repeats,
+                        "grid_x_root": args.x_root,
+                        "grid_y_m": y_m,
+                        "grid_yaw_deg": yaw_deg,
+                        "init_x_root_actual": float(init_pos[0].item()),
+                        "init_y_root_actual": float(init_pos[1].item()),
+                        "init_yaw_deg_actual": init_yaw,
+                        "success": int(ep_success[env_id].item()),
+                        "ever_inserted": int(ep_inserted[env_id].item()),
+                        "ever_inserted_push_free": int(ep_inserted_push_free[env_id].item()),
+                        "ever_hold_entry": int(ep_hold_entry[env_id].item()),
+                        "ever_clean_insert_ready": int(ep_clean_insert_ready[env_id].item()),
+                        "ever_dirty_insert": int(ep_dirty_insert[env_id].item()),
+                        "timeout": timeout,
+                        "episode_length": ep_length,
+                        "max_pallet_disp_xy": float(ep_max_pallet_disp[env_id].item()),
+                        "max_hold_counter": float(ep_max_hold_counter[env_id].item()),
+                        "min_dist_front": float(ep_min_dist_front[env_id].item()),
+                        "mean_abs_drive_raw": float((ep_mean_abs_drive_raw[env_id] / denom).item()),
+                        "mean_abs_steer_raw": float((ep_mean_abs_steer_raw[env_id] / denom).item()),
+                        "mean_steer_raw": float((ep_mean_steer_raw[env_id] / denom).item()),
+                        "max_abs_steer_raw": float(ep_max_abs_steer_raw[env_id].item()),
+                        "mean_steer_applied": float((ep_mean_steer_applied[env_id] / denom).item()),
+                        "mean_abs_steer_applied": float((ep_mean_abs_steer_applied[env_id] / denom).item()),
+                        "max_abs_steer_applied": float(ep_max_abs_steer_applied[env_id].item()),
+                        "steer_scale": 0.0 if args.force_zero_steer else args.steer_scale,
+                        "terminated_early": int(TERMINATION_REQUESTED),
+                    }
+                    rows.append(row)
+                    point_success_count += int(row["success"])
+                    point_inserted_count += int(row["ever_inserted"])
+                    point_clean_count += int(row["ever_clean_insert_ready"])
+                    point_hold_count += int(row["ever_hold_entry"])
+                    point_timeout_count += int(row["timeout"])
 
-    fieldnames = list(rows[0].keys()) if rows else []
-    with rows_path.open("w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
-
-    def mean_bool(key: str) -> float:
-        return sum(int(row[key]) for row in rows) / max(len(rows), 1)
-
-    def mean_float(key: str) -> float:
-        return sum(float(row[key]) for row in rows) / max(len(rows), 1)
-
-    summary = {
-        "label": args.label,
-        "checkpoint": str(Path(args.checkpoint).resolve()),
-        "mode": mode_tag,
-        "num_envs": args.num_envs,
-        "episodes_per_point": args.episodes_per_point,
-        "total_grid_points": len(y_values) * len(yaw_values),
-        "total_episodes": len(rows),
-        "x_root": args.x_root,
-        "y_values": y_values,
-        "yaw_deg_values": yaw_values,
-        "success_rate_ep": mean_bool("success"),
-        "ever_inserted_rate": mean_bool("ever_inserted"),
-        "ever_inserted_push_free_rate": mean_bool("ever_inserted_push_free"),
-        "ever_hold_entry_rate": mean_bool("ever_hold_entry"),
-        "ever_clean_insert_ready_rate": mean_bool("ever_clean_insert_ready"),
-        "ever_dirty_insert_rate": mean_bool("ever_dirty_insert"),
-        "timeout_frac": mean_bool("timeout"),
-        "mean_episode_length": mean_float("episode_length"),
-        "mean_max_pallet_disp_xy": mean_float("max_pallet_disp_xy"),
-        "mean_max_hold_counter": mean_float("max_hold_counter"),
-        "mean_min_dist_front": mean_float("min_dist_front"),
-        "mean_abs_steer_raw": mean_float("mean_abs_steer_raw"),
-        "mean_max_abs_steer_raw": mean_float("max_abs_steer_raw"),
-    }
-
-    with summary_path.open("w") as f:
-        json.dump(summary, f, indent=2)
-
-    print(json.dumps(summary, indent=2))
-    print(f"[INFO] Wrote rows to: {rows_path}")
-    print(f"[INFO] Wrote summary to: {summary_path}")
-
-    env.close()
+                completed_point_repeats += 1
+                print(
+                    (
+                        f"[PROGRESS] point {point_idx}/{total_point_repeats} done "
+                        f"steps={step_count} success={point_success_count}/{args.num_envs} "
+                        f"inserted={point_inserted_count}/{args.num_envs} "
+                        f"clean={point_clean_count}/{args.num_envs} "
+                        f"hold={point_hold_count}/{args.num_envs} "
+                        f"timeout={point_timeout_count}/{args.num_envs} "
+                        f"elapsed_s={time.time() - point_start_s:.1f}"
+                    ),
+                    flush=True,
+                )
+            except Exception:
+                print(
+                    f"[ERROR] point {point_idx}/{total_point_repeats} crashed; writing partial outputs.",
+                    flush=True,
+                )
+                raise
+            if TERMINATION_REQUESTED:
+                print(
+                    f"[WARN] Stop requested after point {point_idx}/{total_point_repeats}; writing partial outputs.",
+                    flush=True,
+                )
+                break
+    except Exception as exc:
+        error_msg = f"{type(exc).__name__}: {exc}"
+        print("[ERROR] Eval aborted with exception:", flush=True)
+        print(traceback.format_exc(), flush=True)
+    finally:
+        complete = (error_msg is None) and (not TERMINATION_REQUESTED) and (completed_point_repeats == total_point_repeats)
+        out_rows_path = rows_path if complete else partial_rows_path
+        out_summary_path = summary_path if complete else partial_summary_path
+        _write_rows(out_rows_path, rows)
+        summary = _build_summary(
+            rows,
+            label=args.label,
+            checkpoint=args.checkpoint,
+            mode_tag=mode_tag,
+            total_grid_points=total_grid_points,
+            total_point_repeats=total_point_repeats,
+            completed_point_repeats=completed_point_repeats,
+            x_root=args.x_root,
+            y_values=y_values,
+            yaw_values=yaw_values,
+            start_time_s=start_time_s,
+            complete=complete,
+            termination_requested=TERMINATION_REQUESTED,
+            termination_reason=TERMINATION_REASON,
+            error=error_msg,
+        )
+        with out_summary_path.open("w") as f:
+            json.dump(summary, f, indent=2)
+        if complete:
+            partial_rows_path.unlink(missing_ok=True)
+            partial_summary_path.unlink(missing_ok=True)
+        print(json.dumps(summary, indent=2), flush=True)
+        print(f"[INFO] Wrote rows to: {out_rows_path}", flush=True)
+        print(f"[INFO] Wrote summary to: {out_summary_path}", flush=True)
+        env.close()
+        if error_msg is not None:
+            raise RuntimeError(error_msg)
 
 
 if __name__ == "__main__":

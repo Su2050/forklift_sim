@@ -15,9 +15,50 @@ GRID_TIMEOUT_S="${GRID_TIMEOUT_S:-2400}"
 mkdir -p "$OUT_DIR" "$LOG_DIR"
 FAILED_LIST="$OUT_DIR/failed_labels.txt"
 COMPLETED_LIST="$OUT_DIR/completed_labels.txt"
+LOCK_FILE="$OUT_DIR/suite.lock"
 
-: > "$FAILED_LIST"
-: > "$COMPLETED_LIST"
+exec 9>"$LOCK_FILE"
+if ! flock -n 9; then
+  echo "[EXIT] suite already active: $LOCK_FILE"
+  exit 0
+fi
+
+touch "$FAILED_LIST" "$COMPLETED_LIST"
+
+append_unique() {
+  local item="$1"
+  local file="$2"
+  touch "$file"
+  if ! rg -Fxq "$item" "$file" 2>/dev/null; then
+    printf '%s\n' "$item" >> "$file"
+  fi
+}
+
+remove_item() {
+  local item="$1"
+  local file="$2"
+  local tmp
+  touch "$file"
+  tmp="$(mktemp)"
+  rg -Fvx "$item" "$file" > "$tmp" || true
+  mv "$tmp" "$file"
+}
+
+record_done() {
+  local item="$1"
+  append_unique "$item" "$COMPLETED_LIST"
+  remove_item "$item" "$FAILED_LIST"
+}
+
+record_failed() {
+  local item="$1"
+  append_unique "$item" "$FAILED_LIST"
+}
+
+label_recorded() {
+  local item="$1"
+  rg -Fxq "$item" "$COMPLETED_LIST" 2>/dev/null || rg -Fxq "$item" "$FAILED_LIST" 2>/dev/null
+}
 
 find_checkpoint() {
   local run_name="$1"
@@ -28,7 +69,9 @@ run_grid() {
   local checkpoint="$1"
   local label="$2"
   local mode="$3"
+  local item="${label}_${mode}"
   local summary="$OUT_DIR/${label}_${mode}_summary.json"
+  local partial_summary="$OUT_DIR/${label}_${mode}_partial_summary.json"
   local force_flag=()
   local ts log
   ts="$(TZ=Asia/Shanghai date +%Y%m%d_%H%M%S)"
@@ -36,12 +79,18 @@ run_grid() {
 
   if [[ -z "$checkpoint" ]]; then
     echo "[MISS] $label -> checkpoint not found"
-    return 1
+    record_failed "$item"
+    return 0
   fi
 
   if [[ -f "$summary" ]]; then
     echo "[SKIP] $label $mode -> $summary"
-    echo "${label}_${mode}" >> "$COMPLETED_LIST"
+    record_done "$item"
+    return 0
+  fi
+
+  if label_recorded "$item"; then
+    echo "[SKIP] $label $mode -> already recorded"
     return 0
   fi
 
@@ -73,16 +122,22 @@ run_grid() {
   local status=$?
   if [[ $status -eq 0 && -f "$summary" ]]; then
     echo "[DONE] $label $mode"
-    echo "${label}_${mode}" >> "$COMPLETED_LIST"
+    record_done "$item"
     return 0
   fi
 
   if [[ $status -eq 124 || $status -eq 137 ]]; then
     echo "[TIMEOUT] $label $mode timeout=${GRID_TIMEOUT_S}s log=$log"
+    if [[ -f "$partial_summary" ]]; then
+      echo "[PARTIAL] $label $mode partial_summary=$partial_summary"
+    fi
   else
     echo "[FAIL] $label $mode status=$status log=$log"
+    if [[ -f "$partial_summary" ]]; then
+      echo "[PARTIAL] $label $mode partial_summary=$partial_summary"
+    fi
   fi
-  echo "${label}_${mode}" >> "$FAILED_LIST"
+  record_failed "$item"
   return 0
 }
 

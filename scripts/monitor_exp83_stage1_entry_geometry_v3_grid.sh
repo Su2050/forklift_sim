@@ -11,6 +11,13 @@ GRID_TIMEOUT_S="${GRID_TIMEOUT_S:-2400}"
 
 mkdir -p "$LOG_DIR" "$OUT_DIR"
 touch "$OUT_DIR/completed_labels.txt" "$OUT_DIR/failed_labels.txt"
+LOCK_FILE="$OUT_DIR/monitor.lock"
+
+exec 9>"$LOCK_FILE"
+if ! flock -n 9; then
+  echo "[EXIT] monitor already active: $LOCK_FILE"
+  exit 0
+fi
 
 count_done() {
   local c f
@@ -23,6 +30,10 @@ suite_running() {
   pgrep -af "run_exp83_stage1_entry_geometry_v3_grid_suite.sh" >/dev/null 2>&1
 }
 
+eval_running() {
+  pgrep -af "eval_exp83_misalignment_grid.py --task Isaac-Forklift-PalletInsertLift-Direct-v0" >/dev/null 2>&1
+}
+
 kill_stale_children() {
   pkill -f "eval_exp83_misalignment_grid.py --task Isaac-Forklift-PalletInsertLift-Direct-v0" 2>/dev/null || true
   pkill -f "run_exp83_stage1_entry_geometry_v3_grid_suite.sh" 2>/dev/null || true
@@ -33,6 +44,11 @@ while true; do
   if [[ "$done_n" -ge "$EXPECTED" ]]; then
     echo "[DONE] grid monitoring complete: ${done_n}/${EXPECTED}"
     exit 0
+  fi
+
+  if suite_running || eval_running; then
+    sleep "$SLEEP_S"
+    continue
   fi
 
   if ! suite_running; then
