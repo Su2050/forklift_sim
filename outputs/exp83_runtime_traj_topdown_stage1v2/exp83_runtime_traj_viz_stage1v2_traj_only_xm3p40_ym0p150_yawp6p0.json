@@ -1,0 +1,34 @@
+{
+  "label": "exp83_runtime_traj_viz_stage1v2",
+  "x_root": -3.4,
+  "y_m": -0.15,
+  "yaw_deg": 6.0,
+  "checkpoint": null,
+  "rollout_steps": 0,
+  "force_zero_steer": false,
+  "pallet_pos": [
+    0.0,
+    0.0
+  ],
+  "pallet_yaw_deg": 0.0,
+  "root_pos": [
+    -3.4000000953674316,
+    -0.15000000596046448
+  ],
+  "root_yaw_deg": 6.000000166965211,
+  "fork_center": [
+    -2.1402370929718018,
+    -0.01759357750415802
+  ],
+  "p_pre": [
+    -2.2799999713897705,
+    0.0
+  ],
+  "p_goal": [
+    -1.0800000429153442,
+    0.0
+  ],
+  "traj_num_points": 21,
+  "traj_csv": "/home/uniubi/projects/forklift_sim/outputs/exp83_runtime_traj_topdown_stage1v2/exp83_runtime_traj_viz_stage1v2_traj_only_xm3p40_ym0p150_yawp6p0_traj.csv",
+  "png": "/home/uniubi/projects/forklift_sim/outputs/exp83_runtime_traj_topdown_stage1v2/exp83_runtime_traj_viz_stage1v2_traj_only_xm3p40_ym0p150_yawp6p0.png"
+}

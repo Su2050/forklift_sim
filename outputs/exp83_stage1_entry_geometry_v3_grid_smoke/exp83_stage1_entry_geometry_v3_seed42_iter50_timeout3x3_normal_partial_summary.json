@@ -1,0 +1,41 @@
+{
+  "label": "exp83_stage1_entry_geometry_v3_seed42_iter50_timeout3x3",
+  "checkpoint": "/home/uniubi/projects/forklift_sim/IsaacLab/logs/rsl_rl/forklift_pallet_insert_lift/2026-03-28_12-00-05_exp83_stage1_entry_geometry_v3_seed42_iter50_256cam/model_49.pt",
+  "mode": "normal",
+  "num_envs": 1,
+  "episodes_per_point": 1,
+  "total_grid_points": 9,
+  "total_point_repeats": 9,
+  "completed_point_repeats": 1,
+  "planned_episodes": 9,
+  "total_episodes": 1,
+  "x_root": -3.5,
+  "y_values": [
+    -0.05,
+    0.0,
+    0.05
+  ],
+  "yaw_deg_values": [
+    -2.0,
+    0.0,
+    2.0
+  ],
+  "success_rate_ep": 0.0,
+  "ever_inserted_rate": 1.0,
+  "ever_inserted_push_free_rate": 0.0,
+  "ever_hold_entry_rate": 0.0,
+  "ever_clean_insert_ready_rate": 0.0,
+  "ever_dirty_insert_rate": 1.0,
+  "timeout_frac": 0.0,
+  "mean_episode_length": 995.0,
+  "mean_max_pallet_disp_xy": 1.9915117025375366,
+  "mean_max_hold_counter": 0.0,
+  "mean_min_dist_front": 0.0,
+  "mean_abs_steer_raw": 0.5388910174369812,
+  "mean_max_abs_steer_raw": 0.5547307729721069,
+  "complete": false,
+  "termination_requested": true,
+  "termination_reason": "SIGTERM",
+  "error": null,
+  "elapsed_sec": 56.675312995910645
+}

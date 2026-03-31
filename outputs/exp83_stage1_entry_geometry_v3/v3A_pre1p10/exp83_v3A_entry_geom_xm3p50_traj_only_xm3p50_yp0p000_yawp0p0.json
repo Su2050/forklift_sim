@@ -1,0 +1,39 @@
+{
+  "label": "exp83_v3A_entry_geom_x-3.50",
+  "x_root": -3.5,
+  "y_m": 0.0,
+  "yaw_deg": 0.0,
+  "checkpoint": null,
+  "rollout_steps": 0,
+  "force_zero_steer": false,
+  "pallet_pos": [
+    0.0,
+    0.0
+  ],
+  "pallet_yaw_deg": 0.0,
+  "root_pos": [
+    -3.5,
+    0.0
+  ],
+  "root_yaw_deg": 0.0,
+  "fork_center": [
+    -2.233297824859619,
+    0.0
+  ],
+  "p_pre": [
+    -2.180000066757202,
+    0.0
+  ],
+  "p_goal": [
+    -1.0800000429153442,
+    0.0
+  ],
+  "s_start_m": -2.233297824859619,
+  "s_pre_m": -2.180000066757202,
+  "s_goal_m": -1.0800000429153442,
+  "delta_s_start_minus_pre_m": -0.05329775810241699,
+  "y_start_m": 0.0,
+  "traj_num_points": 21,
+  "traj_csv": "/home/uniubi/projects/forklift_sim/outputs/exp83_stage1_entry_geometry_v3/v3A_pre1p10/exp83_v3A_entry_geom_xm3p50_traj_only_xm3p50_yp0p000_yawp0p0_traj.csv",
+  "png": "/home/uniubi/projects/forklift_sim/outputs/exp83_stage1_entry_geometry_v3/v3A_pre1p10/exp83_v3A_entry_geom_xm3p50_traj_only_xm3p50_yp0p000_yawp0p0.png"
+}

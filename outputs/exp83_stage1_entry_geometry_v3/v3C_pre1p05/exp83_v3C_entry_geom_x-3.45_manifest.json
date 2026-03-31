@@ -1,0 +1,353 @@
+[
+  {
+    "label": "exp83_v3C_entry_geom_x-3.45",
+    "x_root": -3.45,
+    "y_m": -0.08,
+    "yaw_deg": -3.0,
+    "checkpoint": null,
+    "rollout_steps": 0,
+    "force_zero_steer": false,
+    "pallet_pos": [
+      0.0,
+      0.0
+    ],
+    "pallet_yaw_deg": 0.0,
+    "root_pos": [
+      -3.450000047683716,
+      -0.07999999821186066
+    ],
+    "root_yaw_deg": -3.000000296926017,
+    "fork_center": [
+      -2.1850340366363525,
+      -0.14629407227039337
+    ],
+    "p_pre": [
+      -2.130000114440918,
+      0.0
+    ],
+    "p_goal": [
+      -1.0800000429153442,
+      0.0
+    ],
+    "s_start_m": -2.1850340366363525,
+    "s_pre_m": -2.130000114440918,
+    "s_goal_m": -1.0800000429153442,
+    "delta_s_start_minus_pre_m": -0.05503392219543457,
+    "y_start_m": -0.14629407227039337,
+    "traj_num_points": 21,
+    "traj_csv": "/home/uniubi/projects/forklift_sim/outputs/exp83_stage1_entry_geometry_v3/v3C_pre1p05/exp83_v3C_entry_geom_xm3p45_traj_only_xm3p45_ym0p080_yawm3p0_traj.csv",
+    "png": "/home/uniubi/projects/forklift_sim/outputs/exp83_stage1_entry_geometry_v3/v3C_pre1p05/exp83_v3C_entry_geom_xm3p45_traj_only_xm3p45_ym0p080_yawm3p0.png"
+  },
+  {
+    "label": "exp83_v3C_entry_geom_x-3.45",
+    "x_root": -3.45,
+    "y_m": 0.0,
+    "yaw_deg": -3.0,
+    "checkpoint": null,
+    "rollout_steps": 0,
+    "force_zero_steer": false,
+    "pallet_pos": [
+      0.0,
+      0.0
+    ],
+    "pallet_yaw_deg": 0.0,
+    "root_pos": [
+      -3.450000047683716,
+      0.0
+    ],
+    "root_yaw_deg": -3.000000296926017,
+    "fork_center": [
+      -2.1850340366363525,
+      -0.06629407405853271
+    ],
+    "p_pre": [
+      -2.130000114440918,
+      0.0
+    ],
+    "p_goal": [
+      -1.0800000429153442,
+      0.0
+    ],
+    "s_start_m": -2.1850340366363525,
+    "s_pre_m": -2.130000114440918,
+    "s_goal_m": -1.0800000429153442,
+    "delta_s_start_minus_pre_m": -0.05503392219543457,
+    "y_start_m": -0.06629407405853271,
+    "traj_num_points": 21,
+    "traj_csv": "/home/uniubi/projects/forklift_sim/outputs/exp83_stage1_entry_geometry_v3/v3C_pre1p05/exp83_v3C_entry_geom_xm3p45_traj_only_xm3p45_yp0p000_yawm3p0_traj.csv",
+    "png": "/home/uniubi/projects/forklift_sim/outputs/exp83_stage1_entry_geometry_v3/v3C_pre1p05/exp83_v3C_entry_geom_xm3p45_traj_only_xm3p45_yp0p000_yawm3p0.png"
+  },
+  {
+    "label": "exp83_v3C_entry_geom_x-3.45",
+    "x_root": -3.45,
+    "y_m": 0.08,
+    "yaw_deg": -3.0,
+    "checkpoint": null,
+    "rollout_steps": 0,
+    "force_zero_steer": false,
+    "pallet_pos": [
+      0.0,
+      0.0
+    ],
+    "pallet_yaw_deg": 0.0,
+    "root_pos": [
+      -3.450000047683716,
+      0.07999999821186066
+    ],
+    "root_yaw_deg": -3.000000296926017,
+    "fork_center": [
+      -2.1850340366363525,
+      0.01370592787861824
+    ],
+    "p_pre": [
+      -2.130000114440918,
+      0.0
+    ],
+    "p_goal": [
+      -1.0800000429153442,
+      0.0
+    ],
+    "s_start_m": -2.1850340366363525,
+    "s_pre_m": -2.130000114440918,
+    "s_goal_m": -1.0800000429153442,
+    "delta_s_start_minus_pre_m": -0.05503392219543457,
+    "y_start_m": 0.01370592787861824,
+    "traj_num_points": 21,
+    "traj_csv": "/home/uniubi/projects/forklift_sim/outputs/exp83_stage1_entry_geometry_v3/v3C_pre1p05/exp83_v3C_entry_geom_xm3p45_traj_only_xm3p45_yp0p080_yawm3p0_traj.csv",
+    "png": "/home/uniubi/projects/forklift_sim/outputs/exp83_stage1_entry_geometry_v3/v3C_pre1p05/exp83_v3C_entry_geom_xm3p45_traj_only_xm3p45_yp0p080_yawm3p0.png"
+  },
+  {
+    "label": "exp83_v3C_entry_geom_x-3.45",
+    "x_root": -3.45,
+    "y_m": -0.08,
+    "yaw_deg": 0.0,
+    "checkpoint": null,
+    "rollout_steps": 0,
+    "force_zero_steer": false,
+    "pallet_pos": [
+      0.0,
+      0.0
+    ],
+    "pallet_yaw_deg": 0.0,
+    "root_pos": [
+      -3.450000047683716,
+      -0.07999999821186066
+    ],
+    "root_yaw_deg": 0.0,
+    "fork_center": [
+      -2.183298110961914,
+      -0.07999999821186066
+    ],
+    "p_pre": [
+      -2.130000114440918,
+      0.0
+    ],
+    "p_goal": [
+      -1.0800000429153442,
+      0.0
+    ],
+    "s_start_m": -2.183298110961914,
+    "s_pre_m": -2.130000114440918,
+    "s_goal_m": -1.0800000429153442,
+    "delta_s_start_minus_pre_m": -0.053297996520996094,
+    "y_start_m": -0.07999999821186066,
+    "traj_num_points": 21,
+    "traj_csv": "/home/uniubi/projects/forklift_sim/outputs/exp83_stage1_entry_geometry_v3/v3C_pre1p05/exp83_v3C_entry_geom_xm3p45_traj_only_xm3p45_ym0p080_yawp0p0_traj.csv",
+    "png": "/home/uniubi/projects/forklift_sim/outputs/exp83_stage1_entry_geometry_v3/v3C_pre1p05/exp83_v3C_entry_geom_xm3p45_traj_only_xm3p45_ym0p080_yawp0p0.png"
+  },
+  {
+    "label": "exp83_v3C_entry_geom_x-3.45",
+    "x_root": -3.45,
+    "y_m": 0.0,
+    "yaw_deg": 0.0,
+    "checkpoint": null,
+    "rollout_steps": 0,
+    "force_zero_steer": false,
+    "pallet_pos": [
+      0.0,
+      0.0
+    ],
+    "pallet_yaw_deg": 0.0,
+    "root_pos": [
+      -3.450000047683716,
+      0.0
+    ],
+    "root_yaw_deg": 0.0,
+    "fork_center": [
+      -2.183298110961914,
+      0.0
+    ],
+    "p_pre": [
+      -2.130000114440918,
+      0.0
+    ],
+    "p_goal": [
+      -1.0800000429153442,
+      0.0
+    ],
+    "s_start_m": -2.183298110961914,
+    "s_pre_m": -2.130000114440918,
+    "s_goal_m": -1.0800000429153442,
+    "delta_s_start_minus_pre_m": -0.053297996520996094,
+    "y_start_m": 0.0,
+    "traj_num_points": 21,
+    "traj_csv": "/home/uniubi/projects/forklift_sim/outputs/exp83_stage1_entry_geometry_v3/v3C_pre1p05/exp83_v3C_entry_geom_xm3p45_traj_only_xm3p45_yp0p000_yawp0p0_traj.csv",
+    "png": "/home/uniubi/projects/forklift_sim/outputs/exp83_stage1_entry_geometry_v3/v3C_pre1p05/exp83_v3C_entry_geom_xm3p45_traj_only_xm3p45_yp0p000_yawp0p0.png"
+  },
+  {
+    "label": "exp83_v3C_entry_geom_x-3.45",
+    "x_root": -3.45,
+    "y_m": 0.08,
+    "yaw_deg": 0.0,
+    "checkpoint": null,
+    "rollout_steps": 0,
+    "force_zero_steer": false,
+    "pallet_pos": [
+      0.0,
+      0.0
+    ],
+    "pallet_yaw_deg": 0.0,
+    "root_pos": [
+      -3.450000047683716,
+      0.07999999821186066
+    ],
+    "root_yaw_deg": 0.0,
+    "fork_center": [
+      -2.183298110961914,
+      0.07999999821186066
+    ],
+    "p_pre": [
+      -2.130000114440918,
+      0.0
+    ],
+    "p_goal": [
+      -1.0800000429153442,
+      0.0
+    ],
+    "s_start_m": -2.183298110961914,
+    "s_pre_m": -2.130000114440918,
+    "s_goal_m": -1.0800000429153442,
+    "delta_s_start_minus_pre_m": -0.053297996520996094,
+    "y_start_m": 0.07999999821186066,
+    "traj_num_points": 21,
+    "traj_csv": "/home/uniubi/projects/forklift_sim/outputs/exp83_stage1_entry_geometry_v3/v3C_pre1p05/exp83_v3C_entry_geom_xm3p45_traj_only_xm3p45_yp0p080_yawp0p0_traj.csv",
+    "png": "/home/uniubi/projects/forklift_sim/outputs/exp83_stage1_entry_geometry_v3/v3C_pre1p05/exp83_v3C_entry_geom_xm3p45_traj_only_xm3p45_yp0p080_yawp0p0.png"
+  },
+  {
+    "label": "exp83_v3C_entry_geom_x-3.45",
+    "x_root": -3.45,
+    "y_m": -0.08,
+    "yaw_deg": 3.0,
+    "checkpoint": null,
+    "rollout_steps": 0,
+    "force_zero_steer": false,
+    "pallet_pos": [
+      0.0,
+      0.0
+    ],
+    "pallet_yaw_deg": 0.0,
+    "root_pos": [
+      -3.450000047683716,
+      -0.07999999821186066
+    ],
+    "root_yaw_deg": 3.000000296926017,
+    "fork_center": [
+      -2.1850340366363525,
+      -0.01370592787861824
+    ],
+    "p_pre": [
+      -2.130000114440918,
+      0.0
+    ],
+    "p_goal": [
+      -1.0800000429153442,
+      0.0
+    ],
+    "s_start_m": -2.1850340366363525,
+    "s_pre_m": -2.130000114440918,
+    "s_goal_m": -1.0800000429153442,
+    "delta_s_start_minus_pre_m": -0.05503392219543457,
+    "y_start_m": -0.01370592787861824,
+    "traj_num_points": 21,
+    "traj_csv": "/home/uniubi/projects/forklift_sim/outputs/exp83_stage1_entry_geometry_v3/v3C_pre1p05/exp83_v3C_entry_geom_xm3p45_traj_only_xm3p45_ym0p080_yawp3p0_traj.csv",
+    "png": "/home/uniubi/projects/forklift_sim/outputs/exp83_stage1_entry_geometry_v3/v3C_pre1p05/exp83_v3C_entry_geom_xm3p45_traj_only_xm3p45_ym0p080_yawp3p0.png"
+  },
+  {
+    "label": "exp83_v3C_entry_geom_x-3.45",
+    "x_root": -3.45,
+    "y_m": 0.0,
+    "yaw_deg": 3.0,
+    "checkpoint": null,
+    "rollout_steps": 0,
+    "force_zero_steer": false,
+    "pallet_pos": [
+      0.0,
+      0.0
+    ],
+    "pallet_yaw_deg": 0.0,
+    "root_pos": [
+      -3.450000047683716,
+      0.0
+    ],
+    "root_yaw_deg": 3.000000296926017,
+    "fork_center": [
+      -2.1850340366363525,
+      0.06629407405853271
+    ],
+    "p_pre": [
+      -2.130000114440918,
+      0.0
+    ],
+    "p_goal": [
+      -1.0800000429153442,
+      0.0
+    ],
+    "s_start_m": -2.1850340366363525,
+    "s_pre_m": -2.130000114440918,
+    "s_goal_m": -1.0800000429153442,
+    "delta_s_start_minus_pre_m": -0.05503392219543457,
+    "y_start_m": 0.06629407405853271,
+    "traj_num_points": 21,
+    "traj_csv": "/home/uniubi/projects/forklift_sim/outputs/exp83_stage1_entry_geometry_v3/v3C_pre1p05/exp83_v3C_entry_geom_xm3p45_traj_only_xm3p45_yp0p000_yawp3p0_traj.csv",
+    "png": "/home/uniubi/projects/forklift_sim/outputs/exp83_stage1_entry_geometry_v3/v3C_pre1p05/exp83_v3C_entry_geom_xm3p45_traj_only_xm3p45_yp0p000_yawp3p0.png"
+  },
+  {
+    "label": "exp83_v3C_entry_geom_x-3.45",
+    "x_root": -3.45,
+    "y_m": 0.08,
+    "yaw_deg": 3.0,
+    "checkpoint": null,
+    "rollout_steps": 0,
+    "force_zero_steer": false,
+    "pallet_pos": [
+      0.0,
+      0.0
+    ],
+    "pallet_yaw_deg": 0.0,
+    "root_pos": [
+      -3.450000047683716,
+      0.07999999821186066
+    ],
+    "root_yaw_deg": 3.000000296926017,
+    "fork_center": [
+      -2.1850340366363525,
+      0.14629407227039337
+    ],
+    "p_pre": [
+      -2.130000114440918,
+      0.0
+    ],
+    "p_goal": [
+      -1.0800000429153442,
+      0.0
+    ],
+    "s_start_m": -2.1850340366363525,
+    "s_pre_m": -2.130000114440918,
+    "s_goal_m": -1.0800000429153442,
+    "delta_s_start_minus_pre_m": -0.05503392219543457,
+    "y_start_m": 0.14629407227039337,
+    "traj_num_points": 21,
+    "traj_csv": "/home/uniubi/projects/forklift_sim/outputs/exp83_stage1_entry_geometry_v3/v3C_pre1p05/exp83_v3C_entry_geom_xm3p45_traj_only_xm3p45_yp0p080_yawp3p0_traj.csv",
+    "png": "/home/uniubi/projects/forklift_sim/outputs/exp83_stage1_entry_geometry_v3/v3C_pre1p05/exp83_v3C_entry_geom_xm3p45_traj_only_xm3p45_yp0p080_yawp3p0.png"
+  }
+]

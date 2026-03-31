@@ -1,0 +1,42 @@
+{
+  "label": "exp83_lowdim_teacher_seed42_iter50_smoke1x1_normal",
+  "checkpoint": "/home/uniubi/projects/forklift_sim/IsaacLab/logs/rsl_rl/forklift_pallet_insert_lift/2026-03-30_12-46-53_exp83_lowdim_teacher_seed42_iter50/model_49.pt",
+  "mode": "normal",
+  "steer_scale": 1.0,
+  "num_envs": 1,
+  "episodes_per_point": 1,
+  "total_grid_points": 1,
+  "total_point_repeats": 1,
+  "completed_point_repeats": 1,
+  "planned_episodes": 1,
+  "total_episodes": 1,
+  "x_root": -3.5,
+  "y_values": [
+    0.0
+  ],
+  "yaw_deg_values": [
+    0.0
+  ],
+  "success_rate_ep": 0.0,
+  "ever_inserted_rate": 1.0,
+  "ever_inserted_push_free_rate": 0.0,
+  "ever_hold_entry_rate": 0.0,
+  "ever_clean_insert_ready_rate": 0.0,
+  "ever_dirty_insert_rate": 1.0,
+  "timeout_frac": 1.0,
+  "mean_episode_length": 1079.0,
+  "mean_max_pallet_disp_xy": 0.09975568950176239,
+  "mean_max_hold_counter": 0.0,
+  "mean_min_dist_front": 0.0,
+  "mean_abs_steer_raw": 0.05528420954942703,
+  "mean_max_abs_steer_raw": 0.2750183641910553,
+  "mean_steer_raw": -0.05490608513355255,
+  "mean_steer_applied": -0.05490608513355255,
+  "mean_abs_steer_applied": 0.05528420954942703,
+  "mean_max_abs_steer_applied": 0.2750183641910553,
+  "complete": true,
+  "termination_requested": false,
+  "termination_reason": "",
+  "error": null,
+  "elapsed_sec": 38.82450795173645
+}

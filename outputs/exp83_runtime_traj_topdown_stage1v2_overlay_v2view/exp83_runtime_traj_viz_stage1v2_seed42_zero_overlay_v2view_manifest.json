@@ -1,0 +1,43 @@
+[
+  {
+    "label": "exp83_runtime_traj_viz_stage1v2_seed42_zero_overlay_v2view",
+    "x_root": -3.4,
+    "y_m": 0.08,
+    "yaw_deg": 3.0,
+    "checkpoint": "/home/uniubi/projects/forklift_sim/IsaacLab/logs/rsl_rl/forklift_pallet_insert_lift/2026-03-27_18-31-11_exp83_stage1_steering_curriculum_v2_seed42_iter50_256cam/model_49.pt",
+    "rollout_steps": 80,
+    "force_zero_steer": true,
+    "pallet_pos": [
+      0.0,
+      0.0
+    ],
+    "pallet_yaw_deg": 0.0,
+    "root_pos": [
+      -3.4000000953674316,
+      0.07999999821186066
+    ],
+    "root_yaw_deg": 3.000000296926017,
+    "fork_center": [
+      -2.1350340843200684,
+      0.14629407227039337
+    ],
+    "p_pre": [
+      -2.2799999713897705,
+      0.0
+    ],
+    "p_goal": [
+      -1.0800000429153442,
+      0.0
+    ],
+    "s_start_m": -2.1350340843200684,
+    "s_pre_m": -2.2799999713897705,
+    "s_goal_m": -1.0800000429153442,
+    "delta_s_start_minus_pre_m": 0.14496588706970215,
+    "y_start_m": 0.14629407227039337,
+    "traj_num_points": 21,
+    "traj_csv": "/home/uniubi/projects/forklift_sim/outputs/exp83_runtime_traj_topdown_stage1v2_overlay_v2view/exp83_runtime_traj_viz_stage1v2_seed42_zero_overlay_v2view_rollout_zero_steer_xm3p40_yp0p080_yawp3p0_traj.csv",
+    "png": "/home/uniubi/projects/forklift_sim/outputs/exp83_runtime_traj_topdown_stage1v2_overlay_v2view/exp83_runtime_traj_viz_stage1v2_seed42_zero_overlay_v2view_rollout_zero_steer_xm3p40_yp0p080_yawp3p0.png",
+    "rollout_steps_recorded": 80,
+    "rollout_done_early": false
+  }
+]
