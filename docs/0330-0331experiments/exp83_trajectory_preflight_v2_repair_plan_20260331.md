@@ -100,6 +100,60 @@
 
 - 至少带 `implied root / rear-axle proxy` 的 vehicle-aware preflight
 
+### 5.1.1 参考轨迹“具体怎么改”
+
+这一阶段不是只做“多画几张图”，而是准备把参考轨迹生成逻辑从：
+
+- `fork_center -> p_pre -> p_goal`
+
+改成：
+
+- `vehicle reference path -> 再映射成 fork_center path`
+
+具体会按下面这条链改。
+
+1. 先换规划参考点
+   - 当前：直接拿 `fork_center` 当起点 `p0`
+   - 拟改：拿 `root` 或更接近后轴中心的 `vehicle reference point` 当起点
+   - 原因：真正受最小转弯半径约束的是整车，不是 fork_center
+
+2. 先定义“整车应该到哪儿停稳”
+   - 当前：直接定义 `fork_center` 的 `p_pre / p_goal`
+   - 拟改：先定义 vehicle pre-pose
+     - `yaw_vehicle_goal = pallet_yaw`
+     - `p_vehicle_goal = p_fork_goal - d_vehicle_to_fork * u_in`
+   - 也就是：先决定车体该到哪，再反推出 fork_center 该到哪
+
+3. vehicle 路径先生成，再映射出 fork_center 路径
+   - 当前：Hermite 曲线直接连 `fork_center start -> fork_center pre`
+   - 拟改：先生成 vehicle 路径
+     - 起点：`(p_vehicle_start, yaw_start)`
+     - 终点：`(p_vehicle_goal, pallet_yaw)`
+     - 约束：单调接近、有限转角、有限曲率
+   - 然后再用前向偏移把每个 vehicle 点映射成 fork_center 点
+
+4. 第一版路径生成器不追求高保真，但必须有曲率约束
+   - 第一优先不是复杂，而是“不能再毫无约束”
+   - 第一版建议：
+     - bicycle / rear-axle proxy
+     - `arc + line + arc` 或 curvature-clamped Hermite
+   - 暂时不做全动力学，但必须至少有：
+     - `max curvature`
+     - `max heading change`
+     - `root lateral sweep`
+
+5. reward 先不推翻，只换底层路径
+   - 当前 reward 里的：
+     - `d_traj`
+     - `yaw_traj_err`
+     - signed traj obs
+   - 仍然可以保留口径
+   - 但它们要改成对“vehicle-aware 生成后映射出来的 fork_center path”计算
+
+一句话说，真正要改的不是“轨迹名字”，而是：
+
+**从“直接给 fork_center 画一条漂亮曲线”改成“先给车体画一条能走的路，再算叉臂中心应该落在哪”。**
+
 ### 5.2 这一阶段允许修改的内容
 
 只允许改这些：
@@ -152,6 +206,55 @@
 
 - `current 27 cases`
 - `legacy 27 cases`
+
+### 5.4.1 代码层面准备改哪些位置
+
+真正会动到的核心位置大概率是：
+
+- [env.py:_build_reference_trajectory](/home/uniubi/projects/forklift_sim/IsaacLab/source/isaaclab_tasks/isaaclab_tasks/direct/forklift_pallet_insert_lift/env.py#L1009)
+- [visualize_reference_trajectory_cases.py](/home/uniubi/projects/forklift_sim/forklift_pallet_insert_lift_project/scripts/visualize_reference_trajectory_cases.py)
+- [run_exp83_trajectory_preflight_v2.py](/home/uniubi/projects/forklift_sim/scripts/run_exp83_trajectory_preflight_v2.py)
+
+具体改法预计是：
+
+1. 在 `env.py` 里新增 vehicle-aware trajectory builder
+   - 新 helper：
+     - `build_vehicle_reference_path(...)`
+     - `map_vehicle_path_to_fork_center(...)`
+
+2. `_build_reference_trajectory()` 先保留旧接口
+   - 但内部切到新 generator
+   - 这样 reward/query 部分先不用大改接口
+
+3. `visualize_reference_trajectory_cases.py`
+   - 从“镜像旧逻辑”
+   - 改成“镜像新 vehicle-aware 逻辑”
+
+4. `run_exp83_trajectory_preflight_v2.py`
+   - 继续做统一审计入口
+   - 每次 generator 更新后直接复查
+
+### 5.4.2 第一版具体算法建议
+
+第一版不建议直接上复杂 clothoid solver，先做一个稳的简化版：
+
+1. 选 vehicle reference point
+   - 暂用 `root`
+   - 如果后面能量到后轴中心，再切换成 `rear axle center`
+
+2. 构造目标 vehicle pre-pose
+   - `p_vehicle_goal = pallet_pre_point - forward_offset * u_in`
+   - `yaw_goal = pallet_yaw`
+
+3. 路径生成采用二选一
+   - 首选：`arc + line + arc` 的 Dubins-like 近似
+   - 备选：Hermite 但对曲率做裁剪，超阈值就视为 bad trajectory family
+
+4. 采样 vehicle path 后映射成 fork_center path
+   - `p_fork = p_vehicle + d_vehicle_to_fork * heading`
+
+5. 只要映射后的 fork_center path 还能满足插托盘末段需求
+   - reward/query 接口就能先平滑继承
 
 ### 5.5 Phase A 通过标准
 
@@ -336,4 +439,3 @@
 4. endpoint gate 能稳定接上后半段
 
 只有这条链打通，后面再往“自动插托盘”推进，才是在正确方向上加速。
-
