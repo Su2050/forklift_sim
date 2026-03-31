@@ -88,25 +88,17 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     # 禁用等待贴图加载，避免因 PNG 解析报错导致仿真启动挂起
     wait_for_textures: bool = False
 
-    # Stage 1 初始随机化范围，默认保持当前课程难度不变。
-    # 这些字段主要给控制变量实验用，便于直接从命令行 override。
-    # ===== 实验 4.1 近距离课程 (Stage A) =====
-    # 目标：让叉尖距离托盘前沿 0.3m ~ 0.6m
-    # 托盘前沿 ≈ -1.08m, 叉尖偏移 ≈ +1.87m
-    # x_root = 目标距离 + (-1.08) - 1.87
-    # 如果距离是 0.3m (在托盘外)，tip_x = -1.38m -> x_root = -3.25m
-    # 如果距离是 0.6m (在托盘外)，tip_x = -1.68m -> x_root = -3.55m
-    stage1_init_x_min_m: float = -3.55
-    stage1_init_x_max_m: float = -3.25
-    # 当前 stage1 课程：
-    # - near-field root x 保持在 [-3.60, -3.45]
-    # - y/yaw 放宽到 ±0.15m / ±6deg，确保 steering 在课程里是必要动作
-    stage1_init_x_min_m: float = -3.60
-    stage1_init_x_max_m: float = -3.45
-    stage1_init_y_min_m: float = -0.15
-    stage1_init_y_max_m: float = 0.15
-    stage1_init_yaw_deg_min: float = -6.0
-    stage1_init_yaw_deg_max: float = 6.0
+    # Stage 1 初始随机化范围。
+    # Exp9.0: 对齐 master 的原始分布，便于和“无参考轨迹”基准直接对照：
+    # - x ∈ [-2.5, -1.0]
+    # - y ∈ [-0.6, 0.6]
+    # - yaw ∈ [-0.25, 0.25] rad ≈ ±14.3239 deg
+    stage1_init_x_min_m: float = -2.5
+    stage1_init_x_max_m: float = -1.0
+    stage1_init_y_min_m: float = -0.6
+    stage1_init_y_max_m: float = 0.6
+    stage1_init_yaw_deg_min: float = -14.32394487827058
+    stage1_init_yaw_deg_max: float = 14.32394487827058
 
     # 相机参数：
     # - 训练默认 256x256，进一步提升视觉特征提取精度
@@ -237,6 +229,11 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     gamma: float = 1.0
 
     # ---- 实验 3.1: 参考轨迹走廊 (Trajectory-lite) ----
+    # `use_reference_trajectory=false` 时：
+    # - reset 不再生成参考轨迹
+    # - reward 不再计算 r_cd / r_cpsi
+    # - traj/* 日志置零，便于做“无参考轨迹”基准
+    use_reference_trajectory: bool = True
     # 参考轨迹生成模型：
     # - root_path_first: vehicle/root cubic + final straight
     # - rs_exact: exact Reeds-Shepp over vehicle/root pose, then map to fork-center

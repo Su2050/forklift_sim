@@ -1227,6 +1227,11 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         """
         if len(env_ids) == 0:
             return
+        if not bool(getattr(self.cfg, "use_reference_trajectory", True)):
+            self._traj_pts[env_ids] = 0.0
+            self._traj_tangents[env_ids] = 0.0
+            self._traj_s_norm[env_ids] = 0.0
+            return
 
         # 1. 获取起点位姿
         if fork_center_xy is None:
@@ -1383,6 +1388,8 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         pallet_yaw: torch.Tensor,
     ) -> None:
         """Exp8.3 runtime U0：在真实 env reset 后立即检查轨迹接线一致性。"""
+        if not bool(getattr(self.cfg, "use_reference_trajectory", True)):
+            return
         if not bool(getattr(self.cfg, "exp83_runtime_u0_enable", False)):
             return
         if len(env_ids) == 0:
@@ -1447,6 +1454,8 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         pallet_yaw: torch.Tensor,
     ) -> None:
         """Exp8.3 runtime U0.5/U1：检查 r_d / rg / out_of_bounds 的 family 接线。"""
+        if not bool(getattr(self.cfg, "use_reference_trajectory", True)):
+            return
         if not bool(getattr(self.cfg, "exp83_runtime_u1_enable", False)):
             return
         if len(env_ids) == 0:
@@ -1544,6 +1553,10 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
             yaw_traj_err_deg: 叉臂朝向与最近点切线的偏航误差 (N,)
             s_traj_norm: 最近点在轨迹上的归一化进度 (N,)
         """
+        if not bool(getattr(self.cfg, "use_reference_trajectory", True)):
+            zeros = torch.zeros((self.num_envs,), device=self.device)
+            return zeros, zeros, zeros
+
         fork_center = self._compute_fork_center()
         query_pos = fork_center[:, :2]  # (N, 2)
         robot_yaw = _quat_to_yaw(self.robot.data.root_quat_w)  # (N,)
@@ -1865,10 +1878,6 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
 
         # ---- 实验 B: 论文原生 Reward 计算 ----
         
-        # 1. 轨迹相关变量 (复用 3.1 的轨迹查询)
-        d_traj, yaw_traj_err_deg, _ = self._query_reference_trajectory()
-        yaw_traj_err_rad = yaw_traj_err_deg * (math.pi / 180.0)
-        
         # 2. 距离 rd 的定义：叉臂中心到当前 family target_center 的距离
         pallet_yaw = _quat_to_yaw(self.pallet.data.root_quat_w)
         dist_center_family, _ = self._exp83_target_center_family_dist(
@@ -1880,11 +1889,22 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         push_free = pallet_disp_xy < self.cfg.push_free_disp_thresh_m
         inserted_push_free_reward = (insert_depth >= self._insert_thresh) & push_free
 
+        use_reference_trajectory = bool(getattr(self.cfg, "use_reference_trajectory", True))
+        if use_reference_trajectory:
+            d_traj, yaw_traj_err_deg, _ = self._query_reference_trajectory()
+            yaw_traj_err_rad = yaw_traj_err_deg * (math.pi / 180.0)
+            r_cd_raw = torch.clip(1.0 / (d_traj + 1e-5), 0.0, self.cfg.paper_reward_max)
+            r_cpsi_raw = torch.clip(1.0 / (yaw_traj_err_rad + 1e-5), 0.0, self.cfg.paper_reward_max)
+        else:
+            d_traj = torch.zeros_like(dist_front)
+            yaw_traj_err_deg = torch.zeros_like(dist_front)
+            yaw_traj_err_rad = torch.zeros_like(dist_front)
+            r_cd_raw = torch.zeros_like(dist_front)
+            r_cpsi_raw = torch.zeros_like(dist_front)
+
         # 3. 正向奖励 R+ (使用 exp 替代 1/x 防止数值爆炸)
         # 论文原生 1/x 形式，使用 clip 防止近场爆炸，释放远场原生引力
         r_d_raw = torch.clip(1.0 / (dist_center_family + 1e-5), 0.0, self.cfg.paper_reward_max)
-        r_cd_raw = torch.clip(1.0 / (d_traj + 1e-5), 0.0, self.cfg.paper_reward_max)
-        r_cpsi_raw = torch.clip(1.0 / (yaw_traj_err_rad + 1e-5), 0.0, self.cfg.paper_reward_max)
 
         if self.cfg.clean_insert_reward_gate_enable:
             clean_insert_progress = smoothstep(
@@ -2389,29 +2409,30 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         # Exp8.3 B0′：在写入 pallet / robot / joint 之后，用 reset 张量生成参考轨迹，
         # 避免旧 episode 位姿污染 r_cd / r_cpsi。
         self._prev_phi_traj[env_ids] = 0.0
-        lift_j = joint_pos[:, self._lift_id]
-        fc3 = self._compute_fork_center_from_root_lift(pos, quat, lift_j)
-        p_yaw = _quat_to_yaw(pallet_quat)
-        r_yaw = _quat_to_yaw(quat)
-        self._build_reference_trajectory(
-            env_ids,
-            fork_center_xy=fc3[:, :2],
-            robot_yaw=r_yaw,
-            pallet_pos_xy=pallet_pos[:, :2],
-            pallet_yaw=p_yaw,
-        )
-        self._run_runtime_u0_check(
-            env_ids,
-            fork_center_xy=fc3[:, :2],
-            robot_yaw=r_yaw,
-            pallet_pos_xy=pallet_pos[:, :2],
-            pallet_yaw=p_yaw,
-        )
-        self._run_runtime_u1_target_center_family_check(
-            env_ids,
-            pallet_pos_xy=pallet_pos[:, :2],
-            pallet_yaw=p_yaw,
-        )
+        if bool(getattr(self.cfg, "use_reference_trajectory", True)):
+            lift_j = joint_pos[:, self._lift_id]
+            fc3 = self._compute_fork_center_from_root_lift(pos, quat, lift_j)
+            p_yaw = _quat_to_yaw(pallet_quat)
+            r_yaw = _quat_to_yaw(quat)
+            self._build_reference_trajectory(
+                env_ids,
+                fork_center_xy=fc3[:, :2],
+                robot_yaw=r_yaw,
+                pallet_pos_xy=pallet_pos[:, :2],
+                pallet_yaw=p_yaw,
+            )
+            self._run_runtime_u0_check(
+                env_ids,
+                fork_center_xy=fc3[:, :2],
+                robot_yaw=r_yaw,
+                pallet_pos_xy=pallet_pos[:, :2],
+                pallet_yaw=p_yaw,
+            )
+            self._run_runtime_u1_target_center_family_check(
+                env_ids,
+                pallet_pos_xy=pallet_pos[:, :2],
+                pallet_yaw=p_yaw,
+            )
 
         # ---- 基线 fork tip 高度 ----
         # S1.0h 修复：不再调用 scene.write_data_to_sim() / sim.reset() / scene.update()
