@@ -1,0 +1,38 @@
+{
+  "start": {
+    "x": -3.45,
+    "y": -0.15,
+    "yaw_deg": -6.000000000000001
+  },
+  "goal_pose": {
+    "x": -3.4,
+    "y": 0.0,
+    "yaw_deg": 0.0
+  },
+  "fork_goal_xy": [
+    -2.13,
+    0.0
+  ],
+  "min_turn_radius_m": 0.55,
+  "root_path_first": {
+    "fork_goal_xy": [
+      -2.13,
+      0.0
+    ],
+    "vehicle_to_fork_center_m": 1.27,
+    "start_s": -0.050000000000000266,
+    "start_y": -0.15,
+    "pre_s": -0.1,
+    "curve_span_s": 1e-06
+  },
+  "rs_lattice": {
+    "expanded_nodes": 34540,
+    "pos_err": 0.0744865955575781,
+    "yaw_err_deg": 2.27557442680292,
+    "planner": "rs_state_lattice",
+    "fork_goal_xy": [
+      -2.13,
+      0.0
+    ]
+  }
+}

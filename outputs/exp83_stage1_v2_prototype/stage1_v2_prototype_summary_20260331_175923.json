@@ -1,0 +1,54 @@
+{
+  "tool": "run_exp83_stage1_v2_prototype.py",
+  "cfg_path": "/home/uniubi/projects/forklift_sim/forklift_pallet_insert_lift_project/isaaclab_patch/source/isaaclab_tasks/isaaclab_tasks/direct/forklift_pallet_insert_lift/env_cfg.py",
+  "scan_mode": "direct_pre_goal_geometry_prototype",
+  "align_start_dist_m": 2.72,
+  "overlay_path": "/home/uniubi/projects/forklift_sim/outputs/exp83_stage1_v2_prototype/overlay_stage1_v2_prototype_20260331_175923.png",
+  "geometry_sketch_path": "/home/uniubi/projects/forklift_sim/outputs/exp83_stage1_v2_prototype/geometry_stage1_v2_prototype_20260331_175923.png",
+  "current_stage1_x_min_m": -3.6,
+  "current_stage1_x_max_m": -3.45,
+  "current_stage1_y_min_m": -0.15,
+  "current_stage1_y_max_m": 0.15,
+  "current_stage1_yaw_deg_min": -6.0,
+  "current_stage1_yaw_deg_max": 6.0,
+  "root_goal_s": -2.35,
+  "current_env_nominal_root_pre_s": -3.4000000000000004,
+  "proposed_align_start_s": -5.07,
+  "curvature_limit": 0.4273504273504274,
+  "num_cases": 125,
+  "num_entry_ok": 0,
+  "root_total_length_mean": 4.269709388765805,
+  "root_total_length_max": 4.35199390925457,
+  "root_total_length_min": 4.19,
+  "root_heading_change_mean": 3.6000000000000005,
+  "root_heading_change_max": 6.000000000000001,
+  "root_curvature_max_max": 0.4273585572836565,
+  "num_heading_gt_180": 0,
+  "num_heading_gt_270": 0,
+  "num_length_gt_10m": 0,
+  "path_mode_counts": {
+    "direct_pre_goal_scan_RSL": 49,
+    "direct_pre_goal_scan_LSL": 11,
+    "direct_pre_goal_scan_LSR": 49,
+    "direct_pre_goal_scan_S": 5,
+    "direct_pre_goal_scan_RSR": 11
+  },
+  "representative_cases": [
+    {
+      "case_id": "c63_xm3p525_yp0p000_yawp0p000",
+      "image_path": "/home/uniubi/projects/forklift_sim/outputs/exp83_stage1_v2_prototype/c63_xm3p525_yp0p000_yawp0p000_20260331_175923.png"
+    },
+    {
+      "case_id": "c105_xm3p450_ym0p150_yawp6p000",
+      "image_path": "/home/uniubi/projects/forklift_sim/outputs/exp83_stage1_v2_prototype/c105_xm3p450_ym0p150_yawp6p000_20260331_175923.png"
+    },
+    {
+      "case_id": "c01_xm3p600_ym0p150_yawm6p000",
+      "image_path": "/home/uniubi/projects/forklift_sim/outputs/exp83_stage1_v2_prototype/c01_xm3p600_ym0p150_yawm6p000_20260331_175923.png"
+    },
+    {
+      "case_id": "c25_xm3p600_yp0p150_yawp6p000",
+      "image_path": "/home/uniubi/projects/forklift_sim/outputs/exp83_stage1_v2_prototype/c25_xm3p600_yp0p150_yawp6p000_20260331_175923.png"
+    }
+  ]
+}

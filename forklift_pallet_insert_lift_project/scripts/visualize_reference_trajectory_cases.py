@@ -92,6 +92,7 @@ class CaseMetrics:
     s_goal: float
     delta_s: float
     y_start: float
+    root_total_length_m: float
     root_y_abs_max: float
     root_heading_change_deg: float
     root_curvature_max: float
@@ -160,9 +161,13 @@ def compute_path_heading_curvature(
     pts: np.ndarray,
     *,
     fallback_dir: np.ndarray,
+    tangents: np.ndarray | None = None,
 ) -> tuple[float, float]:
-    tangents = _compute_path_tangents(pts, fallback_dir)
-    headings = np.unwrap(np.arctan2(tangents[:, 1], tangents[:, 0]))
+    if tangents is None:
+        tangents_np = _compute_path_tangents(pts, fallback_dir)
+    else:
+        tangents_np = tangents
+    headings = np.unwrap(np.arctan2(tangents_np[:, 1], tangents_np[:, 0]))
     heading_change_deg = float(abs(headings[-1] - headings[0]) * (180.0 / math.pi))
     if len(pts) < 2:
         return heading_change_deg, 0.0
@@ -321,6 +326,80 @@ def sample_forward_preferred_rs_root_path_np(
     return best[1], best[2]
 
 
+def sample_forward_only_rs_dense_path_np(
+    *,
+    root_start_xy: np.ndarray,
+    root_start_yaw: float,
+    root_goal_xy: np.ndarray,
+    root_goal_yaw: float,
+    min_turn_radius_m: float,
+    sample_step_m: float,
+) -> tuple[np.ndarray, np.ndarray, str] | None:
+    x_rs_goal, y_rs_goal, th_rs_goal = rs_local_goal(root_start_xy, root_start_yaw, root_goal_xy, root_goal_yaw)
+    all_segs = exact_rs.rs_all_paths(x_rs_goal, y_rs_goal, th_rs_goal, float(min_turn_radius_m))
+    if not all_segs:
+        return None
+
+    sampled_paths = exact_rs.rs_sample_path_multi(
+        float(root_start_xy[0]),
+        float(root_start_xy[1]),
+        float(root_start_yaw),
+        float(root_goal_xy[0]),
+        float(root_goal_xy[1]),
+        float(root_goal_yaw),
+        float(min_turn_radius_m),
+        step=float(sample_step_m),
+        max_paths=len(all_segs),
+    )
+    candidates: list[tuple[float, int, str, np.ndarray, np.ndarray]] = []
+    for segs, world_pts in zip(all_segs[: len(sampled_paths)], sampled_paths, strict=True):
+        if any(seg_len < -1e-6 for _, seg_len in segs):
+            continue
+        seg_types = [seg_type for seg_type, seg_len in segs if abs(seg_len) > 1e-6]
+        family = "".join(seg_types) if seg_types else "S"
+        total_length_m = float(sum(abs(seg_len) for _, seg_len in segs))
+        xy = np.asarray([[pt[0], pt[1]] for pt in world_pts], dtype=np.float64)
+        yaw = np.asarray([pt[2] for pt in world_pts], dtype=np.float64)
+        candidates.append((total_length_m, len(seg_types), family, xy, yaw))
+
+    if not candidates:
+        return None
+
+    best = min(candidates, key=lambda item: (item[0], item[1]))
+    return best[3], best[4], best[2]
+
+
+def append_straight_segment_np(
+    *,
+    xy: np.ndarray,
+    yaw: np.ndarray,
+    goal_xy: np.ndarray,
+    goal_yaw: float,
+    sample_step_m: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    if xy.shape[0] == 0:
+        raise ValueError("xy must contain at least one point")
+
+    dist_to_goal = float(np.linalg.norm(goal_xy - xy[-1]))
+    if dist_to_goal <= 1e-9:
+        return xy, yaw
+
+    num_steps = max(1, int(math.ceil(dist_to_goal / max(float(sample_step_m), 1e-6))))
+    alpha = np.linspace(0.0, 1.0, num_steps + 1, dtype=np.float64).reshape(-1, 1)[1:]
+    line_xy = (1.0 - alpha) * xy[-1] + alpha * goal_xy.reshape(1, 2)
+    line_yaw = np.full((num_steps,), float(goal_yaw), dtype=np.float64)
+    xy_out = np.concatenate([xy, line_xy], axis=0)
+    yaw_out = np.concatenate([yaw, line_yaw], axis=0)
+    yaw_out[-1] = float(goal_yaw)
+    return xy_out, yaw_out
+
+
+def compute_path_length_np(xy: np.ndarray) -> float:
+    if xy.shape[0] < 2:
+        return 0.0
+    return float(np.sum(np.linalg.norm(np.diff(xy, axis=0), axis=1)))
+
+
 def build_reference_trajectory(
     *,
     root_xy: np.ndarray,
@@ -406,6 +485,28 @@ def build_reference_trajectory(
         else:
             root_path, root_tangents = rs_payload
             path_mode = "rs_forward_preferred"
+    elif traj_model == "dubins_to_pre_straight":
+        dubins_dense = sample_forward_only_rs_dense_path_np(
+            root_start_xy=root_xy,
+            root_start_yaw=yaw,
+            root_goal_xy=root_pre,
+            root_goal_yaw=pallet_yaw,
+            min_turn_radius_m=traj_rs_min_turn_radius_m,
+            sample_step_m=traj_rs_sample_step_m,
+        )
+        if dubins_dense is None:
+            raise RuntimeError("forward-only RS/Dubins candidate set is empty for root_pre pose")
+        dense_xy, dense_yaw, family = dubins_dense
+        dense_xy, dense_yaw = append_straight_segment_np(
+            xy=dense_xy,
+            yaw=dense_yaw,
+            goal_xy=root_goal,
+            goal_yaw=pallet_yaw,
+            sample_step_m=traj_rs_sample_step_m,
+        )
+        root_path = dense_xy
+        root_tangents = np.stack([np.cos(dense_yaw), np.sin(dense_yaw)], axis=1)
+        path_mode = f"dubins_to_pre_straight_{family}"
     if path_mode == "rs_forward_preferred_fallback_root_path_first":
         traj_model = "root_path_first"
     if traj_model == "root_path_first":
@@ -440,7 +541,7 @@ def build_reference_trajectory(
         else:
             root_path = root_pts_curve
             root_tangents = root_curve_tangents
-    elif traj_model != "root_path_first":
+    elif traj_model not in {"root_path_first", "dubins_to_pre_straight"}:
         raise ValueError(f"unsupported traj_model: {traj_model}")
 
     pts = root_path + root_to_fc * root_tangents
@@ -537,6 +638,7 @@ def draw_case(
         f"s_goal = {case.s_goal:+.4f}",
         f"delta_s = {case.delta_s:+.4f}",
         f"y_start = {case.y_start:+.4f}",
+        f"root_len = {case.root_total_length_m:+.3f} m",
         f"root|y|_max = {case.root_y_abs_max:+.4f}",
         f"root_dpsi = {case.root_heading_change_deg:+.2f} deg",
         f"root_kappa_max = {case.root_curvature_max:+.3f} 1/m",
@@ -729,6 +831,7 @@ def build_case_grid(
                 root_heading_change_deg, root_curvature_max = compute_path_heading_curvature(
                     root_path,
                     fallback_dir=np.array([math.cos(yaw_rad), math.sin(yaw_rad)], dtype=np.float64),
+                    tangents=tangents,
                 )
                 case = CaseMetrics(
                     case_id=format_case_id(idx, root_x, root_y, yaw_deg),
@@ -740,6 +843,7 @@ def build_case_grid(
                     s_goal=s_goal,
                     delta_s=s_start - s_pre,
                     y_start=y_start,
+                    root_total_length_m=compute_path_length_np(root_path),
                     root_y_abs_max=root_y_abs_max,
                     root_heading_change_deg=root_heading_change_deg,
                     root_curvature_max=root_curvature_max,
@@ -770,7 +874,7 @@ def main():
     parser.add_argument(
         "--traj-model",
         type=str,
-        choices=["root_path_first", "rs_exact", "rs_forward_preferred"],
+        choices=["root_path_first", "rs_exact", "rs_forward_preferred", "dubins_to_pre_straight"],
         default=None,
         help="Override traj_model from cfg for auditing.",
     )
@@ -867,6 +971,8 @@ def main():
         "delta_s_min": min(case.delta_s for case in cases),
         "delta_s_max": max(case.delta_s for case in cases),
         "delta_s_mean": sum(case.delta_s for case in cases) / len(cases),
+        "root_total_length_m_max": max(case.root_total_length_m for case in cases),
+        "root_total_length_m_mean": sum(case.root_total_length_m for case in cases) / len(cases),
         "root_y_abs_max_max": max(case.root_y_abs_max for case in cases),
         "root_heading_change_deg_max": max(case.root_heading_change_deg for case in cases),
         "root_curvature_max_max": max(case.root_curvature_max for case in cases),

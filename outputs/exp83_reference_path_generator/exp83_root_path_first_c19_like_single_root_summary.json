@@ -1,0 +1,35 @@
+{
+  "model": "root_path_first",
+  "goal_mode": "front_of_pallet",
+  "start": {
+    "x": -3.45,
+    "y": -0.15,
+    "yaw_deg": -6.000000000000001
+  },
+  "goal_pose": {
+    "x": -3.4,
+    "y": 0.0,
+    "yaw_deg": 0.0
+  },
+  "fork_goal_xy": [
+    -2.13,
+    0.0
+  ],
+  "min_turn_radius_m": 0.55,
+  "pallet_depth_m": 2.16,
+  "fork_reach_m": 1.87,
+  "goal_stop_buffer_m": 1.05,
+  "metadata": {
+    "fork_goal_xy": [
+      -2.13,
+      0.0
+    ],
+    "vehicle_to_fork_center_m": 1.27,
+    "mode": "direct_cubic_fallback",
+    "tangent_scale_m": 0.35,
+    "start_s": -0.050000000000000266,
+    "start_y": -0.15,
+    "pre_s": -0.1,
+    "curve_span_s": 1e-06
+  }
+}

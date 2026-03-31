@@ -1,0 +1,6 @@
+output_dir=/home/uniubi/projects/forklift_sim/output/20260331_181513_init_frame_scan
+num_cases=27
+frame_index=0
+resolution=256
+contact_sheet=/home/uniubi/projects/forklift_sim/output/20260331_181513_init_frame_scan/contact_sheet.png
+manifest=/home/uniubi/projects/forklift_sim/output/20260331_181513_init_frame_scan/manifest.json

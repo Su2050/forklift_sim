@@ -1,0 +1,68 @@
+{
+  "tool": "run_exp83_predock_goal_set_audit.py",
+  "cfg_path": "/home/uniubi/projects/forklift_sim/forklift_pallet_insert_lift_project/isaaclab_patch/source/isaaclab_tasks/isaaclab_tasks/direct/forklift_pallet_insert_lift/env_cfg.py",
+  "scan_mode": "current_stage1_near_field_to_predock_goal_set",
+  "note": "Goal-set search uses world-motion-aware reverse stats from sampled RS paths, not only library segment signs.",
+  "top_rows": [
+    {
+      "d_pre_m": 1.05,
+      "y_tol_m": 0.1,
+      "yaw_tol_deg": 6.0,
+      "num_cases": 125,
+      "num_reverse_free": 9,
+      "num_reverse_frac_le_005": 9,
+      "reverse_frac_mean": 0.32975279096311594,
+      "reverse_frac_max": 0.47676786366127566,
+      "reverse_length_mean": 0.1986578204871459,
+      "root_total_length_mean": 0.5244877169625837,
+      "root_total_length_max": 1.357973304273538,
+      "root_heading_change_mean": 5.424000000000001,
+      "root_heading_change_max": 12.000000000000007,
+      "num_heading_gt_180": 0,
+      "num_heading_gt_270": 0,
+      "num_length_gt_10m": 0
+    }
+  ],
+  "best_combo": {
+    "d_pre_m": 1.05,
+    "y_tol_m": 0.1,
+    "yaw_tol_deg": 6.0,
+    "num_cases": 125,
+    "num_reverse_free": 9,
+    "num_reverse_frac_le_005": 9,
+    "reverse_frac_mean": 0.32975279096311594,
+    "reverse_frac_max": 0.47676786366127566,
+    "reverse_length_mean": 0.1986578204871459,
+    "root_total_length_mean": 0.5244877169625837,
+    "root_total_length_max": 1.357973304273538,
+    "root_heading_change_mean": 5.424000000000001,
+    "root_heading_change_max": 12.000000000000007,
+    "num_heading_gt_180": 0,
+    "num_heading_gt_270": 0,
+    "num_length_gt_10m": 0,
+    "overlay_path": "/home/uniubi/projects/forklift_sim/outputs/exp83_predock_goal_set_audit_smoke/overlay_predock_goal_set_best_20260331_181256.png",
+    "geometry_path": "/home/uniubi/projects/forklift_sim/outputs/exp83_predock_goal_set_audit_smoke/geometry_predock_goal_set_best_20260331_181256.png",
+    "representative_cases": [
+      {
+        "case_id": "c104_xm3p450_ym0p150_yawp3p000",
+        "image_path": "/home/uniubi/projects/forklift_sim/outputs/exp83_predock_goal_set_audit_smoke/c104_xm3p450_ym0p150_yawp3p000_20260331_181256.png"
+      },
+      {
+        "case_id": "c76_xm3p488_ym0p150_yawm6p000",
+        "image_path": "/home/uniubi/projects/forklift_sim/outputs/exp83_predock_goal_set_audit_smoke/c76_xm3p488_ym0p150_yawm6p000_20260331_181256.png"
+      },
+      {
+        "case_id": "c113_xm3p450_yp0p000_yawp0p000",
+        "image_path": "/home/uniubi/projects/forklift_sim/outputs/exp83_predock_goal_set_audit_smoke/c113_xm3p450_yp0p000_yawp0p000_20260331_181256.png"
+      },
+      {
+        "case_id": "c25_xm3p600_yp0p150_yawp6p000",
+        "image_path": "/home/uniubi/projects/forklift_sim/outputs/exp83_predock_goal_set_audit_smoke/c25_xm3p600_yp0p150_yawp6p000_20260331_181256.png"
+      },
+      {
+        "case_id": "c01_xm3p600_ym0p150_yawm6p000",
+        "image_path": "/home/uniubi/projects/forklift_sim/outputs/exp83_predock_goal_set_audit_smoke/c01_xm3p600_ym0p150_yawm6p000_20260331_181256.png"
+      }
+    ]
+  }
+}

@@ -1,0 +1,280 @@
+{
+  "timestamp": "20260331_181513",
+  "output_dir": "/home/uniubi/projects/forklift_sim/output/20260331_181513_init_frame_scan",
+  "frame_index": 0,
+  "camera": {
+    "mount_body": "body",
+    "resolution": 256,
+    "hfov_deg": 90.0,
+    "pos_local_cm": [
+      130.0,
+      0.0,
+      250.0
+    ],
+    "rpy_local_deg": [
+      0.0,
+      75.0,
+      0.0
+    ]
+  },
+  "stage1_defaults": {
+    "x_range_m": [
+      -3.6,
+      -3.45
+    ],
+    "y_range_m": [
+      -0.15,
+      0.15
+    ],
+    "yaw_range_deg": [
+      -6.0,
+      6.0
+    ]
+  },
+  "cases": [
+    {
+      "case_id": 0,
+      "label": "case_00_xm3p60_ym0p15_yawm6p00",
+      "x_m": -3.6,
+      "y_m": -0.15,
+      "yaw_deg": -6.0,
+      "frame_index": 0,
+      "image_path": "/home/uniubi/projects/forklift_sim/output/20260331_181513_init_frame_scan/frames/case_00_xm3p60_ym0p15_yawm6p00.png"
+    },
+    {
+      "case_id": 1,
+      "label": "case_01_xm3p60_ym0p15_yawp0p00",
+      "x_m": -3.6,
+      "y_m": -0.15,
+      "yaw_deg": 0.0,
+      "frame_index": 0,
+      "image_path": "/home/uniubi/projects/forklift_sim/output/20260331_181513_init_frame_scan/frames/case_01_xm3p60_ym0p15_yawp0p00.png"
+    },
+    {
+      "case_id": 2,
+      "label": "case_02_xm3p60_ym0p15_yawp6p00",
+      "x_m": -3.6,
+      "y_m": -0.15,
+      "yaw_deg": 6.0,
+      "frame_index": 0,
+      "image_path": "/home/uniubi/projects/forklift_sim/output/20260331_181513_init_frame_scan/frames/case_02_xm3p60_ym0p15_yawp6p00.png"
+    },
+    {
+      "case_id": 3,
+      "label": "case_03_xm3p60_yp0p00_yawm6p00",
+      "x_m": -3.6,
+      "y_m": 0.0,
+      "yaw_deg": -6.0,
+      "frame_index": 0,
+      "image_path": "/home/uniubi/projects/forklift_sim/output/20260331_181513_init_frame_scan/frames/case_03_xm3p60_yp0p00_yawm6p00.png"
+    },
+    {
+      "case_id": 4,
+      "label": "case_04_xm3p60_yp0p00_yawp0p00",
+      "x_m": -3.6,
+      "y_m": 0.0,
+      "yaw_deg": 0.0,
+      "frame_index": 0,
+      "image_path": "/home/uniubi/projects/forklift_sim/output/20260331_181513_init_frame_scan/frames/case_04_xm3p60_yp0p00_yawp0p00.png"
+    },
+    {
+      "case_id": 5,
+      "label": "case_05_xm3p60_yp0p00_yawp6p00",
+      "x_m": -3.6,
+      "y_m": 0.0,
+      "yaw_deg": 6.0,
+      "frame_index": 0,
+      "image_path": "/home/uniubi/projects/forklift_sim/output/20260331_181513_init_frame_scan/frames/case_05_xm3p60_yp0p00_yawp6p00.png"
+    },
+    {
+      "case_id": 6,
+      "label": "case_06_xm3p60_yp0p15_yawm6p00",
+      "x_m": -3.6,
+      "y_m": 0.15,
+      "yaw_deg": -6.0,
+      "frame_index": 0,
+      "image_path": "/home/uniubi/projects/forklift_sim/output/20260331_181513_init_frame_scan/frames/case_06_xm3p60_yp0p15_yawm6p00.png"
+    },
+    {
+      "case_id": 7,
+      "label": "case_07_xm3p60_yp0p15_yawp0p00",
+      "x_m": -3.6,
+      "y_m": 0.15,
+      "yaw_deg": 0.0,
+      "frame_index": 0,
+      "image_path": "/home/uniubi/projects/forklift_sim/output/20260331_181513_init_frame_scan/frames/case_07_xm3p60_yp0p15_yawp0p00.png"
+    },
+    {
+      "case_id": 8,
+      "label": "case_08_xm3p60_yp0p15_yawp6p00",
+      "x_m": -3.6,
+      "y_m": 0.15,
+      "yaw_deg": 6.0,
+      "frame_index": 0,
+      "image_path": "/home/uniubi/projects/forklift_sim/output/20260331_181513_init_frame_scan/frames/case_08_xm3p60_yp0p15_yawp6p00.png"
+    },
+    {
+      "case_id": 9,
+      "label": "case_09_xm3p53_ym0p15_yawm6p00",
+      "x_m": -3.5250000000000004,
+      "y_m": -0.15,
+      "yaw_deg": -6.0,
+      "frame_index": 0,
+      "image_path": "/home/uniubi/projects/forklift_sim/output/20260331_181513_init_frame_scan/frames/case_09_xm3p53_ym0p15_yawm6p00.png"
+    },
+    {
+      "case_id": 10,
+      "label": "case_10_xm3p53_ym0p15_yawp0p00",
+      "x_m": -3.5250000000000004,
+      "y_m": -0.15,
+      "yaw_deg": 0.0,
+      "frame_index": 0,
+      "image_path": "/home/uniubi/projects/forklift_sim/output/20260331_181513_init_frame_scan/frames/case_10_xm3p53_ym0p15_yawp0p00.png"
+    },
+    {
+      "case_id": 11,
+      "label": "case_11_xm3p53_ym0p15_yawp6p00",
+      "x_m": -3.5250000000000004,
+      "y_m": -0.15,
+      "yaw_deg": 6.0,
+      "frame_index": 0,
+      "image_path": "/home/uniubi/projects/forklift_sim/output/20260331_181513_init_frame_scan/frames/case_11_xm3p53_ym0p15_yawp6p00.png"
+    },
+    {
+      "case_id": 12,
+      "label": "case_12_xm3p53_yp0p00_yawm6p00",
+      "x_m": -3.5250000000000004,
+      "y_m": 0.0,
+      "yaw_deg": -6.0,
+      "frame_index": 0,
+      "image_path": "/home/uniubi/projects/forklift_sim/output/20260331_181513_init_frame_scan/frames/case_12_xm3p53_yp0p00_yawm6p00.png"
+    },
+    {
+      "case_id": 13,
+      "label": "case_13_xm3p53_yp0p00_yawp0p00",
+      "x_m": -3.5250000000000004,
+      "y_m": 0.0,
+      "yaw_deg": 0.0,
+      "frame_index": 0,
+      "image_path": "/home/uniubi/projects/forklift_sim/output/20260331_181513_init_frame_scan/frames/case_13_xm3p53_yp0p00_yawp0p00.png"
+    },
+    {
+      "case_id": 14,
+      "label": "case_14_xm3p53_yp0p00_yawp6p00",
+      "x_m": -3.5250000000000004,
+      "y_m": 0.0,
+      "yaw_deg": 6.0,
+      "frame_index": 0,
+      "image_path": "/home/uniubi/projects/forklift_sim/output/20260331_181513_init_frame_scan/frames/case_14_xm3p53_yp0p00_yawp6p00.png"
+    },
+    {
+      "case_id": 15,
+      "label": "case_15_xm3p53_yp0p15_yawm6p00",
+      "x_m": -3.5250000000000004,
+      "y_m": 0.15,
+      "yaw_deg": -6.0,
+      "frame_index": 0,
+      "image_path": "/home/uniubi/projects/forklift_sim/output/20260331_181513_init_frame_scan/frames/case_15_xm3p53_yp0p15_yawm6p00.png"
+    },
+    {
+      "case_id": 16,
+      "label": "case_16_xm3p53_yp0p15_yawp0p00",
+      "x_m": -3.5250000000000004,
+      "y_m": 0.15,
+      "yaw_deg": 0.0,
+      "frame_index": 0,
+      "image_path": "/home/uniubi/projects/forklift_sim/output/20260331_181513_init_frame_scan/frames/case_16_xm3p53_yp0p15_yawp0p00.png"
+    },
+    {
+      "case_id": 17,
+      "label": "case_17_xm3p53_yp0p15_yawp6p00",
+      "x_m": -3.5250000000000004,
+      "y_m": 0.15,
+      "yaw_deg": 6.0,
+      "frame_index": 0,
+      "image_path": "/home/uniubi/projects/forklift_sim/output/20260331_181513_init_frame_scan/frames/case_17_xm3p53_yp0p15_yawp6p00.png"
+    },
+    {
+      "case_id": 18,
+      "label": "case_18_xm3p45_ym0p15_yawm6p00",
+      "x_m": -3.45,
+      "y_m": -0.15,
+      "yaw_deg": -6.0,
+      "frame_index": 0,
+      "image_path": "/home/uniubi/projects/forklift_sim/output/20260331_181513_init_frame_scan/frames/case_18_xm3p45_ym0p15_yawm6p00.png"
+    },
+    {
+      "case_id": 19,
+      "label": "case_19_xm3p45_ym0p15_yawp0p00",
+      "x_m": -3.45,
+      "y_m": -0.15,
+      "yaw_deg": 0.0,
+      "frame_index": 0,
+      "image_path": "/home/uniubi/projects/forklift_sim/output/20260331_181513_init_frame_scan/frames/case_19_xm3p45_ym0p15_yawp0p00.png"
+    },
+    {
+      "case_id": 20,
+      "label": "case_20_xm3p45_ym0p15_yawp6p00",
+      "x_m": -3.45,
+      "y_m": -0.15,
+      "yaw_deg": 6.0,
+      "frame_index": 0,
+      "image_path": "/home/uniubi/projects/forklift_sim/output/20260331_181513_init_frame_scan/frames/case_20_xm3p45_ym0p15_yawp6p00.png"
+    },
+    {
+      "case_id": 21,
+      "label": "case_21_xm3p45_yp0p00_yawm6p00",
+      "x_m": -3.45,
+      "y_m": 0.0,
+      "yaw_deg": -6.0,
+      "frame_index": 0,
+      "image_path": "/home/uniubi/projects/forklift_sim/output/20260331_181513_init_frame_scan/frames/case_21_xm3p45_yp0p00_yawm6p00.png"
+    },
+    {
+      "case_id": 22,
+      "label": "case_22_xm3p45_yp0p00_yawp0p00",
+      "x_m": -3.45,
+      "y_m": 0.0,
+      "yaw_deg": 0.0,
+      "frame_index": 0,
+      "image_path": "/home/uniubi/projects/forklift_sim/output/20260331_181513_init_frame_scan/frames/case_22_xm3p45_yp0p00_yawp0p00.png"
+    },
+    {
+      "case_id": 23,
+      "label": "case_23_xm3p45_yp0p00_yawp6p00",
+      "x_m": -3.45,
+      "y_m": 0.0,
+      "yaw_deg": 6.0,
+      "frame_index": 0,
+      "image_path": "/home/uniubi/projects/forklift_sim/output/20260331_181513_init_frame_scan/frames/case_23_xm3p45_yp0p00_yawp6p00.png"
+    },
+    {
+      "case_id": 24,
+      "label": "case_24_xm3p45_yp0p15_yawm6p00",
+      "x_m": -3.45,
+      "y_m": 0.15,
+      "yaw_deg": -6.0,
+      "frame_index": 0,
+      "image_path": "/home/uniubi/projects/forklift_sim/output/20260331_181513_init_frame_scan/frames/case_24_xm3p45_yp0p15_yawm6p00.png"
+    },
+    {
+      "case_id": 25,
+      "label": "case_25_xm3p45_yp0p15_yawp0p00",
+      "x_m": -3.45,
+      "y_m": 0.15,
+      "yaw_deg": 0.0,
+      "frame_index": 0,
+      "image_path": "/home/uniubi/projects/forklift_sim/output/20260331_181513_init_frame_scan/frames/case_25_xm3p45_yp0p15_yawp0p00.png"
+    },
+    {
+      "case_id": 26,
+      "label": "case_26_xm3p45_yp0p15_yawp6p00",
+      "x_m": -3.45,
+      "y_m": 0.15,
+      "yaw_deg": 6.0,
+      "frame_index": 0,
+      "image_path": "/home/uniubi/projects/forklift_sim/output/20260331_181513_init_frame_scan/frames/case_26_xm3p45_yp0p15_yawp6p00.png"
+    }
+  ],
+  "contact_sheet": "/home/uniubi/projects/forklift_sim/output/20260331_181513_init_frame_scan/contact_sheet.png"
+}

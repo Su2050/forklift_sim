@@ -1,0 +1,81 @@
+{
+  "cfg_path": "/home/uniubi/projects/forklift_sim/forklift_pallet_insert_lift_project/isaaclab_patch/source/isaaclab_tasks/isaaclab_tasks/direct/forklift_pallet_insert_lift/env_cfg.py",
+  "run_timestamp": "20260331_173357",
+  "validation_scope": [
+    "traj_model=dubins_to_pre_straight",
+    "vehicle_reference_path_first",
+    "fork_center_path_mapped_from_vehicle_reference",
+    "proxy_level_check_not_full_dynamics",
+    "does_not_check_full_wheel_contact_or_chassis_sweep"
+  ],
+  "cfg_path_used": "/home/uniubi/projects/forklift_sim/forklift_pallet_insert_lift_project/isaaclab_patch/source/isaaclab_tasks/isaaclab_tasks/direct/forklift_pallet_insert_lift/env_cfg.py",
+  "parsed_cfg": {
+    "stage1_init_x_min_m": -3.6,
+    "stage1_init_x_max_m": -3.45,
+    "stage1_init_y_min_m": -0.15,
+    "stage1_init_y_max_m": 0.15,
+    "stage1_init_yaw_deg_min": -6.0,
+    "stage1_init_yaw_deg_max": 6.0,
+    "pallet_depth_m": 2.16,
+    "insert_fraction": 0.4,
+    "traj_model": "dubins_to_pre_straight",
+    "traj_pre_dist_m": 1.05,
+    "traj_vehicle_curve_min_span_m": 0.35,
+    "traj_vehicle_final_straight_min_m": 0.1,
+    "traj_rs_min_turn_radius_m": 2.34,
+    "traj_rs_sample_step_m": 0.05,
+    "traj_rs_forward_preferred_max_candidates": 8,
+    "traj_rs_forward_preferred_max_extra_length_m": 1.5,
+    "traj_rs_forward_preferred_max_reverse_frac": 0.35,
+    "traj_rs_forward_preferred_max_direction_switches": 1,
+    "traj_rs_forward_preferred_require_final_forward": true,
+    "traj_rs_forward_preferred_reverse_weight": 3.0,
+    "traj_rs_forward_preferred_switch_weight": 0.8,
+    "traj_rs_forward_preferred_terminal_reverse_penalty": 2.0,
+    "exp83_traj_goal_mode": "front",
+    "traj_num_samples": 21,
+    "fork_reach_m": 1.87
+  },
+  "pallet_xy": [
+    0.0,
+    0.0
+  ],
+  "pallet_yaw_deg": 0.0,
+  "grid_count_x": 1,
+  "grid_count_y": 1,
+  "grid_count_yaw": 1,
+  "overlay_path": "/home/uniubi/projects/forklift_sim/outputs/exp83_arc_preflight_v1_smoke2/overlay_all_cases_20260331_173357.png",
+  "num_cases": 1,
+  "num_entry_ok": 1,
+  "num_entry_bad": 0,
+  "path_mode_counts": {
+    "dubins_to_pre_straight_RSR": 1
+  },
+  "delta_s_min": -0.3569571928822932,
+  "delta_s_max": -0.3569571928822932,
+  "delta_s_mean": -0.3569571928822932,
+  "root_total_length_m_max": 15.242804619835875,
+  "root_total_length_m_mean": 15.242804619835875,
+  "root_y_abs_max_max": 4.66040658544613,
+  "root_heading_change_deg_max": 354.0,
+  "root_curvature_max_max": 0.5262428521523856,
+  "cases": [
+    {
+      "case_id": "c01_xm3p600_ym0p150_yawm6p000",
+      "root_x": -3.6,
+      "root_y": -0.15,
+      "yaw_deg": -6.0,
+      "s_start": -2.336957192882293,
+      "s_pre": -1.98,
+      "s_goal": -1.08,
+      "delta_s": -0.3569571928822932,
+      "y_start": -0.2827511483499199,
+      "root_total_length_m": 15.242804619835875,
+      "root_y_abs_max": 4.66040658544613,
+      "root_heading_change_deg": 354.0,
+      "root_curvature_max": 0.5262428521523856,
+      "entry_ok": true,
+      "path_mode": "dubins_to_pre_straight_RSR"
+    }
+  ]
+}

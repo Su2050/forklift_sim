@@ -1,0 +1,40 @@
+{
+  "tool": "run_exp83_arc_preflight_v1.py",
+  "traj_model": "dubins_to_pre_straight",
+  "cfg_path": "/home/uniubi/projects/forklift_sim/forklift_pallet_insert_lift_project/isaaclab_patch/source/isaaclab_tasks/isaaclab_tasks/direct/forklift_pallet_insert_lift/env_cfg.py",
+  "overlay_path": "/home/uniubi/projects/forklift_sim/outputs/exp83_arc_preflight_v1_smoke/overlay_all_cases_20260331_173318.png",
+  "curvature_limit_m_inv": 0.4273504273504274,
+  "num_cases": 1,
+  "num_entry_ok": 1,
+  "num_curvature_ok": 0,
+  "num_curvature_over_limit": 1,
+  "path_mode_counts": {
+    "dubins_to_pre_straight_RSR": 1
+  },
+  "root_total_length_m_max": 15.242804619835875,
+  "root_total_length_m_mean": 15.242804619835875,
+  "root_heading_change_deg_max": 164.47069007564937,
+  "root_curvature_max_max": 5.581009457095831,
+  "worst_cases": {
+    "longest_root_path": {
+      "case_id": "c01_xm3p600_ym0p150_yawm6p000",
+      "value": 15.242804619835875
+    },
+    "max_curvature": {
+      "case_id": "c01_xm3p600_ym0p150_yawm6p000",
+      "value": 5.581009457095831
+    },
+    "max_heading_change": {
+      "case_id": "c01_xm3p600_ym0p150_yawm6p000",
+      "value": 164.47069007564937
+    }
+  },
+  "curvature_over_limit_cases": [
+    {
+      "case_id": "c01_xm3p600_ym0p150_yawm6p000",
+      "root_curvature_max": 5.581009457095831,
+      "root_total_length_m": 15.242804619835875,
+      "path_mode": "dubins_to_pre_straight_RSR"
+    }
+  ]
+}

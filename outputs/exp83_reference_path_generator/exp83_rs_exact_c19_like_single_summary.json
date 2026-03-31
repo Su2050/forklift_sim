@@ -1,0 +1,50 @@
+{
+  "model": "rs_exact",
+  "goal_mode": "front_of_pallet",
+  "start": {
+    "x": -3.45,
+    "y": -0.15,
+    "yaw_deg": -6.000000000000001
+  },
+  "goal_pose": {
+    "x": -3.4,
+    "y": 0.0,
+    "yaw_deg": 0.0
+  },
+  "fork_goal_xy": [
+    -2.13,
+    0.0
+  ],
+  "min_turn_radius_m": 0.55,
+  "pallet_depth_m": 2.16,
+  "fork_reach_m": 1.87,
+  "goal_stop_buffer_m": 1.05,
+  "metadata": {
+    "planner": "rs_exact",
+    "segments": [
+      {
+        "type": "L",
+        "length_m": 0.5286758230149644
+      },
+      {
+        "type": "R",
+        "length_m": -0.09115294274028876
+      },
+      {
+        "type": "L",
+        "length_m": -0.5622329004394403
+      }
+    ],
+    "segment_count": 3,
+    "total_length_m": 1.1820616661946934,
+    "reverse_length_m": 0.653385843179729,
+    "sample_step_m": 0.03,
+    "pos_err": 6.280369834735101e-16,
+    "yaw_err_deg": 7.951386703658792e-16,
+    "fork_goal_xy": [
+      -2.13,
+      0.0
+    ],
+    "vehicle_to_fork_center_m": 1.27
+  }
+}
