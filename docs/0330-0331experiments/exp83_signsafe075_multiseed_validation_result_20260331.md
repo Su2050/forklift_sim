@@ -1,4 +1,4 @@
-# exp8.3 `sign-safe + stage1_steer_action_scale=0.75` 多 seed 验证结果（进行中）
+# exp8.3 `sign-safe + stage1_steer_action_scale=0.75` 多 seed 验证结果
 
 ## 1. 目的
 
@@ -145,45 +145,108 @@
 
 ### 4.3 seed44
 
-当前状态：
+训练 run:
 
-- 训练中
-- 仍将使用完全相同的 baseline、训练长度与统一 `3x3` eval
+- `IsaacLab/logs/rsl_rl/forklift_pallet_insert_lift/2026-03-31_13-45-39_exp83_stage1_signsafe_clip_seed44_iter50_256cam`
 
-待补内容：
+训练尾窗：
 
-- 训练尾窗
-- `3x3 normal`
-- `3x3 zero-steer`
-- 跨 seed 总结
+- `phase/frac_inserted = 0.5781`
+- `phase/frac_inserted_push_free = 0.0000`
+- `phase/frac_clean_insert_ready = 0.0000`
+- `phase/frac_hold_entry = 0.0156`
+- `phase/frac_success = 0.0000`
+- `phase/frac_dirty_insert = 0.5781`
+- `diag/preinsert_wrong_sign_clipped_frac = 0.0781`
+- `diag/pallet_disp_xy_mean = 0.2771`
+- `traj/d_traj_mean = 0.4102`
+- `traj/yaw_traj_deg_mean = 8.0373`
 
-## 5. 中期判断
+统一 `3x3` eval：
 
-在 `seed42` 和 `seed43` 上，当前 baseline 已经稳定呈现出同一个模式：
+- `normal = 2/9`
+- `zero-steer = 4/9`
+
+关键 summary：
+
+- `normal clean_insert_ready = 0/9`
+- `zero-steer clean_insert_ready = 2/9`
+- `normal dirty_insert = 3/9`
+- `zero-steer dirty_insert = 3/9`
+- `normal mean_abs_steer_applied = 0.4571`
+- `zero-steer mean_abs_steer_applied = 0.0000`
+
+逐点差异：
+
+- 在 `(yaw=-4°, y=0.00m)` 这一格，`normal` 打成了 `dirty success`，而 `zero-steer` 直接 timeout
+- 但 `zero-steer` 在 3 个关键格点明显更强：
+  - `(yaw=0°, y=0.00m)`：`zero-steer` 是 `clean success`，`normal` 直接失败
+  - `(yaw=0°, y=+0.10m)`：`zero-steer` 是 `dirty success`，`normal` 直接失败
+  - `(yaw=+4°, y=-0.10m)`：`zero-steer` 是 `clean success`，`normal` 直接失败
+
+结论：
+
+- `seed44` 没有复现 `seed42/43` 的“至少追平”
+- 在这条 seed 上，当前 baseline 仍然存在明显的 steering 伤害
+- 更直观地说，`sign-safe + 0.75` 把一部分坏 steering 压住了，但还没把 steering 约束到足够温和；一旦这条 seed 学出大幅单边转向，`normal` 仍会明显弱于 `zero-steer`
+
+## 5. 跨 seed 总结
+
+三条 seed 的统一结果如下：
+
+| seed | train tail `frac_inserted` | train tail `frac_dirty_insert` | `3x3 normal` | `3x3 zero` | 结论 |
+| --- | ---: | ---: | ---: | ---: | --- |
+| `42` | `0.0000` | `0.0000` | `5/9` | `5/9` | 追平 |
+| `43` | `0.0156` | `0.0000` | `5/9` | `5/9` | 追平，且 clean 质量更好 |
+| `44` | `0.5781` | `0.5781` | `2/9` | `4/9` | 明显落后 |
+
+这轮 multi-seed validation 给出的主结论非常明确：
+
+- `sign-safe + 0.75` 不是无效改动
+- 它确实能在部分 seed 上把 `normal` 从“落后”推到“追平”
+- 但它**还没有强到能跨 seed 稳定保证 `normal >= zero-steer`**
+
+因此，这条 baseline 目前最多只能算：
 
 - `normal` 不再输给 `zero-steer`
-- 但 `normal` 还没有稳定强于 `zero-steer`
+  只在一部分 seed 上成立
+- `normal` 还没有稳定强于 `zero-steer`
+  在 `seed44` 上明确不成立
 
 这意味着当前最合理的判断不是“steering 已经学出来了”，而是：
 
-> `sign-safe + 0.75` 已经基本压住了“错误 steering 伤害策略”这件事，但还没有把“正确 steering 带来额外收益”这件事充分做大。
+> `sign-safe + 0.75` 已经部分压住了“错误 steering 伤害策略”，但还没有把 steering 通道稳定约束到一个跨 seed 都安全的工作区间。
 
-换句话说，当前 baseline 更像是从“坏 steering”迈到了“无害 steering / 边界有益 steering”，还没有迈到“明显有益 steering”。
+换句话说，当前 baseline 更像是从“总是有害 steering”迈到了“有时无害、有时仍然有害 steering”，还没有迈到“稳定有益 steering”。
 
-## 6. seed44 之后的决策门槛
+## 6. 下一步怎么做
 
-seed44 补完后，按下面的分流继续：
+基于这轮控制变量结果，我认为下一步不应该直接做 `3 seeds x 100 iter`，也不应该继续沿 `sign-safe` 这条线只靠加时长硬推。更合理的是继续做单因素，但把变量收缩到“降低 stage1 steering 幅度的上界”：
 
-1. 如果 `3/3 seed` 都满足 `normal >= zero-steer`
-   - 说明当前 baseline 具有跨 seed 稳定性
-   - 下一步优先考虑在该 baseline 上继续压 dirty insert / 扩大 clean hold，而不是回去重做 sign 线
+1. 固定 `stage1_clip_wrong_sign_steer_enable = True`
+   - 不动 reward
+   - 不动 reset
+   - 不动 `256x256`
+   - 不动训练长度和 eval 网格
 
-2. 如果 `seed44` 回到 `normal < zero-steer`
-   - 说明当前 baseline 只是“部分 seed 有效”
-   - 下一步仍应沿 steering 入口继续改，而不是直接长训
+2. 只扫一个变量：`stage1_steer_action_scale`
+   - 当前证据表明：
+     - `1.0` 太大
+     - `0.75` 对 `seed42/43` 有帮助，但对 `seed44` 仍不够稳
+   - 所以下一步最自然的是补中间点：
+     - `0.60`
+     - `0.65`
+     - 或 `0.70`
 
-3. 如果 `seed44` 首次达到 `normal > zero-steer`
-   - 说明当前 baseline 已经接近可用
-   - 下一步可以考虑：
-     - `3 seeds x 100 iter`
-     - 或保持该 baseline，专门做 clean/dirty 分流改进
+3. 推荐的最小下一实验
+   - 先选一个中间点，例如 `stage1_steer_action_scale = 0.65`
+   - 只跑 `seed44 x 50 iter`
+   - 然后继续统一 `3x3 normal / zero-steer`
+   - 目标非常具体：
+     - `normal` 至少追平 `zero-steer`
+     - `mean_abs_steer_applied` 明显低于当前 `0.4571`
+     - `clean_insert_ready` 不再是 `0/9`
+
+4. 只有当 `seed44` 也能被拉回到 `normal >= zero-steer`
+   - 才值得把新 scale 再做成 `3 seeds x 50 iter`
+   - 再之后才值得谈更长训练或 clean/dirty 的下一层改动
