@@ -186,6 +186,99 @@ def _sample_rs_root_path_np(
     return root_pts, root_tangents
 
 
+def _rs_local_goal(start_xy: np.ndarray, start_yaw: float, goal_xy: np.ndarray, goal_yaw: float) -> tuple[float, float, float]:
+    dx = float(goal_xy[0] - start_xy[0])
+    dy = float(goal_xy[1] - start_xy[1])
+    cos_t = math.cos(float(start_yaw))
+    sin_t = math.sin(float(start_yaw))
+    lx = dx * cos_t + dy * sin_t
+    ly = -dx * sin_t + dy * cos_t
+    lphi = math.atan2(math.sin(float(goal_yaw - start_yaw)), math.cos(float(goal_yaw - start_yaw)))
+    return -lx, -ly, lphi
+
+
+def _rs_candidate_stats(segs: list[tuple[str, float]]) -> dict[str, float | int | bool]:
+    total = float(sum(abs(seg_len) for _, seg_len in segs))
+    reverse = float(sum(abs(seg_len) for _, seg_len in segs if seg_len < 0.0))
+    switches = sum(
+        (segs[i][1] >= 0.0) != (segs[i - 1][1] >= 0.0)
+        for i in range(1, len(segs))
+    )
+    final_forward = bool(segs and segs[-1][1] > 0.0)
+    return {
+        "total_length_m": total,
+        "reverse_length_m": reverse,
+        "reverse_frac": reverse / max(total, 1e-9),
+        "direction_switches": int(switches),
+        "final_forward": final_forward,
+    }
+
+
+def _choose_forward_preferred_rs_path(
+    *,
+    root_start_xy: np.ndarray,
+    root_start_yaw: float,
+    root_goal_xy: np.ndarray,
+    root_goal_yaw: float,
+    min_turn_radius_m: float,
+    sample_step_m: float,
+    num_samples: int,
+    max_candidates: int,
+    max_extra_length_m: float,
+    max_reverse_frac: float,
+    max_direction_switches: int,
+    require_final_forward: bool,
+    reverse_weight: float,
+    switch_weight: float,
+    terminal_reverse_penalty: float,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    x_rs_goal, y_rs_goal, th_rs_goal = _rs_local_goal(root_start_xy, root_start_yaw, root_goal_xy, root_goal_yaw)
+    all_segs = exact_rs.rs_all_paths(x_rs_goal, y_rs_goal, th_rs_goal, float(min_turn_radius_m))
+    if not all_segs:
+        return None
+
+    shortest_total = float(sum(abs(seg_len) for _, seg_len in all_segs[0]))
+    sampled_paths = exact_rs.rs_sample_path_multi(
+        float(root_start_xy[0]),
+        float(root_start_xy[1]),
+        float(root_start_yaw),
+        float(root_goal_xy[0]),
+        float(root_goal_xy[1]),
+        float(root_goal_yaw),
+        float(min_turn_radius_m),
+        step=float(sample_step_m),
+        max_paths=min(int(max_candidates), len(all_segs)),
+    )
+    candidates: list[tuple[float, np.ndarray, np.ndarray]] = []
+    for rank, (segs, world_pts) in enumerate(zip(all_segs[: len(sampled_paths)], sampled_paths), start=1):
+        stats = _rs_candidate_stats(segs)
+        if float(stats["total_length_m"]) > shortest_total + float(max_extra_length_m):
+            continue
+        if float(stats["reverse_frac"]) > float(max_reverse_frac):
+            continue
+        if int(stats["direction_switches"]) > int(max_direction_switches):
+            continue
+        if bool(require_final_forward) and not bool(stats["final_forward"]):
+            continue
+
+        score = (
+            float(stats["total_length_m"])
+            + float(reverse_weight) * float(stats["reverse_length_m"])
+            + float(switch_weight) * int(stats["direction_switches"])
+            + (0.0 if bool(stats["final_forward"]) else float(terminal_reverse_penalty))
+        )
+        xy = np.asarray([[pt[0], pt[1]] for pt in world_pts], dtype=np.float64)
+        yaw = np.asarray([pt[2] for pt in world_pts], dtype=np.float64)
+        root_pts, root_yaw = _resample_pose_sequence_np(xy, yaw, num_samples=num_samples)
+        root_tangents = np.stack([np.cos(root_yaw), np.sin(root_yaw)], axis=1)
+        candidates.append((score, root_pts, root_tangents))
+
+    if not candidates:
+        return None
+    best = min(candidates, key=lambda item: item[0])
+    return best[1], best[2]
+
+
 def _spawn_ground_plane_with_fallback(prim_path: str, cfg) -> None:
     """Spawn the default Isaac ground plane, but fall back to a local mesh floor on asset load glitches."""
     usd_path = str(getattr(cfg, "usd_path", "") or "")
@@ -1205,6 +1298,43 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
                     )
                 else:
                     root_pts_np, root_tangents_np = rs_payload
+            elif traj_model == "rs_forward_preferred":
+                rs_payload = _choose_forward_preferred_rs_path(
+                    root_start_xy=root_start_np[local_idx],
+                    root_start_yaw=float(yaw0_np[local_idx]),
+                    root_goal_xy=root_goal_np[local_idx],
+                    root_goal_yaw=float(pallet_yaw_np[local_idx]),
+                    min_turn_radius_m=float(self.cfg.traj_rs_min_turn_radius_m),
+                    sample_step_m=float(self.cfg.traj_rs_sample_step_m),
+                    num_samples=int(num_samples),
+                    max_candidates=int(self.cfg.traj_rs_forward_preferred_max_candidates),
+                    max_extra_length_m=float(self.cfg.traj_rs_forward_preferred_max_extra_length_m),
+                    max_reverse_frac=float(self.cfg.traj_rs_forward_preferred_max_reverse_frac),
+                    max_direction_switches=int(self.cfg.traj_rs_forward_preferred_max_direction_switches),
+                    require_final_forward=bool(self.cfg.traj_rs_forward_preferred_require_final_forward),
+                    reverse_weight=float(self.cfg.traj_rs_forward_preferred_reverse_weight),
+                    switch_weight=float(self.cfg.traj_rs_forward_preferred_switch_weight),
+                    terminal_reverse_penalty=float(self.cfg.traj_rs_forward_preferred_terminal_reverse_penalty),
+                )
+                if rs_payload is None:
+                    if not bool(getattr(self.cfg, "traj_rs_fail_fallback_to_root_path_first", True)):
+                        raise RuntimeError(
+                            f"Forward-preferred RS reference trajectory failed for env={int(env_ids[local_idx])}"
+                        )
+                    fallback_count += 1
+                    root_pts_np, root_tangents_np = _sample_root_path_first_np(
+                        root_start_xy=root_start_np[local_idx],
+                        root_start_yaw=float(yaw0_np[local_idx]),
+                        pallet_xy=pallet_pos_np[local_idx],
+                        pallet_yaw=float(pallet_yaw_np[local_idx]),
+                        root_goal_xy=root_goal_np[local_idx],
+                        traj_pre_dist_m=float(self.cfg.traj_pre_dist_m),
+                        curve_min_span_m=float(self.cfg.traj_vehicle_curve_min_span_m),
+                        final_straight_min_m=float(self.cfg.traj_vehicle_final_straight_min_m),
+                        num_samples=int(num_samples),
+                    )
+                else:
+                    root_pts_np, root_tangents_np = rs_payload
             elif traj_model == "root_path_first":
                 root_pts_np, root_tangents_np = _sample_root_path_first_np(
                     root_start_xy=root_start_np[local_idx],
@@ -1237,9 +1367,9 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self._traj_tangents[env_ids] = tangents_out
         self._traj_s_norm[env_ids] = s_norm_out
 
-        if traj_model == "rs_exact" and fallback_count > 0:
+        if traj_model in {"rs_exact", "rs_forward_preferred"} and fallback_count > 0:
             print(
-                "[traj_rs_exact] fallback_to_root_path_first="
+                f"[traj_{traj_model}] fallback_to_root_path_first="
                 f"{fallback_count}/{len(env_ids)} envs"
             )
 

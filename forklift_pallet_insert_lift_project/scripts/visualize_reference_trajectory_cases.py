@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+from datetime import datetime
 import json
 import math
 from dataclasses import asdict, dataclass
@@ -69,6 +70,14 @@ CFG_KEYS = {
     "traj_model",
     "traj_rs_min_turn_radius_m",
     "traj_rs_sample_step_m",
+    "traj_rs_forward_preferred_max_candidates",
+    "traj_rs_forward_preferred_max_extra_length_m",
+    "traj_rs_forward_preferred_max_reverse_frac",
+    "traj_rs_forward_preferred_max_direction_switches",
+    "traj_rs_forward_preferred_require_final_forward",
+    "traj_rs_forward_preferred_reverse_weight",
+    "traj_rs_forward_preferred_switch_weight",
+    "traj_rs_forward_preferred_terminal_reverse_penalty",
 }
 
 
@@ -87,6 +96,7 @@ class CaseMetrics:
     root_heading_change_deg: float
     root_curvature_max: float
     entry_ok: bool
+    path_mode: str
 
 
 def _literal_value(node: ast.AST):
@@ -219,6 +229,98 @@ def sample_rs_root_path_np(
     return root_pts, root_tangents
 
 
+def rs_local_goal(start_xy: np.ndarray, start_yaw: float, goal_xy: np.ndarray, goal_yaw: float) -> tuple[float, float, float]:
+    dx = float(goal_xy[0] - start_xy[0])
+    dy = float(goal_xy[1] - start_xy[1])
+    cos_t = math.cos(float(start_yaw))
+    sin_t = math.sin(float(start_yaw))
+    lx = dx * cos_t + dy * sin_t
+    ly = -dx * sin_t + dy * cos_t
+    lphi = math.atan2(math.sin(float(goal_yaw - start_yaw)), math.cos(float(goal_yaw - start_yaw)))
+    return -lx, -ly, lphi
+
+
+def rs_candidate_stats(segs: list[tuple[str, float]]) -> dict[str, float | int | bool]:
+    total = float(sum(abs(seg_len) for _, seg_len in segs))
+    reverse = float(sum(abs(seg_len) for _, seg_len in segs if seg_len < 0.0))
+    switches = sum(
+        (segs[i][1] >= 0.0) != (segs[i - 1][1] >= 0.0)
+        for i in range(1, len(segs))
+    )
+    final_forward = bool(segs and segs[-1][1] > 0.0)
+    return {
+        "total_length_m": total,
+        "reverse_length_m": reverse,
+        "reverse_frac": reverse / max(total, 1e-9),
+        "direction_switches": int(switches),
+        "final_forward": final_forward,
+    }
+
+
+def sample_forward_preferred_rs_root_path_np(
+    *,
+    root_start_xy: np.ndarray,
+    root_start_yaw: float,
+    root_goal_xy: np.ndarray,
+    root_goal_yaw: float,
+    min_turn_radius_m: float,
+    sample_step_m: float,
+    num_samples: int,
+    max_candidates: int,
+    max_extra_length_m: float,
+    max_reverse_frac: float,
+    max_direction_switches: int,
+    require_final_forward: bool,
+    reverse_weight: float,
+    switch_weight: float,
+    terminal_reverse_penalty: float,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    x_rs_goal, y_rs_goal, th_rs_goal = rs_local_goal(root_start_xy, root_start_yaw, root_goal_xy, root_goal_yaw)
+    all_segs = exact_rs.rs_all_paths(x_rs_goal, y_rs_goal, th_rs_goal, float(min_turn_radius_m))
+    if not all_segs:
+        return None
+
+    shortest_total = float(sum(abs(seg_len) for _, seg_len in all_segs[0]))
+    sampled_paths = exact_rs.rs_sample_path_multi(
+        float(root_start_xy[0]),
+        float(root_start_xy[1]),
+        float(root_start_yaw),
+        float(root_goal_xy[0]),
+        float(root_goal_xy[1]),
+        float(root_goal_yaw),
+        float(min_turn_radius_m),
+        step=float(sample_step_m),
+        max_paths=min(int(max_candidates), len(all_segs)),
+    )
+    candidates: list[tuple[float, np.ndarray, np.ndarray]] = []
+    for segs, world_pts in zip(all_segs[: len(sampled_paths)], sampled_paths, strict=True):
+        stats = rs_candidate_stats(segs)
+        if float(stats["total_length_m"]) > shortest_total + float(max_extra_length_m):
+            continue
+        if float(stats["reverse_frac"]) > float(max_reverse_frac):
+            continue
+        if int(stats["direction_switches"]) > int(max_direction_switches):
+            continue
+        if bool(require_final_forward) and not bool(stats["final_forward"]):
+            continue
+        score = (
+            float(stats["total_length_m"])
+            + float(reverse_weight) * float(stats["reverse_length_m"])
+            + float(switch_weight) * int(stats["direction_switches"])
+            + (0.0 if bool(stats["final_forward"]) else float(terminal_reverse_penalty))
+        )
+        xy = np.asarray([[pt[0], pt[1]] for pt in world_pts], dtype=np.float64)
+        yaw = np.asarray([pt[2] for pt in world_pts], dtype=np.float64)
+        root_pts, root_yaw = resample_pose_sequence_np(xy, yaw, num_samples=num_samples)
+        root_tangents = np.stack([np.cos(root_yaw), np.sin(root_yaw)], axis=1)
+        candidates.append((score, root_pts, root_tangents))
+
+    if not candidates:
+        return None
+    best = min(candidates, key=lambda item: item[0])
+    return best[1], best[2]
+
+
 def build_reference_trajectory(
     *,
     root_xy: np.ndarray,
@@ -236,7 +338,15 @@ def build_reference_trajectory(
     traj_model: str,
     traj_rs_min_turn_radius_m: float,
     traj_rs_sample_step_m: float,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    traj_rs_forward_preferred_max_candidates: int,
+    traj_rs_forward_preferred_max_extra_length_m: float,
+    traj_rs_forward_preferred_max_reverse_frac: float,
+    traj_rs_forward_preferred_max_direction_switches: int,
+    traj_rs_forward_preferred_require_final_forward: bool,
+    traj_rs_forward_preferred_reverse_weight: float,
+    traj_rs_forward_preferred_switch_weight: float,
+    traj_rs_forward_preferred_terminal_reverse_penalty: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, str]:
     yaw = math.radians(yaw_deg)
     pallet_yaw = math.radians(pallet_yaw_deg)
 
@@ -262,6 +372,7 @@ def build_reference_trajectory(
     root_pre = pallet_xy + root_pre_s * u_in
     p_pre = root_pre + root_to_fc * u_in
 
+    path_mode = traj_model
     if traj_model == "rs_exact":
         root_path, root_tangents = sample_rs_root_path_np(
             root_start_xy=root_xy,
@@ -272,7 +383,32 @@ def build_reference_trajectory(
             sample_step_m=traj_rs_sample_step_m,
             num_samples=traj_num_samples,
         )
-    elif traj_model == "root_path_first":
+    elif traj_model == "rs_forward_preferred":
+        rs_payload = sample_forward_preferred_rs_root_path_np(
+            root_start_xy=root_xy,
+            root_start_yaw=yaw,
+            root_goal_xy=root_goal,
+            root_goal_yaw=pallet_yaw,
+            min_turn_radius_m=traj_rs_min_turn_radius_m,
+            sample_step_m=traj_rs_sample_step_m,
+            num_samples=traj_num_samples,
+            max_candidates=traj_rs_forward_preferred_max_candidates,
+            max_extra_length_m=traj_rs_forward_preferred_max_extra_length_m,
+            max_reverse_frac=traj_rs_forward_preferred_max_reverse_frac,
+            max_direction_switches=traj_rs_forward_preferred_max_direction_switches,
+            require_final_forward=traj_rs_forward_preferred_require_final_forward,
+            reverse_weight=traj_rs_forward_preferred_reverse_weight,
+            switch_weight=traj_rs_forward_preferred_switch_weight,
+            terminal_reverse_penalty=traj_rs_forward_preferred_terminal_reverse_penalty,
+        )
+        if rs_payload is None:
+            path_mode = "rs_forward_preferred_fallback_root_path_first"
+        else:
+            root_path, root_tangents = rs_payload
+            path_mode = "rs_forward_preferred"
+    if path_mode == "rs_forward_preferred_fallback_root_path_first":
+        traj_model = "root_path_first"
+    if traj_model == "root_path_first":
         num_curve = int(traj_num_samples * 0.7)
         num_line = traj_num_samples - num_curve
 
@@ -304,12 +440,12 @@ def build_reference_trajectory(
         else:
             root_path = root_pts_curve
             root_tangents = root_curve_tangents
-    else:
+    elif traj_model != "root_path_first":
         raise ValueError(f"unsupported traj_model: {traj_model}")
 
     pts = root_path + root_to_fc * root_tangents
     tangents = np.copy(root_tangents)
-    return fork_center_xy, p_pre, p_goal, pts, tangents, root_path
+    return fork_center_xy, p_pre, p_goal, pts, tangents, root_path, path_mode
 
 
 def project_axis(point_xy: np.ndarray, pallet_xy: np.ndarray, pallet_yaw_deg: float) -> tuple[float, float]:
@@ -407,6 +543,7 @@ def draw_case(
         "",
         "Scope",
         f"traj_model = {traj_model}",
+        f"path_mode = {case.path_mode}",
         "vehicle-reference-first",
         "fork_center path is mapped from vehicle path",
         "still proxy-level, not full dynamics",
@@ -517,6 +654,10 @@ def format_case_id(index: int, root_x: float, root_y: float, yaw_deg: float) -> 
     return f"c{index:02d}_x{token(root_x)}_y{token(root_y)}_yaw{token(yaw_deg, 10)}"
 
 
+def stamped_name(base_name: str, run_timestamp: str, suffix: str) -> str:
+    return f"{base_name}_{run_timestamp}{suffix}"
+
+
 def build_case_grid(
     cfg: dict[str, object],
     pallet_xy: np.ndarray,
@@ -553,7 +694,7 @@ def build_case_grid(
         for root_y in y_vals:
             for yaw_deg in yaw_vals:
                 root_xy = np.array([root_x, root_y], dtype=np.float64)
-                fork_center_xy, p_pre, p_goal, pts, tangents, root_path = build_reference_trajectory(
+                fork_center_xy, p_pre, p_goal, pts, tangents, root_path, path_mode = build_reference_trajectory(
                     root_xy=root_xy,
                     yaw_deg=yaw_deg,
                     pallet_xy=pallet_xy,
@@ -569,6 +710,14 @@ def build_case_grid(
                     traj_model=str(cfg.get("traj_model", "root_path_first")),
                     traj_rs_min_turn_radius_m=float(cfg.get("traj_rs_min_turn_radius_m", 2.34)),
                     traj_rs_sample_step_m=float(cfg.get("traj_rs_sample_step_m", 0.05)),
+                    traj_rs_forward_preferred_max_candidates=int(cfg.get("traj_rs_forward_preferred_max_candidates", 8)),
+                    traj_rs_forward_preferred_max_extra_length_m=float(cfg.get("traj_rs_forward_preferred_max_extra_length_m", 1.5)),
+                    traj_rs_forward_preferred_max_reverse_frac=float(cfg.get("traj_rs_forward_preferred_max_reverse_frac", 0.35)),
+                    traj_rs_forward_preferred_max_direction_switches=int(cfg.get("traj_rs_forward_preferred_max_direction_switches", 1)),
+                    traj_rs_forward_preferred_require_final_forward=bool(cfg.get("traj_rs_forward_preferred_require_final_forward", True)),
+                    traj_rs_forward_preferred_reverse_weight=float(cfg.get("traj_rs_forward_preferred_reverse_weight", 3.0)),
+                    traj_rs_forward_preferred_switch_weight=float(cfg.get("traj_rs_forward_preferred_switch_weight", 0.8)),
+                    traj_rs_forward_preferred_terminal_reverse_penalty=float(cfg.get("traj_rs_forward_preferred_terminal_reverse_penalty", 2.0)),
                 )
                 s_start, y_start = project_axis(fork_center_xy, pallet_xy, pallet_yaw_deg)
                 s_pre, _ = project_axis(p_pre, pallet_xy, pallet_yaw_deg)
@@ -595,6 +744,7 @@ def build_case_grid(
                     root_heading_change_deg=root_heading_change_deg,
                     root_curvature_max=root_curvature_max,
                     entry_ok=(s_start < s_pre < s_goal),
+                    path_mode=path_mode,
                 )
                 cases.append(case)
                 payloads.append((root_xy, fork_center_xy, p_pre, p_goal, pts, tangents, root_path))
@@ -620,7 +770,7 @@ def main():
     parser.add_argument(
         "--traj-model",
         type=str,
-        choices=["root_path_first", "rs_exact"],
+        choices=["root_path_first", "rs_exact", "rs_forward_preferred"],
         default=None,
         help="Override traj_model from cfg for auditing.",
     )
@@ -629,6 +779,12 @@ def main():
         type=Path,
         default=CFG_PATH,
         help="Env cfg path to read. Defaults to the project patch env_cfg.py.",
+    )
+    parser.add_argument(
+        "--timestamp-tag",
+        type=str,
+        default=None,
+        help="Optional run timestamp tag. Defaults to current local time YYYYMMDD_HHMMSS.",
     )
     args = parser.parse_args()
 
@@ -644,6 +800,10 @@ def main():
     else:
         out_dir = args.output_dir
     out_dir.mkdir(parents=True, exist_ok=True)
+    run_timestamp = args.timestamp_tag or datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    overlay_path = out_dir / stamped_name("overlay_all_cases", run_timestamp, ".png")
+    manifest_path = out_dir / stamped_name("reference_trajectory_stage1_manifest", run_timestamp, ".json")
 
     cases, payloads = build_case_grid(
         cfg,
@@ -656,7 +816,7 @@ def main():
     for case, payload in zip(cases, payloads, strict=True):
         root_xy, fork_center_xy, p_pre, p_goal, pts, _, root_path = payload
         draw_case(
-            out_path=out_dir / f"{case.case_id}.png",
+            out_path=out_dir / stamped_name(case.case_id, run_timestamp, ".png"),
             case=case,
             root_xy=root_xy,
             fork_center_xy=fork_center_xy,
@@ -671,7 +831,7 @@ def main():
         )
 
     draw_overlay(
-        out_path=out_dir / "overlay_all_cases.png",
+        out_path=overlay_path,
         cases=cases,
         overlay_payloads=payloads,
         pallet_xy=pallet_xy,
@@ -681,6 +841,7 @@ def main():
 
     summary = {
         "cfg_path": str(args.cfg_path),
+        "run_timestamp": run_timestamp,
         "validation_scope": [
             f"traj_model={traj_model}",
             "vehicle_reference_path_first",
@@ -695,9 +856,14 @@ def main():
         "grid_count_x": int(args.grid_count_x),
         "grid_count_y": int(args.grid_count_y),
         "grid_count_yaw": int(args.grid_count_yaw),
+        "overlay_path": str(overlay_path),
         "num_cases": len(cases),
         "num_entry_ok": sum(1 for case in cases if case.entry_ok),
         "num_entry_bad": sum(1 for case in cases if not case.entry_ok),
+        "path_mode_counts": {
+            mode: sum(1 for case in cases if case.path_mode == mode)
+            for mode in sorted({case.path_mode for case in cases})
+        },
         "delta_s_min": min(case.delta_s for case in cases),
         "delta_s_max": max(case.delta_s for case in cases),
         "delta_s_mean": sum(case.delta_s for case in cases) / len(cases),
@@ -706,11 +872,11 @@ def main():
         "root_curvature_max_max": max(case.root_curvature_max for case in cases),
         "cases": [asdict(case) for case in cases],
     }
-    manifest_path = out_dir / "reference_trajectory_stage1_manifest.json"
     manifest_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
 
+    print(f"[traj_viz] run_timestamp: {run_timestamp}")
     print(f"[traj_viz] wrote {len(cases)} case PNGs to: {out_dir}")
-    print(f"[traj_viz] overlay: {out_dir / 'overlay_all_cases.png'}")
+    print(f"[traj_viz] overlay: {overlay_path}")
     print(f"[traj_viz] manifest: {manifest_path}")
     print(
         "[traj_viz] delta_s stats: "

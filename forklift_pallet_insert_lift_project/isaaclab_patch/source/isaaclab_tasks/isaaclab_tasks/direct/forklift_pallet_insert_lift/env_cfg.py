@@ -240,6 +240,7 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     # 参考轨迹生成模型：
     # - root_path_first: vehicle/root cubic + final straight
     # - rs_exact: exact Reeds-Shepp over vehicle/root pose, then map to fork-center
+    # - rs_forward_preferred: exact RS candidate set + forward-preferred selection
     # 默认保留 root_path_first，RS 通过 override 开启；当前 near-field 审计显示
     # 在 ±0.15m / ±6deg 课程上直接切成 shortest-RS 还不够稳定。
     traj_model: str = "root_path_first"
@@ -251,6 +252,14 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     traj_rs_min_turn_radius_m: float = 2.34
     traj_rs_sample_step_m: float = 0.05
     traj_rs_fail_fallback_to_root_path_first: bool = True
+    traj_rs_forward_preferred_max_candidates: int = 8
+    traj_rs_forward_preferred_max_extra_length_m: float = 1.50
+    traj_rs_forward_preferred_max_reverse_frac: float = 0.35
+    traj_rs_forward_preferred_max_direction_switches: int = 1
+    traj_rs_forward_preferred_require_final_forward: bool = True
+    traj_rs_forward_preferred_reverse_weight: float = 3.0
+    traj_rs_forward_preferred_switch_weight: float = 0.8
+    traj_rs_forward_preferred_terminal_reverse_penalty: float = 2.0
     # Exp8.3 第一轮主矩阵：
     # - front: 轨迹终点停在托盘前沿中心（B0′ 基线）
     # - success_center: 轨迹 terminal geometry package 平移到 success 等效 fork_center 深度（G1）
