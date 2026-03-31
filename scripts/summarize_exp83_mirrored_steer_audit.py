@@ -24,6 +24,10 @@ class ModeStats:
     ever_inserted: bool
     ever_hold_entry: bool
     ever_clean_insert_ready: bool
+    first_target_cmd: float
+    first_raw_steer: float
+    early_mean_target_cmd: float
+    early_mean_raw_steer: float
     mean_target_cmd: float
     mean_raw_steer: float
     mean_applied_steer: float
@@ -52,14 +56,18 @@ def _sign_of(value: float) -> int:
     return 0
 
 
-def _mean_from_csv(csv_path: Path, key: str) -> float:
-    values: list[float] = []
+def _rows_from_csv(csv_path: Path) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
     with csv_path.open("r", newline="") as f:
         reader = csv.DictReader(f)
         for row in reader:
-            if int(row["step"]) <= 0:
-                continue
-            values.append(float(row[key]))
+            if int(row["step"]) > 0:
+                rows.append(row)
+    return rows
+
+
+def _mean_from_rows(rows: list[dict[str, str]], key: str) -> float:
+    values = [float(row[key]) for row in rows]
     return float(sum(values) / len(values)) if values else 0.0
 
 
@@ -69,13 +77,20 @@ def _load_case(summary_path: Path) -> CaseStats:
     def _mode_stats(mode_key: str) -> tuple[ModeStats, str]:
         mode = data["modes"][mode_key]
         csv_path = Path(mode["csv_path"])
-        mean_raw_steer = _mean_from_csv(csv_path, "raw_steer")
-        mean_applied_steer = _mean_from_csv(csv_path, "applied_steer")
+        rows = _rows_from_csv(csv_path)
+        early_rows = rows[: min(20, len(rows))]
+        first_row = rows[0] if rows else {}
+        mean_raw_steer = _mean_from_rows(rows, "raw_steer")
+        mean_applied_steer = _mean_from_rows(rows, "applied_steer")
         stats = ModeStats(
             success=bool(mode["success"]),
             ever_inserted=bool(mode["ever_inserted"]),
             ever_hold_entry=bool(mode["ever_hold_entry"]),
             ever_clean_insert_ready=bool(mode["ever_clean_insert_ready"]),
+            first_target_cmd=float(first_row["steer_target_cmd"]) if first_row else 0.0,
+            first_raw_steer=float(first_row["raw_steer"]) if first_row else 0.0,
+            early_mean_target_cmd=_mean_from_rows(early_rows, "steer_target_cmd"),
+            early_mean_raw_steer=_mean_from_rows(early_rows, "raw_steer"),
             mean_target_cmd=float(mode["mean_steer_target_cmd"]),
             mean_raw_steer=mean_raw_steer,
             mean_applied_steer=mean_applied_steer,
@@ -121,6 +136,14 @@ def _format_sign(sign_value: int) -> str:
 
 
 def _build_pair_report(a: CaseStats, b: CaseStats) -> dict[str, object]:
+    a_first_target_sign = _sign_of(a.normal.first_target_cmd)
+    b_first_target_sign = _sign_of(b.normal.first_target_cmd)
+    a_first_raw_sign = _sign_of(a.normal.first_raw_steer)
+    b_first_raw_sign = _sign_of(b.normal.first_raw_steer)
+    a_early_target_sign = _sign_of(a.normal.early_mean_target_cmd)
+    b_early_target_sign = _sign_of(b.normal.early_mean_target_cmd)
+    a_early_raw_sign = _sign_of(a.normal.early_mean_raw_steer)
+    b_early_raw_sign = _sign_of(b.normal.early_mean_raw_steer)
     a_target_sign = _sign_of(a.normal.mean_target_cmd)
     b_target_sign = _sign_of(b.normal.mean_target_cmd)
     a_raw_sign = _sign_of(a.normal.mean_raw_steer)
@@ -134,9 +157,17 @@ def _build_pair_report(a: CaseStats, b: CaseStats) -> dict[str, object]:
             "yaw_deg": a.yaw_deg,
             "normal_success": a.normal.success,
             "zero_success": a.zero_steer.success,
+            "normal_first_target_cmd": a.normal.first_target_cmd,
+            "normal_first_raw_steer": a.normal.first_raw_steer,
+            "normal_early_mean_target_cmd": a.normal.early_mean_target_cmd,
+            "normal_early_mean_raw_steer": a.normal.early_mean_raw_steer,
             "normal_mean_target_cmd": a.normal.mean_target_cmd,
             "normal_mean_raw_steer": a.normal.mean_raw_steer,
             "normal_mean_applied_steer": a.normal.mean_applied_steer,
+            "normal_first_target_sign": _format_sign(a_first_target_sign),
+            "normal_first_raw_sign": _format_sign(a_first_raw_sign),
+            "normal_early_target_sign": _format_sign(a_early_target_sign),
+            "normal_early_raw_sign": _format_sign(a_early_raw_sign),
             "normal_target_sign": _format_sign(a_target_sign),
             "normal_raw_sign": _format_sign(a_raw_sign),
             "normal_wrong_sign_frac": a.normal.steer_wrong_sign_frac,
@@ -147,14 +178,32 @@ def _build_pair_report(a: CaseStats, b: CaseStats) -> dict[str, object]:
             "yaw_deg": b.yaw_deg,
             "normal_success": b.normal.success,
             "zero_success": b.zero_steer.success,
+            "normal_first_target_cmd": b.normal.first_target_cmd,
+            "normal_first_raw_steer": b.normal.first_raw_steer,
+            "normal_early_mean_target_cmd": b.normal.early_mean_target_cmd,
+            "normal_early_mean_raw_steer": b.normal.early_mean_raw_steer,
             "normal_mean_target_cmd": b.normal.mean_target_cmd,
             "normal_mean_raw_steer": b.normal.mean_raw_steer,
             "normal_mean_applied_steer": b.normal.mean_applied_steer,
+            "normal_first_target_sign": _format_sign(b_first_target_sign),
+            "normal_first_raw_sign": _format_sign(b_first_raw_sign),
+            "normal_early_target_sign": _format_sign(b_early_target_sign),
+            "normal_early_raw_sign": _format_sign(b_early_raw_sign),
             "normal_target_sign": _format_sign(b_target_sign),
             "normal_raw_sign": _format_sign(b_raw_sign),
             "normal_wrong_sign_frac": b.normal.steer_wrong_sign_frac,
         },
         "mirror_checks": {
+            "first_target_flips_sign": a_first_target_sign == -b_first_target_sign and a_first_target_sign != 0,
+            "first_raw_flips_sign": a_first_raw_sign == -b_first_raw_sign and a_first_raw_sign != 0,
+            "early_target_flips_sign": a_early_target_sign == -b_early_target_sign and a_early_target_sign != 0,
+            "early_raw_flips_sign": a_early_raw_sign == -b_early_raw_sign and a_early_raw_sign != 0,
+            "first_raw_matches_target_both_cases": (
+                a_first_raw_sign == a_first_target_sign and b_first_raw_sign == b_first_target_sign
+            ),
+            "early_raw_matches_target_both_cases": (
+                a_early_raw_sign == a_early_target_sign and b_early_raw_sign == b_early_target_sign
+            ),
             "target_flips_sign": a_target_sign == -b_target_sign and a_target_sign != 0,
             "raw_flips_sign": a_raw_sign == -b_raw_sign and a_raw_sign != 0,
             "raw_matches_target_both_cases": a_raw_sign == a_target_sign and b_raw_sign == b_target_sign,
@@ -174,11 +223,19 @@ def _write_markdown(report_path: Path, label_prefix: str, pairs: list[dict[str, 
     lines.append("")
 
     total_pairs = len(pairs)
+    first_target_flip_pairs = sum(bool(p["mirror_checks"]["first_target_flips_sign"]) for p in pairs)
+    first_raw_flip_pairs = sum(bool(p["mirror_checks"]["first_raw_flips_sign"]) for p in pairs)
+    early_target_flip_pairs = sum(bool(p["mirror_checks"]["early_target_flips_sign"]) for p in pairs)
+    early_raw_flip_pairs = sum(bool(p["mirror_checks"]["early_raw_flips_sign"]) for p in pairs)
     target_flip_pairs = sum(bool(p["mirror_checks"]["target_flips_sign"]) for p in pairs)
     raw_flip_pairs = sum(bool(p["mirror_checks"]["raw_flips_sign"]) for p in pairs)
     raw_match_pairs = sum(bool(p["mirror_checks"]["raw_matches_target_both_cases"]) for p in pairs)
 
     lines.append(f"- mirrored pairs analyzed: {total_pairs}")
+    lines.append(f"- pairs where first-step env target flips sign: {first_target_flip_pairs}/{total_pairs}")
+    lines.append(f"- pairs where first-step raw steer flips sign: {first_raw_flip_pairs}/{total_pairs}")
+    lines.append(f"- pairs where early-window env target flips sign: {early_target_flip_pairs}/{total_pairs}")
+    lines.append(f"- pairs where early-window raw steer flips sign: {early_raw_flip_pairs}/{total_pairs}")
     lines.append(f"- pairs where env target flips sign: {target_flip_pairs}/{total_pairs}")
     lines.append(f"- pairs where policy raw steer flips sign: {raw_flip_pairs}/{total_pairs}")
     lines.append(f"- pairs where raw steer matches target sign in both cases: {raw_match_pairs}/{total_pairs}")
@@ -193,20 +250,29 @@ def _write_markdown(report_path: Path, label_prefix: str, pairs: list[dict[str, 
         checks = pair["mirror_checks"]
         lines.append(
             f"- `|y|={key['abs_y_m']:.3f}, |yaw|={key['abs_yaw_deg']:.1f}`: "
-            f"target flip={checks['target_flips_sign']}, raw flip={checks['raw_flips_sign']}, "
-            f"raw matches both={checks['raw_matches_target_both_cases']}"
+            f"first target flip={checks['first_target_flips_sign']}, first raw flip={checks['first_raw_flips_sign']}, "
+            f"early target flip={checks['early_target_flips_sign']}, early raw flip={checks['early_raw_flips_sign']}, "
+            f"full target flip={checks['target_flips_sign']}, full raw flip={checks['raw_flips_sign']}"
         )
         lines.append(
             f"  case A `(y={a['y_m']:+.3f}, yaw={a['yaw_deg']:+.1f})`: "
-            f"target={a['normal_target_sign']} ({a['normal_mean_target_cmd']:+.3f}), "
-            f"raw={a['normal_raw_sign']} ({a['normal_mean_raw_steer']:+.3f}), "
+            f"first target={a['normal_first_target_sign']} ({a['normal_first_target_cmd']:+.3f}), "
+            f"first raw={a['normal_first_raw_sign']} ({a['normal_first_raw_steer']:+.3f}), "
+            f"early target={a['normal_early_target_sign']} ({a['normal_early_mean_target_cmd']:+.3f}), "
+            f"early raw={a['normal_early_raw_sign']} ({a['normal_early_mean_raw_steer']:+.3f}), "
+            f"full target={a['normal_target_sign']} ({a['normal_mean_target_cmd']:+.3f}), "
+            f"full raw={a['normal_raw_sign']} ({a['normal_mean_raw_steer']:+.3f}), "
             f"normal_success={a['normal_success']}, zero_success={a['zero_success']}, "
             f"wrong_sign_frac={a['normal_wrong_sign_frac']:.3f}"
         )
         lines.append(
             f"  case B `(y={b['y_m']:+.3f}, yaw={b['yaw_deg']:+.1f})`: "
-            f"target={b['normal_target_sign']} ({b['normal_mean_target_cmd']:+.3f}), "
-            f"raw={b['normal_raw_sign']} ({b['normal_mean_raw_steer']:+.3f}), "
+            f"first target={b['normal_first_target_sign']} ({b['normal_first_target_cmd']:+.3f}), "
+            f"first raw={b['normal_first_raw_sign']} ({b['normal_first_raw_steer']:+.3f}), "
+            f"early target={b['normal_early_target_sign']} ({b['normal_early_mean_target_cmd']:+.3f}), "
+            f"early raw={b['normal_early_raw_sign']} ({b['normal_early_mean_raw_steer']:+.3f}), "
+            f"full target={b['normal_target_sign']} ({b['normal_mean_target_cmd']:+.3f}), "
+            f"full raw={b['normal_raw_sign']} ({b['normal_mean_raw_steer']:+.3f}), "
             f"normal_success={b['normal_success']}, zero_success={b['zero_success']}, "
             f"wrong_sign_frac={b['normal_wrong_sign_frac']:.3f}"
         )
@@ -264,6 +330,10 @@ def main() -> None:
                 "label": case.label,
                 "y_m": case.y_m,
                 "yaw_deg": case.yaw_deg,
+                "normal_first_target_cmd": case.normal.first_target_cmd,
+                "normal_first_raw_steer": case.normal.first_raw_steer,
+                "normal_early_mean_target_cmd": case.normal.early_mean_target_cmd,
+                "normal_early_mean_raw_steer": case.normal.early_mean_raw_steer,
                 "normal_mean_target_cmd": case.normal.mean_target_cmd,
                 "normal_mean_raw_steer": case.normal.mean_raw_steer,
                 "normal_success": case.normal.success,
