@@ -133,6 +133,31 @@
 - steering 并不是完全没用
 - 但当前幅度让它在近场更容易把车打出 clean corridor
 
+### 4.4 但 `half-steer` 还没有解决“steering 符号偏置”
+
+逐点看 9 个格点，`half-steer` 的表现有一个更细的特征：
+
+- 对于 `yaw=+4°` 这一侧，`half-steer` 明显优于 `normal`
+- 对于中心附近点，`half-steer` 也能拿到 clean success
+- 但对于 `yaw=-4°, y=+0.10` 这个点，`zero-steer` 能 clean success，而 `half-steer` 仍然失败
+
+更关键的是：
+
+- `normal` 的 `mean_steer_applied` 在 9 个点上全部是正值
+- `half-steer` 的 `mean_steer_applied` 在 9 个点上也全部是正值，只是幅度减半
+
+这说明：
+
+> `half-steer` 并没有真正解决“steering 会不会按错位方向翻转”这个问题；它更像是把原本过大的单边 steering 偏置，压到了一个不那么伤的范围。
+
+所以当前最准确的理解不是：
+
+- “问题已经解决，只差训练时间”
+
+而是：
+
+- “幅度问题被部分识别出来了，但符号/时机问题仍在”
+
 ## 5. 由此产生的单因素决策
 
 ### 5.1 已执行的改动
@@ -190,6 +215,16 @@
 
 - `0.35`
 - `0.65`
+
+但这一步的目的要非常明确：
+
+- 不是盲目继续扫
+- 而是验证：当前主要是不是仍然以 gain 为主因
+
+如果 `0.35 / 0.65` 都不能把 `normal` 拉到明显不弱于 `zero-steer`，就要停止继续扫 gain，转去新的单因素问题：
+
+- signed steering bias
+- 或 steering 生效时机
 
 ### 6.3 当前明确不做
 
