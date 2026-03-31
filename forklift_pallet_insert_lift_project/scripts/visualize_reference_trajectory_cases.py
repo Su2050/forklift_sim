@@ -20,6 +20,7 @@ import json
 import math
 from dataclasses import asdict, dataclass
 from pathlib import Path
+import sys
 
 import matplotlib
 
@@ -30,15 +31,23 @@ import numpy as np
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = Path(__file__).resolve().parents[2]
-LEGACY_CFG_PATH = (
+PATCH_CFG_PATH = (
     PROJECT_ROOT
     / "isaaclab_patch/source/isaaclab_tasks/isaaclab_tasks/direct/forklift_pallet_insert_lift/env_cfg.py"
 )
-CURRENT_CFG_PATH = (
+INSTALLED_CFG_PATH = (
     REPO_ROOT
     / "IsaacLab/source/isaaclab_tasks/isaaclab_tasks/direct/forklift_pallet_insert_lift/env_cfg.py"
 )
-CFG_PATH = CURRENT_CFG_PATH if CURRENT_CFG_PATH.exists() else LEGACY_CFG_PATH
+CFG_PATH = PATCH_CFG_PATH
+
+RS_DIR = (
+    PROJECT_ROOT
+    / "isaaclab_patch/source/isaaclab_tasks/isaaclab_tasks/direct/forklift_pallet_insert_lift/rs"
+)
+if str(RS_DIR) not in sys.path:
+    sys.path.append(str(RS_DIR))
+import rs as exact_rs
 
 FORK_CENTER_BACKOFF_M = 0.6
 
@@ -57,6 +66,9 @@ CFG_KEYS = {
     "traj_num_samples",
     "fork_reach_m",
     "exp83_traj_goal_mode",
+    "traj_model",
+    "traj_rs_min_turn_radius_m",
+    "traj_rs_sample_step_m",
 }
 
 
@@ -151,6 +163,62 @@ def compute_path_heading_curvature(
     return heading_change_deg, curvature_max
 
 
+def wrap_angle_np(theta: np.ndarray) -> np.ndarray:
+    return np.arctan2(np.sin(theta), np.cos(theta))
+
+
+def resample_pose_sequence_np(
+    xy: np.ndarray,
+    yaw: np.ndarray,
+    *,
+    num_samples: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    if xy.shape[0] == 1:
+        return np.repeat(xy, num_samples, axis=0), np.repeat(yaw, num_samples, axis=0)
+
+    diffs = np.diff(xy, axis=0)
+    seg_lens = np.linalg.norm(diffs, axis=1)
+    s = np.concatenate([np.zeros((1,), dtype=np.float64), np.cumsum(seg_lens, dtype=np.float64)], axis=0)
+    if float(s[-1]) < 1e-9:
+        return np.repeat(xy[:1], num_samples, axis=0), np.repeat(yaw[:1], num_samples, axis=0)
+
+    s_new = np.linspace(0.0, float(s[-1]), num_samples, dtype=np.float64)
+    x_new = np.interp(s_new, s, xy[:, 0])
+    y_new = np.interp(s_new, s, xy[:, 1])
+    yaw_unwrapped = np.unwrap(yaw)
+    yaw_new = np.interp(s_new, s, yaw_unwrapped)
+    return np.stack([x_new, y_new], axis=1), wrap_angle_np(yaw_new)
+
+
+def sample_rs_root_path_np(
+    *,
+    root_start_xy: np.ndarray,
+    root_start_yaw: float,
+    root_goal_xy: np.ndarray,
+    root_goal_yaw: float,
+    min_turn_radius_m: float,
+    sample_step_m: float,
+    num_samples: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    world_pts = exact_rs.rs_sample_path(
+        float(root_start_xy[0]),
+        float(root_start_xy[1]),
+        float(root_start_yaw),
+        float(root_goal_xy[0]),
+        float(root_goal_xy[1]),
+        float(root_goal_yaw),
+        float(min_turn_radius_m),
+        step=float(sample_step_m),
+    )
+    if not world_pts:
+        raise RuntimeError("RS sampler failed to find a path")
+    xy = np.asarray([[pt[0], pt[1]] for pt in world_pts], dtype=np.float64)
+    yaw = np.asarray([pt[2] for pt in world_pts], dtype=np.float64)
+    root_pts, root_yaw = resample_pose_sequence_np(xy, yaw, num_samples=num_samples)
+    root_tangents = np.stack([np.cos(root_yaw), np.sin(root_yaw)], axis=1)
+    return root_pts, root_tangents
+
+
 def build_reference_trajectory(
     *,
     root_xy: np.ndarray,
@@ -165,6 +233,9 @@ def build_reference_trajectory(
     traj_num_samples: int,
     insert_fraction: float,
     traj_goal_mode: str,
+    traj_model: str,
+    traj_rs_min_turn_radius_m: float,
+    traj_rs_sample_step_m: float,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     yaw = math.radians(yaw_deg)
     pallet_yaw = math.radians(pallet_yaw_deg)
@@ -191,37 +262,50 @@ def build_reference_trajectory(
     root_pre = pallet_xy + root_pre_s * u_in
     p_pre = root_pre + root_to_fc * u_in
 
-    num_curve = int(traj_num_samples * 0.7)
-    num_line = traj_num_samples - num_curve
+    if traj_model == "rs_exact":
+        root_path, root_tangents = sample_rs_root_path_np(
+            root_start_xy=root_xy,
+            root_start_yaw=yaw,
+            root_goal_xy=root_goal,
+            root_goal_yaw=pallet_yaw,
+            min_turn_radius_m=traj_rs_min_turn_radius_m,
+            sample_step_m=traj_rs_sample_step_m,
+            num_samples=traj_num_samples,
+        )
+    elif traj_model == "root_path_first":
+        num_curve = int(traj_num_samples * 0.7)
+        num_line = traj_num_samples - num_curve
 
-    span_s = max(root_pre_s - root_start_s, 1e-6)
-    yaw_rel0 = math.atan2(math.sin(yaw - pallet_yaw), math.cos(yaw - pallet_yaw))
-    slope0 = math.tan(yaw_rel0)
-    a = (slope0 * span_s + 2.0 * root_start_y) / (span_s**3)
-    b = (-2.0 * slope0 * span_s - 3.0 * root_start_y) / (span_s**2)
+        span_s = max(root_pre_s - root_start_s, 1e-6)
+        yaw_rel0 = math.atan2(math.sin(yaw - pallet_yaw), math.cos(yaw - pallet_yaw))
+        slope0 = math.tan(yaw_rel0)
+        a = (slope0 * span_s + 2.0 * root_start_y) / (span_s**3)
+        b = (-2.0 * slope0 * span_s - 3.0 * root_start_y) / (span_s**2)
 
-    ds_curve = np.linspace(0.0, span_s, num_curve, dtype=np.float64).reshape(-1, 1)
-    y_curve = a * ds_curve**3 + b * ds_curve**2 + slope0 * ds_curve + root_start_y
-    dy_ds = 3.0 * a * ds_curve**2 + 2.0 * b * ds_curve + slope0
-    s_curve = root_start_s + ds_curve
-    root_pts_curve = pallet_xy + s_curve * u_in + y_curve * v_lat
-    root_curve_dirs = u_in.reshape(1, 2) + dy_ds * v_lat.reshape(1, 2)
-    root_curve_tangents = root_curve_dirs / np.maximum(
-        np.linalg.norm(root_curve_dirs, axis=1, keepdims=True),
-        1e-9,
-    )
-    root_curve_tangents[0] = u_robot
-    root_curve_tangents[-1] = u_in
+        ds_curve = np.linspace(0.0, span_s, num_curve, dtype=np.float64).reshape(-1, 1)
+        y_curve = a * ds_curve**3 + b * ds_curve**2 + slope0 * ds_curve + root_start_y
+        dy_ds = 3.0 * a * ds_curve**2 + 2.0 * b * ds_curve + slope0
+        s_curve = root_start_s + ds_curve
+        root_pts_curve = pallet_xy + s_curve * u_in + y_curve * v_lat
+        root_curve_dirs = u_in.reshape(1, 2) + dy_ds * v_lat.reshape(1, 2)
+        root_curve_tangents = root_curve_dirs / np.maximum(
+            np.linalg.norm(root_curve_dirs, axis=1, keepdims=True),
+            1e-9,
+        )
+        root_curve_tangents[0] = u_robot
+        root_curve_tangents[-1] = u_in
 
-    if num_line > 0:
-        t_line = np.linspace(0.0, 1.0, num_line + 1, dtype=np.float64).reshape(-1, 1)[1:]
-        root_pts_line = (1 - t_line) * root_pre + t_line * root_goal
-        root_line_tangents = np.repeat(u_in.reshape(1, 2), num_line, axis=0)
-        root_path = np.concatenate([root_pts_curve, root_pts_line], axis=0)
-        root_tangents = np.concatenate([root_curve_tangents, root_line_tangents], axis=0)
+        if num_line > 0:
+            t_line = np.linspace(0.0, 1.0, num_line + 1, dtype=np.float64).reshape(-1, 1)[1:]
+            root_pts_line = (1 - t_line) * root_pre + t_line * root_goal
+            root_line_tangents = np.repeat(u_in.reshape(1, 2), num_line, axis=0)
+            root_path = np.concatenate([root_pts_curve, root_pts_line], axis=0)
+            root_tangents = np.concatenate([root_curve_tangents, root_line_tangents], axis=0)
+        else:
+            root_path = root_pts_curve
+            root_tangents = root_curve_tangents
     else:
-        root_path = root_pts_curve
-        root_tangents = root_curve_tangents
+        raise ValueError(f"unsupported traj_model: {traj_model}")
 
     pts = root_path + root_to_fc * root_tangents
     tangents = np.copy(root_tangents)
@@ -258,6 +342,7 @@ def draw_case(
     pallet_xy: np.ndarray,
     pallet_yaw_deg: float,
     cfg_path: Path,
+    traj_model: str,
 ):
     pallet_yaw = math.radians(pallet_yaw_deg)
     u_in = np.array([math.cos(pallet_yaw), math.sin(pallet_yaw)], dtype=np.float64)
@@ -321,7 +406,8 @@ def draw_case(
         f"root_kappa_max = {case.root_curvature_max:+.3f} 1/m",
         "",
         "Scope",
-        "vehicle-reference-first (root-path-first)",
+        f"traj_model = {traj_model}",
+        "vehicle-reference-first",
         "fork_center path is mapped from vehicle path",
         "still proxy-level, not full dynamics",
         "",
@@ -384,6 +470,7 @@ def draw_overlay(
     overlay_payloads: list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]],
     pallet_xy: np.ndarray,
     pallet_yaw_deg: float,
+    traj_model: str,
 ):
     pallet_yaw = math.radians(pallet_yaw_deg)
     u_in = np.array([math.cos(pallet_yaw), math.sin(pallet_yaw)], dtype=np.float64)
@@ -396,6 +483,7 @@ def draw_overlay(
     ax.plot(axis_pts[:, 0], axis_pts[:, 1], "--", color="#999999", lw=1.2, label="pallet s-axis")
 
     any_bad = False
+    label_points = len(cases) <= 40
     for case, payload in zip(cases, overlay_payloads, strict=True):
         root_xy, fork_center_xy, p_pre, p_goal, pts, _, root_path = payload
         ax.plot(root_path[:, 0], root_path[:, 1], color="#444444", alpha=0.18, lw=1.4)
@@ -404,12 +492,13 @@ def draw_overlay(
         if not case.entry_ok:
             any_bad = True
         ax.scatter(fork_center_xy[0], fork_center_xy[1], color=marker_color, s=26)
-        ax.text(fork_center_xy[0], fork_center_xy[1], case.case_id, fontsize=7, color=marker_color)
+        if label_points:
+            ax.text(fork_center_xy[0], fork_center_xy[1], case.case_id, fontsize=7, color=marker_color)
         ax.scatter(p_pre[0], p_pre[1], color="#ff7f0e", s=12, alpha=0.35)
         ax.scatter(p_goal[0], p_goal[1], color="#2ca02c", s=12, alpha=0.35)
 
     n_bad = sum(1 for case in cases if not case.entry_ok)
-    status = f"{n_bad}/{len(cases)} cases with s_start >= s_pre"
+    status = f"{traj_model}: {n_bad}/{len(cases)} cases with s_start >= s_pre"
     ax.set_title(status, color=("#d62728" if any_bad else "#2ca02c"), fontsize=13)
     ax.set_aspect("equal", adjustable="box")
     ax.grid(True, alpha=0.25)
@@ -428,22 +517,33 @@ def format_case_id(index: int, root_x: float, root_y: float, yaw_deg: float) -> 
     return f"c{index:02d}_x{token(root_x)}_y{token(root_y)}_yaw{token(yaw_deg, 10)}"
 
 
-def build_case_grid(cfg: dict[str, object], pallet_xy: np.ndarray, pallet_yaw_deg: float) -> tuple[list[CaseMetrics], list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]]]:
-    x_vals = [
+def build_case_grid(
+    cfg: dict[str, object],
+    pallet_xy: np.ndarray,
+    pallet_yaw_deg: float,
+    *,
+    grid_count_x: int,
+    grid_count_y: int,
+    grid_count_yaw: int,
+) -> tuple[list[CaseMetrics], list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]]]:
+    x_vals = np.linspace(
         float(cfg["stage1_init_x_min_m"]),
-        0.5 * (float(cfg["stage1_init_x_min_m"]) + float(cfg["stage1_init_x_max_m"])),
         float(cfg["stage1_init_x_max_m"]),
-    ]
-    y_vals = [
+        grid_count_x,
+        dtype=np.float64,
+    ).tolist()
+    y_vals = np.linspace(
         float(cfg["stage1_init_y_min_m"]),
-        0.0,
         float(cfg["stage1_init_y_max_m"]),
-    ]
-    yaw_vals = [
+        grid_count_y,
+        dtype=np.float64,
+    ).tolist()
+    yaw_vals = np.linspace(
         float(cfg["stage1_init_yaw_deg_min"]),
-        0.0,
         float(cfg["stage1_init_yaw_deg_max"]),
-    ]
+        grid_count_yaw,
+        dtype=np.float64,
+    ).tolist()
 
     cases: list[CaseMetrics] = []
     payloads: list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = []
@@ -466,6 +566,9 @@ def build_case_grid(cfg: dict[str, object], pallet_xy: np.ndarray, pallet_yaw_de
                     traj_num_samples=int(cfg["traj_num_samples"]),
                     insert_fraction=float(cfg["insert_fraction"]),
                     traj_goal_mode=str(cfg["exp83_traj_goal_mode"]),
+                    traj_model=str(cfg.get("traj_model", "root_path_first")),
+                    traj_rs_min_turn_radius_m=float(cfg.get("traj_rs_min_turn_radius_m", 2.34)),
+                    traj_rs_sample_step_m=float(cfg.get("traj_rs_sample_step_m", 0.05)),
                 )
                 s_start, y_start = project_axis(fork_center_xy, pallet_xy, pallet_yaw_deg)
                 s_pre, _ = project_axis(p_pre, pallet_xy, pallet_yaw_deg)
@@ -505,28 +608,51 @@ def main():
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=PROJECT_ROOT / "outputs" / "reference_trajectory_stage1_viz",
+        default=None,
         help="Directory to write PNGs and manifest JSON.",
     )
     parser.add_argument("--pallet-x", type=float, default=0.0)
     parser.add_argument("--pallet-y", type=float, default=0.0)
     parser.add_argument("--pallet-yaw-deg", type=float, default=0.0)
+    parser.add_argument("--grid-count-x", type=int, default=5)
+    parser.add_argument("--grid-count-y", type=int, default=5)
+    parser.add_argument("--grid-count-yaw", type=int, default=5)
+    parser.add_argument(
+        "--traj-model",
+        type=str,
+        choices=["root_path_first", "rs_exact"],
+        default=None,
+        help="Override traj_model from cfg for auditing.",
+    )
     parser.add_argument(
         "--cfg-path",
         type=Path,
         default=CFG_PATH,
-        help="Env cfg path to read. Defaults to current IsaacLab env_cfg.py, falls back to legacy project patch if missing.",
+        help="Env cfg path to read. Defaults to the project patch env_cfg.py.",
     )
     args = parser.parse_args()
 
     cfg = load_cfg_defaults(args.cfg_path)
     pallet_xy = np.array([args.pallet_x, args.pallet_y], dtype=np.float64)
     pallet_yaw_deg = float(args.pallet_yaw_deg)
+    if args.traj_model is not None:
+        cfg["traj_model"] = str(args.traj_model)
+    traj_model = str(cfg.get("traj_model", "root_path_first"))
 
-    out_dir = args.output_dir
+    if args.output_dir is None:
+        out_dir = PROJECT_ROOT / "outputs" / f"reference_trajectory_stage1_viz_{traj_model}"
+    else:
+        out_dir = args.output_dir
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    cases, payloads = build_case_grid(cfg, pallet_xy, pallet_yaw_deg)
+    cases, payloads = build_case_grid(
+        cfg,
+        pallet_xy,
+        pallet_yaw_deg,
+        grid_count_x=int(args.grid_count_x),
+        grid_count_y=int(args.grid_count_y),
+        grid_count_yaw=int(args.grid_count_yaw),
+    )
     for case, payload in zip(cases, payloads, strict=True):
         root_xy, fork_center_xy, p_pre, p_goal, pts, _, root_path = payload
         draw_case(
@@ -541,6 +667,7 @@ def main():
             pallet_xy=pallet_xy,
             pallet_yaw_deg=pallet_yaw_deg,
             cfg_path=args.cfg_path,
+            traj_model=traj_model,
         )
 
     draw_overlay(
@@ -549,11 +676,13 @@ def main():
         overlay_payloads=payloads,
         pallet_xy=pallet_xy,
         pallet_yaw_deg=pallet_yaw_deg,
+        traj_model=traj_model,
     )
 
     summary = {
         "cfg_path": str(args.cfg_path),
         "validation_scope": [
+            f"traj_model={traj_model}",
             "vehicle_reference_path_first",
             "fork_center_path_mapped_from_vehicle_reference",
             "proxy_level_check_not_full_dynamics",
@@ -563,6 +692,9 @@ def main():
         "parsed_cfg": cfg,
         "pallet_xy": pallet_xy.tolist(),
         "pallet_yaw_deg": pallet_yaw_deg,
+        "grid_count_x": int(args.grid_count_x),
+        "grid_count_y": int(args.grid_count_y),
+        "grid_count_yaw": int(args.grid_count_yaw),
         "num_cases": len(cases),
         "num_entry_ok": sum(1 for case in cases if case.entry_ok),
         "num_entry_bad": sum(1 for case in cases if not case.entry_ok),

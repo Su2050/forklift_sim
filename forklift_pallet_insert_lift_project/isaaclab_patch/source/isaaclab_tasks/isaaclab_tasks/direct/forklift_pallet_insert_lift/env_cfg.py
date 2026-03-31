@@ -98,16 +98,15 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     # 如果距离是 0.6m (在托盘外)，tip_x = -1.68m -> x_root = -3.55m
     stage1_init_x_min_m: float = -3.55
     stage1_init_x_max_m: float = -3.25
-    # Entry-geometry v3:
-    # - 优先修正 fork_center start 相对 p_pre 的轴向关系
-    # - 将 near-field 起点整体后移，避免一开始就越过 p_pre
-    # - 保持 y/yaw 与 v2 一致，先单独验证 entry geometry
+    # 当前 stage1 课程：
+    # - near-field root x 保持在 [-3.60, -3.45]
+    # - y/yaw 放宽到 ±0.15m / ±6deg，确保 steering 在课程里是必要动作
     stage1_init_x_min_m: float = -3.60
     stage1_init_x_max_m: float = -3.45
-    stage1_init_y_min_m: float = -0.08
-    stage1_init_y_max_m: float = 0.08
-    stage1_init_yaw_deg_min: float = -3.0
-    stage1_init_yaw_deg_max: float = 3.0
+    stage1_init_y_min_m: float = -0.15
+    stage1_init_y_max_m: float = 0.15
+    stage1_init_yaw_deg_min: float = -6.0
+    stage1_init_yaw_deg_max: float = 6.0
 
     # 相机参数：
     # - 训练默认 256x256，进一步提升视觉特征提取精度
@@ -238,9 +237,20 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     gamma: float = 1.0
 
     # ---- 实验 3.1: 参考轨迹走廊 (Trajectory-lite) ----
+    # 参考轨迹生成模型：
+    # - root_path_first: vehicle/root cubic + final straight
+    # - rs_exact: exact Reeds-Shepp over vehicle/root pose, then map to fork-center
+    # 默认保留 root_path_first，RS 通过 override 开启；当前 near-field 审计显示
+    # 在 ±0.15m / ±6deg 课程上直接切成 shortest-RS 还不够稳定。
+    traj_model: str = "root_path_first"
     traj_pre_dist_m: float = 1.05      # v3: 将 p_pre 适当前移，确保 s_start < s_pre
     traj_vehicle_curve_min_span_m: float = 0.35
     traj_vehicle_final_straight_min_m: float = 0.10
+    # Ackermann proxy:
+    # wheelbase ~= 1.6m, max physical steer ~= 0.6rad -> R_min ~= wheelbase / tan(0.6) ~= 2.34m
+    traj_rs_min_turn_radius_m: float = 2.34
+    traj_rs_sample_step_m: float = 0.05
+    traj_rs_fail_fallback_to_root_path_first: bool = True
     # Exp8.3 第一轮主矩阵：
     # - front: 轨迹终点停在托盘前沿中心（B0′ 基线）
     # - success_center: 轨迹 terminal geometry package 平移到 success 等效 fork_center 深度（G1）

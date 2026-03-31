@@ -25,8 +25,11 @@ from __future__ import annotations
 
 import math
 import os
+from pathlib import Path
+import sys
 from typing import Tuple
 
+import numpy as np
 import torch
 
 import isaaclab.sim as sim_utils
@@ -38,6 +41,12 @@ from isaaclab.utils.math import sample_uniform
 
 from .env_cfg import ForkliftPalletInsertLiftEnvCfg
 from .hold_logic import HoldLogicConfig, compute_hold_logic
+
+
+_RS_DIR = Path(__file__).resolve().parent / "rs"
+if str(_RS_DIR) not in sys.path:
+    sys.path.append(str(_RS_DIR))
+import rs as exact_rs
 
 
 def _quat_to_yaw(q: torch.Tensor) -> torch.Tensor:
@@ -64,6 +73,117 @@ def smoothstep(x: torch.Tensor) -> torch.Tensor:
     """Hermite smoothstep: 0→1 with zero-derivative at both ends."""
     x = torch.clamp(x, 0.0, 1.0)
     return x * x * (3.0 - 2.0 * x)
+
+
+def _wrap_angle_np(theta: np.ndarray) -> np.ndarray:
+    return np.arctan2(np.sin(theta), np.cos(theta))
+
+
+def _resample_pose_sequence_np(
+    xy: np.ndarray,
+    yaw: np.ndarray,
+    *,
+    num_samples: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    if xy.shape[0] == 1:
+        return np.repeat(xy, num_samples, axis=0), np.repeat(yaw, num_samples, axis=0)
+
+    diffs = np.diff(xy, axis=0)
+    seg_lens = np.linalg.norm(diffs, axis=1)
+    s = np.concatenate([np.zeros((1,), dtype=np.float64), np.cumsum(seg_lens, dtype=np.float64)], axis=0)
+    if float(s[-1]) < 1e-9:
+        return np.repeat(xy[:1], num_samples, axis=0), np.repeat(yaw[:1], num_samples, axis=0)
+
+    s_new = np.linspace(0.0, float(s[-1]), num_samples, dtype=np.float64)
+    x_new = np.interp(s_new, s, xy[:, 0])
+    y_new = np.interp(s_new, s, xy[:, 1])
+    yaw_unwrapped = np.unwrap(yaw)
+    yaw_new = np.interp(s_new, s, yaw_unwrapped)
+    return np.stack([x_new, y_new], axis=1), _wrap_angle_np(yaw_new)
+
+
+def _sample_root_path_first_np(
+    *,
+    root_start_xy: np.ndarray,
+    root_start_yaw: float,
+    pallet_xy: np.ndarray,
+    pallet_yaw: float,
+    root_goal_xy: np.ndarray,
+    traj_pre_dist_m: float,
+    curve_min_span_m: float,
+    final_straight_min_m: float,
+    num_samples: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    u_in = np.array([math.cos(pallet_yaw), math.sin(pallet_yaw)], dtype=np.float64)
+    v_lat = np.array([-math.sin(pallet_yaw), math.cos(pallet_yaw)], dtype=np.float64)
+    rel_root_start = root_start_xy - pallet_xy
+    rel_root_goal = root_goal_xy - pallet_xy
+    root_start_s = float(np.dot(rel_root_start, u_in))
+    root_start_y = float(np.dot(rel_root_start, v_lat))
+    root_goal_s = float(np.dot(rel_root_goal, u_in))
+    root_pre_nominal_s = root_goal_s - float(traj_pre_dist_m)
+    root_pre_s = max(root_pre_nominal_s, root_start_s + float(curve_min_span_m))
+    root_pre_s = min(root_pre_s, root_goal_s - float(final_straight_min_m))
+    root_pre = pallet_xy + root_pre_s * u_in
+
+    num_curve = int(num_samples * 0.7)
+    num_line = num_samples - num_curve
+
+    span_s = max(root_pre_s - root_start_s, 1e-6)
+    yaw_rel0 = math.atan2(math.sin(root_start_yaw - pallet_yaw), math.cos(root_start_yaw - pallet_yaw))
+    slope0 = math.tan(yaw_rel0)
+    a = (slope0 * span_s + 2.0 * root_start_y) / (span_s ** 3)
+    b = (-2.0 * slope0 * span_s - 3.0 * root_start_y) / (span_s ** 2)
+
+    ds_curve = np.linspace(0.0, span_s, num_curve, dtype=np.float64).reshape(-1, 1)
+    y_curve = a * ds_curve ** 3 + b * ds_curve ** 2 + slope0 * ds_curve + root_start_y
+    dy_ds = 3.0 * a * ds_curve ** 2 + 2.0 * b * ds_curve + slope0
+    s_curve = root_start_s + ds_curve
+    root_pts_curve = pallet_xy + s_curve * u_in + y_curve * v_lat
+    root_curve_dirs = u_in.reshape(1, 2) + dy_ds * v_lat.reshape(1, 2)
+    root_curve_tangents = root_curve_dirs / np.maximum(np.linalg.norm(root_curve_dirs, axis=1, keepdims=True), 1e-9)
+    root_curve_tangents[0] = np.array([math.cos(root_start_yaw), math.sin(root_start_yaw)], dtype=np.float64)
+    root_curve_tangents[-1] = u_in
+
+    if num_line > 0:
+        t_line = np.linspace(0.0, 1.0, num_line + 1, dtype=np.float64).reshape(-1, 1)[1:]
+        root_pts_line = (1.0 - t_line) * root_pre + t_line * root_goal_xy
+        root_line_tangents = np.repeat(u_in.reshape(1, 2), num_line, axis=0)
+        root_pts = np.concatenate([root_pts_curve, root_pts_line], axis=0)
+        root_tangents = np.concatenate([root_curve_tangents, root_line_tangents], axis=0)
+    else:
+        root_pts = root_pts_curve
+        root_tangents = root_curve_tangents
+    return root_pts, root_tangents
+
+
+def _sample_rs_root_path_np(
+    *,
+    root_start_xy: np.ndarray,
+    root_start_yaw: float,
+    root_goal_xy: np.ndarray,
+    root_goal_yaw: float,
+    min_turn_radius_m: float,
+    sample_step_m: float,
+    num_samples: int,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    world_pts = exact_rs.rs_sample_path(
+        float(root_start_xy[0]),
+        float(root_start_xy[1]),
+        float(root_start_yaw),
+        float(root_goal_xy[0]),
+        float(root_goal_xy[1]),
+        float(root_goal_yaw),
+        float(min_turn_radius_m),
+        step=float(sample_step_m),
+    )
+    if not world_pts:
+        return None
+    xy = np.asarray([[pt[0], pt[1]] for pt in world_pts], dtype=np.float64)
+    yaw = np.asarray([pt[2] for pt in world_pts], dtype=np.float64)
+    root_pts, root_yaw = _resample_pose_sequence_np(xy, yaw, num_samples=num_samples)
+    root_tangents = np.stack([np.cos(root_yaw), np.sin(root_yaw)], axis=1)
+    return root_pts, root_tangents
 
 
 def _spawn_ground_plane_with_fallback(prim_path: str, cfg) -> None:
@@ -1003,9 +1123,10 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         pallet_yaw: torch.Tensor | None = None,
     ):
         """在 reset 时为每个 env 生成并缓存参考轨迹。
-        使用三次 Hermite 样条 (Cubic Hermite Spline) 作为 Clothoid 的近似，
-        连接起点和预对位点，再接一段直线进入托盘。
-        Hermite 样条能更好地保证起点和终点的切线方向，且曲率变化更平滑。
+        先在 vehicle/root pose 空间里生成参考路径，再映射出 fork_center 路径。
+        支持两种模型：
+        - root_path_first: cubic + final straight
+        - rs_exact: exact Reeds-Shepp over root pose
 
         当提供 fork_center_xy / robot_yaw / pallet_pos_xy / pallet_yaw 时，
         直接使用 reset 刚写入的张量，避免依赖 `robot.data` / `pallet.data` 同步时机（Exp8.3 B0′）。
@@ -1014,83 +1135,113 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         if len(env_ids) == 0:
             return
 
-        # 1. 获取起点位姿 (必须是叉臂中心，而不是车体中心！)
+        # 1. 获取起点位姿
         if fork_center_xy is None:
             fork_center = self._compute_fork_center()
-            p0 = fork_center[env_ids, :2]  # (M, 2)
-            yaw0 = _quat_to_yaw(self.robot.data.root_quat_w[env_ids])  # (M,)
+            p0 = fork_center[env_ids, :2]
+            yaw0 = _quat_to_yaw(self.robot.data.root_quat_w[env_ids])
         else:
             p0 = fork_center_xy
             yaw0 = robot_yaw
-        t0 = torch.stack([torch.cos(yaw0), torch.sin(yaw0)], dim=-1)  # (M, 2)
+        t0 = torch.stack([torch.cos(yaw0), torch.sin(yaw0)], dim=-1)
+        root_to_fc = max(float(self._fork_forward_offset) - 0.6, 0.0)
+        root_start = p0 - root_to_fc * t0
 
         # 2. 获取托盘位姿与目标点
         if pallet_pos_xy is None:
-            pallet_pos = self.pallet.data.root_pos_w[env_ids, :2]  # (M, 2)
-            pallet_yaw_v = _quat_to_yaw(self.pallet.data.root_quat_w[env_ids])  # (M,)
+            pallet_pos = self.pallet.data.root_pos_w[env_ids, :2]
+            pallet_yaw_v = _quat_to_yaw(self.pallet.data.root_quat_w[env_ids])
         else:
             pallet_pos = pallet_pos_xy
             pallet_yaw_v = pallet_yaw
-        u_in = torch.stack([torch.cos(pallet_yaw_v), torch.sin(pallet_yaw_v)], dim=-1)  # (M, 2)
+        u_in = torch.stack([torch.cos(pallet_yaw_v), torch.sin(pallet_yaw_v)], dim=-1)
 
         s_goal = self._exp83_traj_goal_s()
         p_goal = pallet_pos + s_goal * u_in
-        # 将 terminal geometry package 整体锚定到当前轨迹终点，保持末段直插距离不变。
-        p_pre = pallet_pos + (s_goal - self.cfg.traj_pre_dist_m) * u_in
-
-        # 3. 构造三次 Hermite 样条
-        # 计算起点到预对位点的直线距离，用于控制切线长度 (影响曲线弯曲程度)
-        dist = torch.norm(p_pre - p0, dim=-1, keepdim=True)
-        # 经验常数 1.5，距离越远，切线越长，曲线越平缓，更符合 Clothoid 的特性
-        L = dist * 1.5
-        
-        m0 = t0 * L
-        m1 = u_in * L  # 终点切线方向必须对准托盘
-
-        # 4. 离散化轨迹
+        root_goal = p_goal - root_to_fc * u_in
         num_samples = self.cfg.traj_num_samples
-        # 预先分配采样点，前 70% 用于 Hermite 曲线，后 30% 用于直线
-        num_curve = int(num_samples * 0.7)
-        num_line = num_samples - num_curve
+        traj_model = str(getattr(self.cfg, "traj_model", "root_path_first"))
 
-        t = torch.linspace(0.0, 1.0, num_curve, device=self.device).view(1, -1, 1)  # (1, num_curve, 1)
-        t2 = t ** 2
-        t3 = t ** 3
-        
-        h00 = 2*t3 - 3*t2 + 1
-        h10 = t3 - 2*t2 + t
-        h01 = -2*t3 + 3*t2
-        h11 = t3 - t2
-        
-        p0_exp = p0.unsqueeze(1)
-        m0_exp = m0.unsqueeze(1)
-        p1_exp = p_pre.unsqueeze(1)
-        m1_exp = m1.unsqueeze(1)
-        
-        pts_curve = h00 * p0_exp + h10 * m0_exp + h01 * p1_exp + h11 * m1_exp  # (M, num_curve, 2)
+        root_start_np = root_start.detach().cpu().numpy()
+        yaw0_np = yaw0.detach().cpu().numpy()
+        pallet_pos_np = pallet_pos.detach().cpu().numpy()
+        pallet_yaw_np = pallet_yaw_v.detach().cpu().numpy()
+        root_goal_np = root_goal.detach().cpu().numpy()
 
-        t_line = torch.linspace(0.0, 1.0, num_line, device=self.device).view(1, -1, 1)
-        pts_line = (1 - t_line) * p_pre.unsqueeze(1) + t_line * p_goal.unsqueeze(1)  # (M, num_line, 2)
+        pts_out = torch.zeros((len(env_ids), num_samples, 2), device=self.device)
+        tangents_out = torch.zeros((len(env_ids), num_samples, 2), device=self.device)
+        s_norm_out = torch.zeros((len(env_ids), num_samples), device=self.device)
+        fallback_count = 0
 
-        # 拼接轨迹点
-        pts = torch.cat([pts_curve, pts_line], dim=1)  # (M, num_samples, 2)
-        self._traj_pts[env_ids] = pts
+        for local_idx in range(len(env_ids)):
+            root_pts_np: np.ndarray
+            root_tangents_np: np.ndarray
+            if traj_model == "rs_exact":
+                rs_payload = _sample_rs_root_path_np(
+                    root_start_xy=root_start_np[local_idx],
+                    root_start_yaw=float(yaw0_np[local_idx]),
+                    root_goal_xy=root_goal_np[local_idx],
+                    root_goal_yaw=float(pallet_yaw_np[local_idx]),
+                    min_turn_radius_m=float(self.cfg.traj_rs_min_turn_radius_m),
+                    sample_step_m=float(self.cfg.traj_rs_sample_step_m),
+                    num_samples=int(num_samples),
+                )
+                if rs_payload is None:
+                    if not bool(getattr(self.cfg, "traj_rs_fail_fallback_to_root_path_first", True)):
+                        raise RuntimeError(
+                            f"RS reference trajectory failed for env={int(env_ids[local_idx])}"
+                        )
+                    fallback_count += 1
+                    root_pts_np, root_tangents_np = _sample_root_path_first_np(
+                        root_start_xy=root_start_np[local_idx],
+                        root_start_yaw=float(yaw0_np[local_idx]),
+                        pallet_xy=pallet_pos_np[local_idx],
+                        pallet_yaw=float(pallet_yaw_np[local_idx]),
+                        root_goal_xy=root_goal_np[local_idx],
+                        traj_pre_dist_m=float(self.cfg.traj_pre_dist_m),
+                        curve_min_span_m=float(self.cfg.traj_vehicle_curve_min_span_m),
+                        final_straight_min_m=float(self.cfg.traj_vehicle_final_straight_min_m),
+                        num_samples=int(num_samples),
+                    )
+                else:
+                    root_pts_np, root_tangents_np = rs_payload
+            elif traj_model == "root_path_first":
+                root_pts_np, root_tangents_np = _sample_root_path_first_np(
+                    root_start_xy=root_start_np[local_idx],
+                    root_start_yaw=float(yaw0_np[local_idx]),
+                    pallet_xy=pallet_pos_np[local_idx],
+                    pallet_yaw=float(pallet_yaw_np[local_idx]),
+                    root_goal_xy=root_goal_np[local_idx],
+                    traj_pre_dist_m=float(self.cfg.traj_pre_dist_m),
+                    curve_min_span_m=float(self.cfg.traj_vehicle_curve_min_span_m),
+                    final_straight_min_m=float(self.cfg.traj_vehicle_final_straight_min_m),
+                    num_samples=int(num_samples),
+                )
+            else:
+                raise ValueError(f"Unsupported traj_model: {traj_model}")
 
-        # 5. 计算切线与累积弧长
-        # 差分计算切线
-        diffs = pts[:, 1:, :] - pts[:, :-1, :]  # (M, num_samples-1, 2)
-        dists = torch.norm(diffs, dim=-1)  # (M, num_samples-1)
-        
-        # 累积弧长
-        s_cum = torch.cat([torch.zeros((len(env_ids), 1), device=self.device), torch.cumsum(dists, dim=-1)], dim=1)
-        s_total = s_cum[:, -1:] + 1e-6
-        self._traj_s_norm[env_ids] = s_cum / s_total
+            pts_np = root_pts_np + root_to_fc * root_tangents_np
+            diffs_np = root_pts_np[1:, :] - root_pts_np[:-1, :]
+            dists_np = np.linalg.norm(diffs_np, axis=1)
+            s_cum_np = np.concatenate(
+                [np.zeros((1,), dtype=np.float64), np.cumsum(dists_np, dtype=np.float64)],
+                axis=0,
+            )
+            s_total = float(s_cum_np[-1]) + 1e-6
 
-        # 切线方向 (归一化)
-        tangents = diffs / (dists.unsqueeze(-1) + 1e-6)
-        # 最后一个点的切线与前一个点相同
-        tangents = torch.cat([tangents, tangents[:, -1:, :]], dim=1)  # (M, num_samples, 2)
-        self._traj_tangents[env_ids] = tangents
+            pts_out[local_idx] = torch.from_numpy(pts_np).to(device=self.device, dtype=torch.float32)
+            tangents_out[local_idx] = torch.from_numpy(root_tangents_np).to(device=self.device, dtype=torch.float32)
+            s_norm_out[local_idx] = torch.from_numpy(s_cum_np / s_total).to(device=self.device, dtype=torch.float32)
+
+        self._traj_pts[env_ids] = pts_out
+        self._traj_tangents[env_ids] = tangents_out
+        self._traj_s_norm[env_ids] = s_norm_out
+
+        if traj_model == "rs_exact" and fallback_count > 0:
+            print(
+                "[traj_rs_exact] fallback_to_root_path_first="
+                f"{fallback_count}/{len(env_ids)} envs"
+            )
 
     def _run_runtime_u0_check(
         self,
