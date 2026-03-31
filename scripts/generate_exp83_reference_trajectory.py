@@ -78,6 +78,33 @@ def draw_pose(ax, pose: Pose2D, *, color: str, label: str, scale: float = 0.18) 
     )
 
 
+def draw_rigid_links(
+    ax,
+    vehicle_xy: np.ndarray,
+    fork_xy: np.ndarray,
+    *,
+    color: str = "#888888",
+    max_links: int = 7,
+    label: str = "root->fork rigid offset",
+) -> None:
+    if vehicle_xy.shape[0] == 0:
+        return
+    count = min(max_links, vehicle_xy.shape[0])
+    indices = np.unique(np.linspace(0, vehicle_xy.shape[0] - 1, count, dtype=int))
+    first = True
+    for idx in indices:
+        ax.plot(
+            [vehicle_xy[idx, 0], fork_xy[idx, 0]],
+            [vehicle_xy[idx, 1], fork_xy[idx, 1]],
+            color=color,
+            lw=1.0,
+            alpha=0.55,
+            ls=":",
+            label=label if first else None,
+        )
+        first = False
+
+
 def write_rows_csv(path: Path, *, vehicle_xy: np.ndarray, vehicle_yaw: np.ndarray, fork_xy: np.ndarray, fork_yaw: np.ndarray) -> None:
     with path.open("w", encoding="utf-8", newline="") as f:
         writer = csv.writer(f)
@@ -199,10 +226,13 @@ def main() -> None:
     summary_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
 
     fig, ax = plt.subplots(figsize=(7.8, 6.6), constrained_layout=True)
-    ax.plot(plan.vehicle_xy[:, 0], plan.vehicle_xy[:, 1], color="#444444", lw=2.0, ls="--", label="vehicle path")
-    ax.plot(plan.fork_center_xy[:, 0], plan.fork_center_xy[:, 1], color="#1f77b4", lw=2.0, label="fork-center path")
-    draw_pose(ax, start, color="#111111", label="start")
-    draw_pose(ax, goal_pose, color="#ff7f0e", label="goal")
+    ax.plot(plan.vehicle_xy[:, 0], plan.vehicle_xy[:, 1], color="#444444", lw=2.0, ls="--", label="vehicle root path")
+    ax.plot(plan.fork_center_xy[:, 0], plan.fork_center_xy[:, 1], color="#1f77b4", lw=2.0, label="mapped fork-center path")
+    draw_rigid_links(ax, plan.vehicle_xy, plan.fork_center_xy)
+    draw_pose(ax, start, color="#111111", label="root start pose")
+    draw_pose(ax, goal_pose, color="#ff7f0e", label="root goal pose")
+    ax.scatter([plan.fork_center_xy[0, 0]], [plan.fork_center_xy[0, 1]], color="#d62728", s=34, marker="x", label="fork start")
+    ax.scatter([plan.fork_center_xy[-1, 0]], [plan.fork_center_xy[-1, 1]], color="#2ca02c", s=34, marker="+", label="fork end")
     if fork_goal_xy is not None:
         ax.scatter([fork_goal_xy[0]], [fork_goal_xy[1]], color="#2ca02c", s=42, label="fork goal")
         u_in = np.array([math.cos(pallet_yaw), math.sin(pallet_yaw)])
@@ -223,6 +253,16 @@ def main() -> None:
             ha="left",
             bbox={"facecolor": "white", "alpha": 0.85, "edgecolor": "#cccccc"},
         )
+    ax.text(
+        0.02,
+        0.14,
+        f"fork-center = root + {vehicle_to_fc:.2f}m * heading",
+        transform=ax.transAxes,
+        fontsize=9,
+        va="bottom",
+        ha="left",
+        bbox={"facecolor": "white", "alpha": 0.85, "edgecolor": "#cccccc"},
+    )
     ax.set_title(
         f"{args.model} | start=({args.start_x:+.2f}, {args.start_y:+.2f}, {args.start_yaw_deg:+.1f}deg)\n"
         f"goal=({goal_pose.x:+.2f}, {goal_pose.y:+.2f}, {math.degrees(goal_pose.yaw):+.1f}deg)"
