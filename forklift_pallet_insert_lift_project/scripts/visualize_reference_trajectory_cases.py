@@ -52,6 +52,8 @@ CFG_KEYS = {
     "pallet_depth_m",
     "insert_fraction",
     "traj_pre_dist_m",
+    "traj_vehicle_curve_min_span_m",
+    "traj_vehicle_final_straight_min_m",
     "traj_num_samples",
     "fork_reach_m",
     "exp83_traj_goal_mode",
@@ -158,6 +160,8 @@ def build_reference_trajectory(
     fork_reach_m: float,
     pallet_depth_m: float,
     traj_pre_dist_m: float,
+    traj_vehicle_curve_min_span_m: float,
+    traj_vehicle_final_straight_min_m: float,
     traj_num_samples: int,
     insert_fraction: float,
     traj_goal_mode: str,
@@ -167,9 +171,10 @@ def build_reference_trajectory(
 
     u_robot = np.array([math.cos(yaw), math.sin(yaw)], dtype=np.float64)
     u_in = np.array([math.cos(pallet_yaw), math.sin(pallet_yaw)], dtype=np.float64)
+    v_lat = np.array([-math.sin(pallet_yaw), math.cos(pallet_yaw)], dtype=np.float64)
 
-    fork_center_xy = root_xy + (fork_reach_m - FORK_CENTER_BACKOFF_M) * u_robot
-    p0 = fork_center_xy
+    root_to_fc = fork_reach_m - FORK_CENTER_BACKOFF_M
+    fork_center_xy = root_xy + root_to_fc * u_robot
 
     s_goal = exp83_traj_goal_s(
         pallet_depth_m=pallet_depth_m,
@@ -177,32 +182,49 @@ def build_reference_trajectory(
         mode=traj_goal_mode,
     )
     p_goal = pallet_xy + s_goal * u_in
-    p_pre = pallet_xy + (s_goal - traj_pre_dist_m) * u_in
-
-    dist = np.linalg.norm(p_pre - p0)
-    L = dist * 1.5
-    m0 = u_robot * L
-    m1 = u_in * L
+    root_goal = p_goal - root_to_fc * u_in
+    root_start_s, root_start_y = project_axis(root_xy, pallet_xy, pallet_yaw_deg)
+    root_goal_s, _ = project_axis(root_goal, pallet_xy, pallet_yaw_deg)
+    root_pre_nominal_s = root_goal_s - traj_pre_dist_m
+    root_pre_s = max(root_pre_nominal_s, root_start_s + traj_vehicle_curve_min_span_m)
+    root_pre_s = min(root_pre_s, root_goal_s - traj_vehicle_final_straight_min_m)
+    root_pre = pallet_xy + root_pre_s * u_in
+    p_pre = root_pre + root_to_fc * u_in
 
     num_curve = int(traj_num_samples * 0.7)
     num_line = traj_num_samples - num_curve
 
-    t = np.linspace(0.0, 1.0, num_curve, dtype=np.float64).reshape(-1, 1)
-    t2 = t**2
-    t3 = t**3
-    h00 = 2 * t3 - 3 * t2 + 1
-    h10 = t3 - 2 * t2 + t
-    h01 = -2 * t3 + 3 * t2
-    h11 = t3 - t2
-    pts_curve = h00 * p0 + h10 * m0 + h01 * p_pre + h11 * m1
+    span_s = max(root_pre_s - root_start_s, 1e-6)
+    yaw_rel0 = math.atan2(math.sin(yaw - pallet_yaw), math.cos(yaw - pallet_yaw))
+    slope0 = math.tan(yaw_rel0)
+    a = (slope0 * span_s + 2.0 * root_start_y) / (span_s**3)
+    b = (-2.0 * slope0 * span_s - 3.0 * root_start_y) / (span_s**2)
 
-    t_line = np.linspace(0.0, 1.0, num_line, dtype=np.float64).reshape(-1, 1)
-    pts_line = (1 - t_line) * p_pre + t_line * p_goal
+    ds_curve = np.linspace(0.0, span_s, num_curve, dtype=np.float64).reshape(-1, 1)
+    y_curve = a * ds_curve**3 + b * ds_curve**2 + slope0 * ds_curve + root_start_y
+    dy_ds = 3.0 * a * ds_curve**2 + 2.0 * b * ds_curve + slope0
+    s_curve = root_start_s + ds_curve
+    root_pts_curve = pallet_xy + s_curve * u_in + y_curve * v_lat
+    root_curve_dirs = u_in.reshape(1, 2) + dy_ds * v_lat.reshape(1, 2)
+    root_curve_tangents = root_curve_dirs / np.maximum(
+        np.linalg.norm(root_curve_dirs, axis=1, keepdims=True),
+        1e-9,
+    )
+    root_curve_tangents[0] = u_robot
+    root_curve_tangents[-1] = u_in
 
-    pts = np.concatenate([pts_curve, pts_line], axis=0)
-    tangents = _compute_path_tangents(pts, u_robot)
-    root_to_fc = fork_reach_m - FORK_CENTER_BACKOFF_M
-    root_path = pts - root_to_fc * tangents
+    if num_line > 0:
+        t_line = np.linspace(0.0, 1.0, num_line + 1, dtype=np.float64).reshape(-1, 1)[1:]
+        root_pts_line = (1 - t_line) * root_pre + t_line * root_goal
+        root_line_tangents = np.repeat(u_in.reshape(1, 2), num_line, axis=0)
+        root_path = np.concatenate([root_pts_curve, root_pts_line], axis=0)
+        root_tangents = np.concatenate([root_curve_tangents, root_line_tangents], axis=0)
+    else:
+        root_path = root_pts_curve
+        root_tangents = root_curve_tangents
+
+    pts = root_path + root_to_fc * root_tangents
+    tangents = np.copy(root_tangents)
     return fork_center_xy, p_pre, p_goal, pts, tangents, root_path
 
 
@@ -254,8 +276,8 @@ def draw_case(
     lat_line = np.stack([pallet_xy - 0.25 * v_lat, pallet_xy + 0.25 * v_lat], axis=0)
     ax.plot(lat_line[:, 0], lat_line[:, 1], "-", color="#bbbbbb", lw=1.0)
 
-    ax.plot(pts[:, 0], pts[:, 1], color="#1f77b4", lw=2.0, label="fork-center reference trajectory")
-    ax.plot(root_path[:, 0], root_path[:, 1], color="#444444", lw=1.6, ls="--", alpha=0.9, label="implied root trajectory")
+    ax.plot(root_path[:, 0], root_path[:, 1], color="#444444", lw=2.0, ls="--", alpha=0.95, label="vehicle/root reference trajectory")
+    ax.plot(pts[:, 0], pts[:, 1], color="#1f77b4", lw=1.8, label="mapped fork-center trajectory")
     ax.scatter(pts[0, 0], pts[0, 1], color="#1f77b4", s=24)
     ax.scatter(root_xy[0], root_xy[1], color="#444444", s=36, label="robot root")
     ax.scatter(fork_center_xy[0], fork_center_xy[1], color="#d62728", s=42, label="fork_center start")
@@ -299,12 +321,12 @@ def draw_case(
         f"root_kappa_max = {case.root_curvature_max:+.3f} 1/m",
         "",
         "Scope",
-        "fork_center entry geometry only",
-        "NO wheelbase / NO min-turn-radius",
-        "NO chassis sweep / NO drive-wheel check",
+        "vehicle-reference-first (root-path-first)",
+        "fork_center path is mapped from vehicle path",
+        "still proxy-level, not full dynamics",
         "",
         "Expectation",
-        "s_start < s_pre < s_goal",
+        "vehicle path first, then fork path",
         "",
         "Cfg source",
         _pretty_cfg_path(cfg_path),
@@ -376,8 +398,8 @@ def draw_overlay(
     any_bad = False
     for case, payload in zip(cases, overlay_payloads, strict=True):
         root_xy, fork_center_xy, p_pre, p_goal, pts, _, root_path = payload
+        ax.plot(root_path[:, 0], root_path[:, 1], color="#444444", alpha=0.18, lw=1.4)
         ax.plot(pts[:, 0], pts[:, 1], color="#1f77b4", alpha=0.22, lw=1.5)
-        ax.plot(root_path[:, 0], root_path[:, 1], color="#444444", alpha=0.10, lw=1.2)
         marker_color = "#2ca02c" if case.entry_ok else "#d62728"
         if not case.entry_ok:
             any_bad = True
@@ -439,6 +461,8 @@ def build_case_grid(cfg: dict[str, object], pallet_xy: np.ndarray, pallet_yaw_de
                     fork_reach_m=float(cfg["fork_reach_m"]),
                     pallet_depth_m=float(cfg["pallet_depth_m"]),
                     traj_pre_dist_m=float(cfg["traj_pre_dist_m"]),
+                    traj_vehicle_curve_min_span_m=float(cfg["traj_vehicle_curve_min_span_m"]),
+                    traj_vehicle_final_straight_min_m=float(cfg["traj_vehicle_final_straight_min_m"]),
                     traj_num_samples=int(cfg["traj_num_samples"]),
                     insert_fraction=float(cfg["insert_fraction"]),
                     traj_goal_mode=str(cfg["exp83_traj_goal_mode"]),
@@ -530,10 +554,10 @@ def main():
     summary = {
         "cfg_path": str(args.cfg_path),
         "validation_scope": [
-            "fork_center entry geometry only",
-            "does_not_check_wheelbase",
-            "does_not_check_min_turn_radius",
-            "does_not_check_chassis_sweep_or_drive_wheel_path",
+            "vehicle_reference_path_first",
+            "fork_center_path_mapped_from_vehicle_reference",
+            "proxy_level_check_not_full_dynamics",
+            "does_not_check_full_wheel_contact_or_chassis_sweep",
         ],
         "cfg_path_used": str(args.cfg_path),
         "parsed_cfg": cfg,

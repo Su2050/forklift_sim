@@ -239,6 +239,8 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
 
     # ---- 实验 3.1: 参考轨迹走廊 (Trajectory-lite) ----
     traj_pre_dist_m: float = 1.05      # v3: 将 p_pre 适当前移，确保 s_start < s_pre
+    traj_vehicle_curve_min_span_m: float = 0.35
+    traj_vehicle_final_straight_min_m: float = 0.10
     # Exp8.3 第一轮主矩阵：
     # - front: 轨迹终点停在托盘前沿中心（B0′ 基线）
     # - success_center: 轨迹 terminal geometry package 平移到 success 等效 fork_center 深度（G1）
