@@ -2066,6 +2066,26 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
             r_preinsert_align = torch.zeros_like(insert_norm)
             r_preinsert_retreat = torch.zeros_like(insert_norm)
 
+        # O2: post-insert lateral/tip dense shaping
+        if self.cfg.postinsert_align_enable:
+            postinsert_active = (insert_depth >= self._insert_thresh).float()
+            center_y_shaping = torch.exp(
+                -(center_y_err / max(self.cfg.postinsert_center_sigma_m, 1e-6)) ** 2
+            )
+            tip_y_shaping = torch.where(
+                dist_front <= self.cfg.tip_align_near_dist,
+                torch.exp(
+                    -(tip_y_err / max(self.cfg.postinsert_tip_sigma_m, 1e-6)) ** 2
+                ),
+                torch.ones_like(tip_y_err),
+            )
+            r_postinsert_align = postinsert_active * self.cfg.postinsert_align_weight * (
+                self.cfg.postinsert_center_weight * center_y_shaping
+                + self.cfg.postinsert_tip_weight * tip_y_shaping
+            )
+        else:
+            r_postinsert_align = torch.zeros_like(insert_norm)
+
         # rg: 与 hold/success 同源的“已进入可成功几何”奖励
         rg = success_geom_strict.float()
 
@@ -2083,7 +2103,8 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
             self.cfg.alpha_4 * rg +
             r_lift +
             r_clean_insert_bonus +
-            r_preinsert_align
+            r_preinsert_align +
+            r_postinsert_align
         )
         
         # 3. 负向惩罚 R- (Eq.7)
@@ -2217,6 +2238,7 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self.extras["log"]["paper_reward/r_clean_insert_bonus"] = r_clean_insert_bonus.mean()
         self.extras["log"]["paper_reward/r_preinsert_align"] = r_preinsert_align.mean()
         self.extras["log"]["paper_reward/r_preinsert_retreat"] = r_preinsert_retreat.mean()
+        self.extras["log"]["paper_reward/r_postinsert_align"] = r_postinsert_align.mean()
         self.extras["log"]["paper_reward/rg"] = rg.mean()
         self.extras["log"]["paper_reward/r_success"] = r_success.mean()
         self.extras["log"]["paper_reward/r_success_time"] = r_success_time.mean()
