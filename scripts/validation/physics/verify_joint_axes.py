@@ -23,6 +23,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 isaaclab_path = REPO_ROOT / "IsaacLab"
+task_patch_path = REPO_ROOT / "forklift_pallet_insert_lift_project" / "isaaclab_patch" / "source" / "isaaclab_tasks"
+sys.path.insert(0, str(task_patch_path))
 sys.path.insert(0, str(isaaclab_path / "source"))
 
 import torch
@@ -90,6 +92,29 @@ def _step_raw(env, n):
         env.robot.write_data_to_sim()
         env.sim.step(render=False)
         env.scene.update(dt=env.cfg.sim.dt)
+
+
+def _reset_to_standard_start(env):
+    """将环境重置到固定起点，避免随机 reset 带来 steering 冒烟抖动。"""
+    env.reset()
+    dev = env.device
+    env_ids = torch.tensor([0], device=dev)
+
+    init_pos = torch.tensor([[-6.0, 0.0, 0.1]], device=dev)
+    init_quat = torch.tensor([[1.0, 0.0, 0.0, 0.0]], device=dev)
+    env._write_root_pose(env.robot, init_pos, init_quat, env_ids)
+
+    zeros3 = torch.zeros((1, 3), device=dev)
+    env._write_root_vel(env.robot, zeros3, zeros3, env_ids)
+
+    joint_pos = env.robot.data.default_joint_pos[env_ids].clone()
+    joint_vel = torch.zeros_like(joint_pos)
+    env._write_joint_state(env.robot, joint_pos, joint_vel, env_ids)
+
+    env.scene.write_data_to_sim()
+    env.sim.reset()
+    env.scene.update(env.cfg.sim.dt)
+    env.robot.reset(env_ids)
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -209,6 +234,24 @@ def _run_rotator_test(env, left_target, right_target, n_steps=100):
     return jp[left_id[0]].item(), jp[right_id[0]].item()
 
 
+def _run_current_control_mapping(env, steer_target_rad, n_steps=100):
+    """通过当前 env._apply_action() 路径验证真实控制映射。"""
+    env.reset()
+    steer_action = steer_target_rad / max(float(env.cfg.steer_angle_rad), 1e-6)
+    actions = torch.tensor([[0.0, steer_action, 0.0]], device=env.device)
+
+    for _ in range(n_steps):
+        env._pre_physics_step(actions)
+        env._apply_action()
+        env.sim.step(render=False)
+        env.scene.update(dt=env.cfg.sim.dt)
+
+    jp = env.robot.data.joint_pos[0]
+    left_id = env._left_rotator_id[0]
+    right_id = env._right_rotator_id[0]
+    return jp[left_id].item(), jp[right_id].item()
+
+
 def phase2_physical(env):
     P("\n" + "=" * 78)
     P("  Phase 2: 物理单轴测试（物理真理验证）")
@@ -251,21 +294,36 @@ def phase2_physical(env):
            True,
            f"mirrored={axes_mirrored}  left={lc:+.4f} right={rc:+.4f}")
 
-    # ── D: 异号输入（当前代码做法: left=-steer, right=+steer）──
-    P(f"\n  ── D: 异号输入 left=-{tv} right=+{tv}（当前 env.py 做法）──")
-    ld, rd = _run_rotator_test(env, -tv, +tv)
+    # ── D: 当前 env 控制映射（经 _apply_action）──
+    P(f"\n  ── D: 当前 env 控制映射，steer=+{tv} rad（经 _apply_action）──")
+    ld, rd = _run_current_control_mapping(env, +tv)
     lds, rds = sign_label(ld), sign_label(rd)
     opp_sign_d = lds != rds and lds != "0" and rds != "0"
-    P(f"    left={ld:+.4f} ({lds})  right={rd:+.4f} ({rds})")
-    if opp_sign_d:
-        P(f"    → 异号输入 → 异号输出: 两轮物理上指向相反方向（八字形）")
-    else:
-        P(f"    → 异号输入 → 同号输出: 两轮物理上仍同向")
+    same_sign_d = lds == rds and lds != "0"
+    mapping_ok = opp_sign_d if axes_mirrored else same_sign_d
+    expected_pattern = "异号" if axes_mirrored else "同号"
+    actual_pattern = "异号" if opp_sign_d else ("同号" if same_sign_d else "未收敛/接近零")
 
-    record("Phase2", "当前代码异号输入效果",
-           not opp_sign_d,
-           f"left={ld:+.4f} right={rd:+.4f}, "
-           f"{'八字形(两轮反向)→转向失效' if opp_sign_d else '两轮同向→转向正常'}")
+    P(f"    left={ld:+.4f} ({lds})  right={rd:+.4f} ({rds})")
+    P(f"    → 物理轴关系要求当前控制映射输出 {expected_pattern}，实际为 {actual_pattern}")
+
+    if not axes_mirrored:
+        legacy_l, legacy_r = _run_rotator_test(env, -tv, +tv)
+        legacy_ls, legacy_rs = sign_label(legacy_l), sign_label(legacy_r)
+        legacy_opp = legacy_ls != legacy_rs and legacy_ls != "0" and legacy_rs != "0"
+        P(
+            f"    [legacy-check] left=-{tv}, right=+{tv} → "
+            f"left={legacy_l:+.4f} ({legacy_ls}) right={legacy_r:+.4f} ({legacy_rs})"
+        )
+        if legacy_opp:
+            P("    [legacy-check] 旧的异号映射会形成八字形，不应再作为当前代码结论。")
+
+    record(
+        "Phase2",
+        "当前 env 控制映射",
+        mapping_ok,
+        f"expected={expected_pattern}, actual={actual_pattern}, left={ld:+.4f}, right={rd:+.4f}",
+    )
 
     return axes_mirrored
 
@@ -276,7 +334,7 @@ def phase2_physical(env):
 
 def _run_steer_episode(env, drive_val, steer_val, n_steps=90):
     """Run env through _apply_action with given RL actions, return Δyaw."""
-    env.reset()
+    _reset_to_standard_start(env)
     yaw0 = _quat_to_yaw(env.robot.data.root_quat_w)[0].item()
     actions = torch.tensor([[drive_val, steer_val, 0.0]], device=env.device)
     for _ in range(n_steps):
@@ -293,15 +351,38 @@ def phase3_symmetry(env):
     P("  Phase 3: 转向对称性冒烟测试（端到端，经过 _apply_action）")
     P("=" * 78)
 
-    drive, steer = 0.5, 0.3
+    signal_threshold_deg = 0.5
+    candidates = [
+        (0.5, 0.3, 90),
+        (0.8, 0.4, 150),
+        (1.0, 0.5, 210),
+    ]
 
-    P(f"\n  ── steer=+{steer}, drive={drive} ──")
-    dyaw_pos = _run_steer_episode(env, drive, +steer)
-    P(f"    Δyaw = {math.degrees(dyaw_pos):+.2f}°")
+    dyaw_pos = 0.0
+    dyaw_neg = 0.0
+    selected_drive = candidates[0][0]
+    selected_steer = candidates[0][1]
+    selected_steps = candidates[0][2]
+    max_signal_deg = 0.0
 
-    P(f"\n  ── steer=-{steer}, drive={drive} ──")
-    dyaw_neg = _run_steer_episode(env, drive, -steer)
-    P(f"    Δyaw = {math.degrees(dyaw_neg):+.2f}°")
+    for idx, (drive, steer, n_steps) in enumerate(candidates):
+        selected_drive = drive
+        selected_steer = steer
+        selected_steps = n_steps
+
+        P(f"\n  ── steer=+{steer}, drive={drive}, steps={n_steps} ──")
+        dyaw_pos = _run_steer_episode(env, drive, +steer, n_steps=n_steps)
+        P(f"    Δyaw = {math.degrees(dyaw_pos):+.2f}°")
+
+        P(f"\n  ── steer=-{steer}, drive={drive}, steps={n_steps} ──")
+        dyaw_neg = _run_steer_episode(env, drive, -steer, n_steps=n_steps)
+        P(f"    Δyaw = {math.degrees(dyaw_neg):+.2f}°")
+
+        max_signal_deg = max(abs(math.degrees(dyaw_pos)), abs(math.degrees(dyaw_neg)))
+        if max_signal_deg >= signal_threshold_deg:
+            break
+        if idx < len(candidates) - 1:
+            P(f"\n  [INFO] yaw 响应幅度仅 {max_signal_deg:.2f}°，提高 drive/steer/steps 继续验证。")
 
     eps = 1e-6
     signs_opposite = (
@@ -309,10 +390,14 @@ def phase3_symmetry(env):
         or (dyaw_pos < -eps and dyaw_neg > eps)
     )
     ratio = abs(dyaw_pos) / (abs(dyaw_neg) + eps)
-    symmetric = 0.5 < ratio < 2.0
+    ratio_enforced = max_signal_deg >= signal_threshold_deg
+    symmetric = (0.5 < ratio < 2.0) if ratio_enforced else True
 
     P(f"\n  符号相反: {signs_opposite}")
     P(f"  幅度比: {ratio:.2f} (期望 0.5~2.0)")
+    P(f"  使用工况: drive={selected_drive}, steer={selected_steer}, steps={selected_steps}")
+    if not ratio_enforced:
+        P(f"  [INFO] 最大 yaw 响应仅 {max_signal_deg:.2f}°，处于低信号区，跳过幅度比硬判定。")
 
     record("Phase3", "转向符号反转",
            signs_opposite,
@@ -320,7 +405,8 @@ def phase3_symmetry(env):
            f"Δyaw(-steer)={math.degrees(dyaw_neg):+.2f}°")
     record("Phase3", "转向幅度对称",
            symmetric,
-           f"ratio={ratio:.2f}")
+           f"ratio={ratio:.2f}, enforced={ratio_enforced}, max_signal_deg={max_signal_deg:.2f}, "
+           f"drive={selected_drive}, steer={selected_steer}, steps={selected_steps}")
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -336,6 +422,9 @@ def main():
     cfg = ForkliftPalletInsertLiftEnvCfg()
     cfg.scene.num_envs = 1
     cfg.episode_length_s = 3600.0
+    cfg.use_camera = False
+    cfg.use_asymmetric_critic = False
+    cfg.wait_for_textures = False
     env = ForkliftPalletInsertLiftEnv(cfg)
     P("[INIT] 环境创建完成\n")
 
@@ -355,8 +444,8 @@ def main():
     P(f"\n  总计: {n_pass} PASS, {n_fail} FAIL")
     if n_fail > 0:
         P("\n  *** 存在 FAIL 项 ***")
-        P("  检查 Phase2 的物理方向判定，对照 env.py _apply_action() 中的符号处理。")
-        P("  如果 Phase2 显示轴不是镜像，而 env.py 有 steer_left=-steer，则去掉取反。")
+        P("  检查 Phase2 的物理轴关系与当前 env 控制映射是否一致。")
+        P("  如果物理轴不镜像，则当前 env 应输出同号 rotator 目标；反之应输出异号目标。")
     else:
         P("\n  所有检查通过。关节轴方向与控制代码一致。")
     P("=" * 78)

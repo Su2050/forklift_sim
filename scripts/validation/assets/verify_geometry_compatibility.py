@@ -7,7 +7,7 @@
 2. 托盘插入孔几何尺寸（宽度、高度、间距、深度）
 3. 碰撞形状类型和尺寸
 4. 几何兼容性分析
-5. 实际碰撞测试
+5. 插入路径冒烟检查（非完整动力学证明）
 """
 
 import sys
@@ -70,6 +70,21 @@ def print_section(title: str):
 def print_info(label: str, value):
     """打印信息"""
     print(f"  {label}: {value}")
+
+
+def normalize_scale(scale) -> Tuple[float, float, float]:
+    """将 spawn.scale 归一化为三维缩放元组。"""
+    if scale is None:
+        return (1.0, 1.0, 1.0)
+    if isinstance(scale, (int, float)):
+        s = float(scale)
+        return (s, s, s)
+    values = tuple(float(v) for v in scale)
+    if len(values) == 1:
+        return (values[0], values[0], values[0])
+    if len(values) >= 3:
+        return values[:3]
+    return (1.0, 1.0, 1.0)
 
 
 def build_validation_env_cfg(num_envs: int = 1) -> ForkliftPalletInsertLiftEnvCfg:
@@ -155,8 +170,9 @@ class CompatibilityResult:
 class GeometryAnalyzer:
     """几何分析器"""
     
-    def __init__(self):
+    def __init__(self, asset_scale: Tuple[float, float, float] = (1.0, 1.0, 1.0)):
         self.stage = None
+        self.asset_scale = np.array(normalize_scale(asset_scale), dtype=np.float64)
         
     def load_usd(self, usd_path: str) -> bool:
         """加载USD文件"""
@@ -220,13 +236,14 @@ class GeometryAnalyzer:
         
         if bbox_min is None or bbox_max is None:
             return None
+
+        bbox_min_np = np.array([bbox_min[0], bbox_min[1], bbox_min[2]], dtype=np.float64) * self.asset_scale
+        bbox_max_np = np.array([bbox_max[0], bbox_max[1], bbox_max[2]], dtype=np.float64) * self.asset_scale
         
         return {
-            "min": np.array([bbox_min[0], bbox_min[1], bbox_min[2]]),
-            "max": np.array([bbox_max[0], bbox_max[1], bbox_max[2]]),
-            "size": np.array([bbox_max[0] - bbox_min[0], 
-                            bbox_max[1] - bbox_min[1], 
-                            bbox_max[2] - bbox_min[2]])
+            "min": bbox_min_np,
+            "max": bbox_max_np,
+            "size": bbox_max_np - bbox_min_np,
         }
     
     def find_prims_by_name(self, root_path: str, name_patterns: List[str]) -> List[str]:
@@ -298,8 +315,9 @@ class GeometryAnalyzer:
 class ForkliftGeometryAnalyzer(GeometryAnalyzer):
     """叉车几何分析器"""
     
-    def __init__(self, env: Optional[ForkliftPalletInsertLiftEnv] = None):
-        super().__init__()
+    def __init__(self, env: Optional[ForkliftPalletInsertLiftEnv] = None,
+                 asset_scale: Tuple[float, float, float] = (1.0, 1.0, 1.0)):
+        super().__init__(asset_scale=asset_scale)
         self.env = env  # 环境实例，用于 body 投影法
     
     def extract_fork_dimensions(self, use_body_projection: bool = True) -> Optional[GeometryDimensions]:
@@ -809,11 +827,10 @@ class PalletGeometryAnalyzer(GeometryAnalyzer):
         box_max = bbox_range.GetMax()
         
         return {
-            "min": np.array([box_min[0], box_min[1], box_min[2]]),
-            "max": np.array([box_max[0], box_max[1], box_max[2]]),
-            "size": np.array([box_max[0] - box_min[0], 
-                            box_max[1] - box_min[1], 
-                            box_max[2] - box_min[2]])
+            "min": np.array([box_min[0], box_min[1], box_min[2]], dtype=np.float64) * self.asset_scale,
+            "max": np.array([box_max[0], box_max[1], box_max[2]], dtype=np.float64) * self.asset_scale,
+            "size": (np.array([box_max[0], box_max[1], box_max[2]], dtype=np.float64) -
+                     np.array([box_min[0], box_min[1], box_min[2]], dtype=np.float64)) * self.asset_scale,
         }
     
     def _analyze_mesh_layers(self, meshes: List[Dict], pallet_bbox: Dict) -> Optional[GeometryDimensions]:
@@ -1083,7 +1100,11 @@ def check_compatibility(fork_dims: GeometryDimensions, pallet_dims: GeometryDime
 
 
 class CollisionTester:
-    """碰撞测试器"""
+    """插入路径冒烟检查器。
+
+    当前检查通过 root pose 推进验证对齐后的插入路径是否连贯，
+    用于快速 sanity check，不等价于完整的动力学碰撞证明。
+    """
     
     def __init__(self, env: Optional[ForkliftPalletInsertLiftEnv] = None):
         self.env = env
@@ -1101,7 +1122,7 @@ class CollisionTester:
             self.cfg = self.env.cfg
             return True
         except Exception as e:
-            print(f"[错误] 碰撞测试环境初始化失败: {e}")
+            print(f"[错误] 插入路径检查环境初始化失败: {e}")
             import traceback
             traceback.print_exc()
             return False
@@ -1167,8 +1188,8 @@ class CollisionTester:
         self.env.actions[0] = 0.0
     
     def test_collision_insertion(self) -> Dict:
-        """测试理想对齐条件下的碰撞插入"""
-        print_section("碰撞测试：理想对齐插入测试")
+        """测试理想对齐条件下的插入路径连贯性。"""
+        print_section("插入路径冒烟检查：理想对齐插入测试")
         
         # 设置理想对齐位置
         self.set_robot_ideal_position(distance_from_front=0.5)
@@ -1226,7 +1247,7 @@ class CollisionTester:
                 collision_detected = True
                 collision_step = step
                 collision_pos = after_pos.clone()
-                print(f"\n[碰撞检测] 步数 {step}: 预期位移={expected_delta_x:.4f}m, 实际位移={actual_delta_x:.4f}m")
+                print(f"\n[路径阻塞] 步数 {step}: 预期位移={expected_delta_x:.4f}m, 实际位移={actual_delta_x:.4f}m")
                 print_info("碰撞位置", f"({after_pos[0]:.4f}, {after_pos[1]:.4f}, {after_pos[2]:.4f})")
                 print_info("货叉尖端位置", f"({after_tip[0]:.4f}, {after_tip[1]:.4f}, {after_tip[2]:.4f})")
                 break
@@ -1261,7 +1282,8 @@ class CollisionTester:
         return result
 
 
-def diagnose_usd_scale_and_units(stage, usd_path: str, asset_name: str):
+def diagnose_usd_scale_and_units(stage, usd_path: str, asset_name: str,
+                                 spawn_scale: Tuple[float, float, float] = (1.0, 1.0, 1.0)):
     """诊断 USD 文件的单位和缩放信息"""
     print_section(f"{asset_name} USD 单位与缩放诊断")
     
@@ -1271,8 +1293,10 @@ def diagnose_usd_scale_and_units(stage, usd_path: str, asset_name: str):
     
     # 获取 metersPerUnit
     meters_per_unit = UsdGeom.GetStageMetersPerUnit(stage)
+    scale_xyz = normalize_scale(spawn_scale)
     print_info("metersPerUnit", f"{meters_per_unit}")
     print_info("单位解释", f"1 USD 单位 = {meters_per_unit} 米 ({meters_per_unit * 100:.2f} cm)")
+    print_info("env spawn scale", f"({scale_xyz[0]:.3f}, {scale_xyz[1]:.3f}, {scale_xyz[2]:.3f})")
     
     # 获取根 prim 的缩放信息
     root_prim = stage.GetDefaultPrim()
@@ -1312,9 +1336,9 @@ def diagnose_usd_scale_and_units(stage, usd_path: str, asset_name: str):
         max_pt = bbox_range.GetMax()
         
         # 转换为米
-        size_m = [s * meters_per_unit for s in size]
-        min_m = [p * meters_per_unit for p in min_pt]
-        max_m = [p * meters_per_unit for p in max_pt]
+        size_m = [s * meters_per_unit * scale_xyz[i] for i, s in enumerate(size)]
+        min_m = [p * meters_per_unit * scale_xyz[i] for i, p in enumerate(min_pt)]
+        max_m = [p * meters_per_unit * scale_xyz[i] for i, p in enumerate(max_pt)]
         
         print(f"\n{asset_name} 整体边界框（已转换为米）:")
         print_info("尺寸 (X,Y,Z)", f"({size_m[0]:.4f}, {size_m[1]:.4f}, {size_m[2]:.4f}) m")
@@ -1351,12 +1375,16 @@ def main():
     print("叉车托盘几何兼容性验证")
     print("=" * 80)
     
-    # 加载USD文件
-    forklift_usd_path = f"{ISAAC_NUCLEUS_DIR}/Robots/IsaacSim/ForkliftC/forklift_c.usd"
-    pallet_usd_path = f"{ISAAC_NUCLEUS_DIR}/Props/Pallet/pallet.usd"
+    asset_cfg = build_validation_env_cfg(num_envs=1)
+    forklift_usd_path = str(asset_cfg.robot_cfg.spawn.usd_path)
+    pallet_usd_path = str(asset_cfg.pallet_cfg.spawn.usd_path)
+    forklift_scale = normalize_scale(getattr(asset_cfg.robot_cfg.spawn, "scale", None))
+    pallet_scale = normalize_scale(getattr(asset_cfg.pallet_cfg.spawn, "scale", None))
     
     print(f"\n叉车USD路径: {forklift_usd_path}")
     print(f"托盘USD路径: {pallet_usd_path}")
+    print_info("叉车 spawn scale", forklift_scale)
+    print_info("托盘 spawn scale", pallet_scale)
 
     try:
         shared_env = create_validation_env(num_envs=1)
@@ -1367,7 +1395,7 @@ def main():
         traceback.print_exc()
     
     # 分析叉车几何
-    forklift_analyzer = ForkliftGeometryAnalyzer(shared_env)
+    forklift_analyzer = ForkliftGeometryAnalyzer(shared_env, asset_scale=forklift_scale)
     if not forklift_analyzer.load_usd(forklift_usd_path):
         print("[错误] 无法加载叉车USD文件")
         if shared_env is not None:
@@ -1376,12 +1404,14 @@ def main():
         return
     
     # 诊断叉车 USD 单位与缩放
-    forklift_diag = diagnose_usd_scale_and_units(forklift_analyzer.stage, forklift_usd_path, "叉车")
+    forklift_diag = diagnose_usd_scale_and_units(
+        forklift_analyzer.stage, forklift_usd_path, "叉车", spawn_scale=forklift_scale
+    )
     
     fork_dims = forklift_analyzer.extract_fork_dimensions()
     
     # 分析托盘几何
-    pallet_analyzer = PalletGeometryAnalyzer()
+    pallet_analyzer = PalletGeometryAnalyzer(asset_scale=pallet_scale)
     if not pallet_analyzer.load_usd(pallet_usd_path):
         print("[错误] 无法加载托盘USD文件")
         if shared_env is not None:
@@ -1390,7 +1420,9 @@ def main():
         return
     
     # 诊断托盘 USD 单位与缩放
-    pallet_diag = diagnose_usd_scale_and_units(pallet_analyzer.stage, pallet_usd_path, "托盘")
+    pallet_diag = diagnose_usd_scale_and_units(
+        pallet_analyzer.stage, pallet_usd_path, "托盘", spawn_scale=pallet_scale
+    )
     
     pallet_dims = pallet_analyzer.extract_pocket_dimensions()
     
@@ -1451,6 +1483,8 @@ def main():
         print_info("插入孔高度", f"{pallet_dims.height:.2f} mm")
         print_info("插入孔深度", f"{pallet_dims.depth:.2f} mm")
         print_info("碰撞形状", pallet_dims.collision_type)
+        if pallet_dims.collision_type == "Single_Mesh_Estimate":
+            print_info("估算说明", "托盘为单Mesh资产，插入孔尺寸来自缩放后的比例估算，需结合物理验证解读")
         
         print("\n兼容性检查:")
         status_width = "✓" if compatibility.width_compatible else "✗"
@@ -1472,32 +1506,36 @@ def main():
         else:
             print("\n✓ 所有兼容性检查通过！")
     
-    # 碰撞测试
-    print_section("实际碰撞测试")
+    # 插入路径冒烟检查
+    print_section("插入路径冒烟检查")
     collision_tester = CollisionTester(shared_env)
     if collision_tester.initialize_environment():
         collision_result = collision_tester.test_collision_insertion()
         
-        print("\n碰撞测试结果:")
+        print("\n插入路径检查结果:")
         status_collision = "✗" if collision_result["collision_detected"] else "✓"
         status_insertion = "✓" if collision_result["insertion_successful"] else "✗"
         
-        print_info(f"[{status_collision}] 碰撞检测", 
-                  "检测到碰撞" if collision_result["collision_detected"] else "未检测到碰撞")
+        print_info(
+            f"[{status_collision}] 路径阻塞",
+            "检测到明显阻塞/推进受限" if collision_result["collision_detected"] else "未检测到明显阻塞",
+        )
         if collision_result["collision_detected"]:
             print_info("碰撞步数", collision_result["collision_step"])
             if collision_result["collision_pos"] is not None:
                 pos = collision_result["collision_pos"]
                 print_info("碰撞位置", f"({pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f})")
         
-        print_info(f"[{status_insertion}] 插入成功", 
-                  "成功插入" if collision_result["insertion_successful"] else "插入失败")
+        print_info(
+            f"[{status_insertion}] 插入到位",
+            "路径推进达到插入判据" if collision_result["insertion_successful"] else "路径推进未达到插入判据",
+        )
         print_info("最终距离托盘前部", f"{collision_result['final_dist_to_front']:.4f}m")
         print_info("总位移", f"{collision_result['total_displacement']:.4f}m")
         
     else:
-        script_errors.append("碰撞测试环境未能成功初始化")
-        print("[错误] 跳过碰撞测试：环境初始化失败")
+        script_errors.append("插入路径检查环境未能成功初始化")
+        print("[错误] 跳过插入路径检查：环境初始化失败")
     
     # 生成最终报告和建议
     print_section("诊断报告和建议")
@@ -1508,7 +1546,7 @@ def main():
     if all_compatible and insertion_ok:
         print("\n✓ 几何兼容性验证通过！")
         print("  - 货叉尺寸与托盘插入孔兼容")
-        print("  - 实际碰撞测试中成功插入")
+        print("  - 插入路径冒烟检查中可推进到插入判据")
         print("\n建议:")
         print("  - 可以继续进行RL训练")
         print("  - 如果训练中仍有问题，可能是控制策略或奖励函数的问题")
@@ -1520,9 +1558,9 @@ def main():
                 for issue in compatibility.issues:
                     print(f"    • {issue}")
         if not insertion_ok:
-            print("  - 实际碰撞测试中插入失败")
+            print("  - 插入路径冒烟检查未达到插入判据")
             if collision_result.get("collision_detected"):
-                print("    • 检测到碰撞阻止插入")
+                print("    • 检测到明显阻塞/推进受限")
         
         print("\n可能的修复方案:")
         print("  1. 调整碰撞形状：使用更简化的碰撞形状（Box vs Mesh）")
@@ -1530,6 +1568,10 @@ def main():
         print("  3. 修改USD文件：如果有权限，修改碰撞mesh或几何尺寸")
         print("  4. 禁用特定碰撞：使用碰撞过滤排除货叉-托盘碰撞")
         print("  5. 检查USD文件中的实际几何尺寸，确认是否与预期一致")
+
+    print("\n说明:")
+    print("  - 本脚本现已读取 env_cfg 中真实使用的 forklift/pallet 资产路径与 spawn.scale。")
+    print("  - 若托盘资产仍为单Mesh，插入孔尺寸属于估算值，最终应以 success/physics 类验证为准。")
     
     if script_errors:
         print("\n[脚本级错误]")

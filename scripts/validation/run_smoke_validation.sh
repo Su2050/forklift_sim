@@ -211,7 +211,7 @@ run_case() {
 }
 
 run_case "verify_geometry_compatibility" "0" "assets/verify_geometry_compatibility.py"
-run_case "verify_joint_axes" "1" "physics/verify_joint_axes.py"
+run_case "verify_joint_axes" "0" "physics/verify_joint_axes.py"
 if [[ "${SKIP_YAW}" != "1" ]]; then
     run_case "eval_yaw_reachability" "0" "physics/eval_yaw_reachability.py" \
         --yaw_angles "${YAW_ANGLES}" \
