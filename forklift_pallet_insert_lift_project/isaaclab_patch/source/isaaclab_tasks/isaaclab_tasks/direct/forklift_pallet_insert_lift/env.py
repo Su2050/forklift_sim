@@ -437,6 +437,7 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self._fork_tip_z0 = torch.zeros((self.num_envs,), device=self.device)
         # S1.0O-C2: 使用 float 以支持衰减（原 S1.0N 为 int32）
         self._hold_counter = torch.zeros((self.num_envs,), dtype=torch.float32, device=self.device)
+        self._last_hold_entry = torch.zeros((self.num_envs,), dtype=torch.bool, device=self.device)
         self._lift_pos_target = torch.zeros((self.num_envs,), device=self.device)
 
         # ---- 实验 B: 论文原生 Reward 缓存 ----
@@ -1033,10 +1034,10 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         if self._stage_1_mode:
             lift_v = torch.zeros_like(lift_v)
 
-        # two-stage safety: if already inserted enough, suppress driving and let it lift
-        inserted = self._last_insert_depth >= self._insert_thresh
-        drive = torch.where(inserted, torch.zeros_like(drive), drive)
-        steer = torch.where(inserted, torch.zeros_like(steer), steer)
+        # 只有上一拍已经进入 hold 几何时才冻结 drive/steer。
+        # 这样“已经插进去但还没对正”的状态仍保留最后微调空间，不会被过早锁死。
+        drive = torch.where(self._last_hold_entry, torch.zeros_like(drive), drive)
+        steer = torch.where(self._last_hold_entry, torch.zeros_like(steer), steer)
 
         # set targets
         # wheels: velocity targets
@@ -1177,16 +1178,23 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
 
     def _exp83_rg_mask(
         self,
-        dist_center_family: torch.Tensor,
-        tip_y_err: torch.Tensor,
+        *,
+        center_y_err: torch.Tensor,
         yaw_err_deg: torch.Tensor,
+        insert_depth: torch.Tensor,
+        tip_y_err: torch.Tensor,
+        dist_front: torch.Tensor,
+        valid_insert_z: torch.Tensor,
     ) -> torch.Tensor:
-        """当前 family 下的 rg 掩码。"""
-        return (
-            (dist_center_family < self.cfg.paper_rg_dist_thresh) &
-            (tip_y_err < 0.20) &
-            (yaw_err_deg < 15.0)
+        """与 hold/success 同源的 arrival 几何掩码。"""
+        align_entry = (
+            (center_y_err <= self.cfg.max_lateral_err_m)
+            & (yaw_err_deg <= self.cfg.max_yaw_err_deg)
         )
+        insert_entry = insert_depth >= self._insert_thresh
+        tip_gate_active = dist_front <= self.cfg.tip_align_near_dist
+        tip_entry = (~tip_gate_active) | (tip_y_err <= self.cfg.tip_align_entry_m)
+        return insert_entry & valid_insert_z & align_entry & tip_entry
 
     def _exp83_out_of_bounds_mask(self, dist_center_family: torch.Tensor) -> torch.Tensor:
         """当前 family 下的 out_of_bounds 掩码。"""
@@ -1487,9 +1495,21 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
             )
             tip_xy = probe_center_xy + 0.6 * u_in
             v_lat = torch.stack([-u_in[:, 1], u_in[:, 0]], dim=-1)
+            center_y_err = torch.abs(torch.sum((probe_center_xy - pallet_pos_xy) * v_lat, dim=-1))
             tip_y_err = torch.abs(torch.sum((tip_xy - pallet_pos_xy) * v_lat, dim=-1))
             yaw_err_deg = torch.zeros_like(dist_center_family)
-            rg = self._exp83_rg_mask(dist_center_family, tip_y_err, yaw_err_deg)
+            s_front = -0.5 * float(self.cfg.pallet_depth_m)
+            s_tip = torch.sum((tip_xy - pallet_pos_xy) * u_in, dim=-1)
+            insert_depth = torch.clamp(s_tip - s_front, min=0.0)
+            dist_front = torch.clamp(s_front - s_tip, min=0.0)
+            rg = self._exp83_rg_mask(
+                center_y_err=center_y_err,
+                yaw_err_deg=yaw_err_deg,
+                insert_depth=insert_depth,
+                tip_y_err=tip_y_err,
+                dist_front=dist_front,
+                valid_insert_z=torch.ones_like(dist_center_family, dtype=torch.bool),
+            )
             out_of_bounds = self._exp83_out_of_bounds_mask(dist_center_family)
             r_d = torch.clip(1.0 / (dist_center_family + 1e-5), 0.0, self.cfg.paper_reward_max)
             return dist_center_family, rg, out_of_bounds, r_d
@@ -1502,8 +1522,8 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         expected_alt_dist = abs(s_alt - s_family)
         expected_traj_dist = abs(s_traj - s_family)
         expected_oob_dist = float(self.cfg.paper_out_of_bounds_dist) + probe_margin
-        expected_alt_rg = expected_alt_dist < float(self.cfg.paper_rg_dist_thresh)
-        expected_traj_rg = expected_traj_dist < float(self.cfg.paper_rg_dist_thresh)
+        expected_alt_rg = True
+        expected_traj_rg = s_traj >= self._exp83_success_center_s()
 
         fail_mask = (
             (family_dist > eps_m) |
@@ -1860,6 +1880,9 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
 
         # 举升
         lift_height = tip[:, 2] - self._fork_tip_z0
+        pallet_lift_height = pallet_pos[:, 2] - self.cfg.pallet_cfg.init_state.pos[2]
+        z_err = torch.abs(lift_height - pallet_lift_height)
+        valid_insert_z = z_err < self.cfg.max_insert_z_err
 
         # 沿托盘插入轴的标量坐标
         rel_tip = tip[:, :2] - pallet_pos[:, :2]
@@ -1875,6 +1898,26 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         # ---- 成功/hold 诊断口径（fork center frame）----
         rel_fc = fork_center[:, :2] - pallet_pos[:, :2]
         center_y_err = torch.abs(torch.sum(rel_fc * v_lat, dim=-1))
+        hold_state = compute_hold_logic(
+            center_y_err=center_y_err,
+            yaw_err_deg=yaw_err_deg,
+            insert_depth=insert_depth,
+            lift_height=lift_height,
+            tip_y_err=tip_y_err,
+            dist_front=dist_front,
+            hold_counter=self._hold_counter,
+            cfg=self._hold_logic_cfg,
+        )
+        success_geom_strict = (
+            hold_state.insert_entry
+            & valid_insert_z
+            & hold_state.align_entry
+            & hold_state.tip_entry
+        )
+        lifted_enough = lift_height >= self.cfg.lift_delta_m
+        success_strict = success_geom_strict & lifted_enough
+        success_next = hold_state.hold_counter_next >= self._hold_steps
+        time_out = self.episode_length_buf >= self.max_episode_length - 1
 
         # ---- 实验 B: 论文原生 Reward 计算 ----
         
@@ -2023,8 +2066,8 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
             r_preinsert_align = torch.zeros_like(insert_norm)
             r_preinsert_retreat = torch.zeros_like(insert_norm)
 
-        # rg: 到达奖励 (当叉臂中心距离托盘中心很近，且姿态对准时)
-        rg = self._exp83_rg_mask(dist_center_family, tip_y_err, yaw_err_deg).float()
+        # rg: 与 hold/success 同源的“已进入可成功几何”奖励
+        rg = success_geom_strict.float()
 
         # r_lift: 举升奖励 (纯 approach 阶段设为 0)
         lift_height_joint = self._joint_pos[:, self._lift_id]
@@ -2089,9 +2132,13 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
             r_dirty_insert +
             r_preinsert_retreat
         )
-        
+
+        r_success = success_next.float() * self.cfg.rew_success
+        r_success_time = success_next.float() * self.cfg.rew_success_time
+        r_timeout = (~success_next & time_out).float() * self.cfg.rew_timeout
+
         # 4. 总奖励
-        rew = R_plus + R_minus
+        rew = R_plus + R_minus + r_success + r_success_time + r_timeout
         
         # 清除首步标记
         self._is_first_step[:] = False
@@ -2101,36 +2148,22 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         # ==================================================================
         
         # 更新持有时长计数器 (用于 success 判断)
-        hold_state = compute_hold_logic(
-            center_y_err=center_y_err,
-            yaw_err_deg=yaw_err_deg,
-            insert_depth=insert_depth,
-            lift_height=lift_height,
-            tip_y_err=tip_y_err,
-            dist_front=dist_front,
-            hold_counter=self._hold_counter,
-            cfg=self._hold_logic_cfg,
-        )
         self._hold_counter = hold_state.hold_counter_next
+        self._last_hold_entry = hold_state.hold_entry
 
         # 仅做诊断：更严格的成功口径，不改变当前训练正在使用的 success / done。
-        pallet_lift_height = pallet_pos[:, 2] - self.cfg.pallet_cfg.init_state.pos[2]
-        z_err = torch.abs(lift_height - pallet_lift_height)
         is_inserted = hold_state.insert_entry
-        is_inserted_z_valid = is_inserted & (z_err < self.cfg.max_insert_z_err)
+        is_inserted_z_valid = is_inserted & valid_insert_z
         is_center_aligned_cfg = hold_state.align_entry
         is_near_field = hold_state.tip_gate_active
         is_tip_aligned_near = hold_state.tip_gate_active & hold_state.tip_entry
         is_tip_constraint_ok = hold_state.tip_entry
         is_aligned = hold_state.align_entry
-        lifted_enough = lift_height >= self.cfg.lift_delta_m
         
         # 与 _get_dones 共用的终止掩码（用于 Exp8.3 诊断日志）
         tipped, success, out_of_bounds = self._termination_masks()
 
         # 记录 push-free success (成功且托盘位移小)
-        success_geom_strict = is_inserted_z_valid & is_center_aligned_cfg & is_tip_constraint_ok
-        success_strict = success_geom_strict & lifted_enough
         push_free_success_strict = success_strict & push_free
         max_hold_counter = self._hold_counter.max()
 
@@ -2185,6 +2218,9 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self.extras["log"]["paper_reward/r_preinsert_align"] = r_preinsert_align.mean()
         self.extras["log"]["paper_reward/r_preinsert_retreat"] = r_preinsert_retreat.mean()
         self.extras["log"]["paper_reward/rg"] = rg.mean()
+        self.extras["log"]["paper_reward/r_success"] = r_success.mean()
+        self.extras["log"]["paper_reward/r_success_time"] = r_success_time.mean()
+        self.extras["log"]["paper_reward/r_timeout"] = r_timeout.mean()
         self.extras["log"]["paper_reward/r_lift"] = r_lift.mean()
         self.extras["log"]["paper_reward/rp"] = rp.mean()
         self.extras["log"]["paper_reward/rv"] = rv.mean()
@@ -2311,6 +2347,7 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self.actions[env_ids] = 0.0
         self._last_insert_depth[env_ids] = 0.0
         self._hold_counter[env_ids] = 0
+        self._last_hold_entry[env_ids] = False
         self._is_first_step[env_ids] = True
         self._lift_pos_target[env_ids] = 0.0
         self._milestone_flags[env_ids] = False

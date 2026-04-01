@@ -261,10 +261,11 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     # - front: 轨迹终点停在托盘前沿中心（B0′ 基线）
     # - success_center: 轨迹 terminal geometry package 平移到 success 等效 fork_center 深度（G1）
     exp83_traj_goal_mode: str = "front"
-    # Exp8.3 target_center family：
-    # - front_center: r_d / rg / done侧 out_of_bounds 保持 legacy target_center
-    # - success_center: r_d + rg + done侧 out_of_bounds 统一到 success 等效 fork_center 深度（G2b / G3）
-    exp83_target_center_family_mode: str = "front_center"
+    # Exp9.0: 主引导奖励、arrival 奖励与 out_of_bounds 默认统一到 success 几何，
+    # 避免“平时追一个点，最终 success 看另一个点”的目标错位。
+    # - front_center: 保留 legacy target_center
+    # - success_center: 统一到 success 等效 fork_center 深度
+    exp83_target_center_family_mode: str = "success_center"
     # Exp8.3 runtime U0（真实 env 路径）：
     # - enable=true 时，在 reset 后立即验证 traj 起终点、d_traj 与 yaw 对齐
     # - 推荐仅在 sanity run 中开启，不常驻正式长训
