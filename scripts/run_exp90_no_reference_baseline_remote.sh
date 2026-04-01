@@ -44,7 +44,9 @@ print(f"[INFO] rsl-rl-lib={metadata.version('rsl-rl-lib')}")
 PY
 
 mkdir -p "$LOG_DIR"
-export TERM="${TERM:-xterm}"
+if [[ -z "${TERM:-}" || "${TERM}" == "dumb" ]]; then
+  export TERM="xterm"
+fi
 
 bash "$ROOT/forklift_pallet_insert_lift_project/scripts/install_into_isaaclab.sh" "$ISAACLAB_DIR"
 
