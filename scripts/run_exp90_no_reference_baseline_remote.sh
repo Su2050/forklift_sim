@@ -3,6 +3,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ISAACLAB_DIR="${ISAACLAB_DIR:-/home/uniubi/projects/forklift_sim/IsaacLab}"
+ISAACLAB_PARENT="$(cd "${ISAACLAB_DIR}/.." && pwd)"
+ASSET_DST_DIR="${ASSET_DST_DIR:-${ISAACLAB_PARENT}/assets}"
 CONDA_BASE="${CONDA_BASE:-/home/uniubi/miniconda3}"
 CONDA_ENV_PATH="${CONDA_ENV_PATH:-${CONDA_BASE}/envs/env_isaaclab}"
 LOG_DIR="${LOG_DIR:-$ROOT/logs}"
@@ -28,6 +30,10 @@ if [[ ! -d "${ISAACLAB_DIR}/source/isaaclab_tasks/isaaclab_tasks" ]]; then
   echo "[FATAL] invalid IsaacLab checkout: ${ISAACLAB_DIR}" >&2
   exit 2
 fi
+if [[ ! -d "${ROOT}/assets" ]]; then
+  echo "[FATAL] missing source assets directory: ${ROOT}/assets" >&2
+  exit 2
+fi
 
 # Activate the known-good remote runtime instead of relying on the login shell.
 # This host currently runs IsaacLab via the conda env, not via _isaac_sim/python.sh.
@@ -47,6 +53,10 @@ mkdir -p "$LOG_DIR"
 if [[ -z "${TERM:-}" || "${TERM}" == "dumb" ]]; then
   export TERM="xterm"
 fi
+
+mkdir -p "${ASSET_DST_DIR}"
+rsync -a "${ROOT}/assets/" "${ASSET_DST_DIR}/"
+echo "[INFO] Synced assets -> ${ASSET_DST_DIR}"
 
 bash "$ROOT/forklift_pallet_insert_lift_project/scripts/install_into_isaaclab.sh" "$ISAACLAB_DIR"
 
@@ -93,6 +103,7 @@ CMD=(
 
 echo "[INFO] Repo root: $ROOT"
 echo "[INFO] IsaacLab: $ISAACLAB_DIR"
+echo "[INFO] Asset dir: $ASSET_DST_DIR"
 echo "[INFO] Conda env: $CONDA_ENV_PATH"
 echo "[INFO] Log: $LOG"
 echo "[INFO] Seed: $SEED"
