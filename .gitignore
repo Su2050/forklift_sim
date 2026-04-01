@@ -71,3 +71,9 @@ logs/
 .Trash-*
 .directory
 expert_dataset_*.h5
+
+# Generated diagnostics and validation artifacts
+output/
+outputs/validation/
+outputs/exp90_no_reference_monitor/
+docs/diagnostic_assets/actual_network_input.png
