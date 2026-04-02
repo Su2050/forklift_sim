@@ -1930,7 +1930,7 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         pallet_init_pos_xy = torch.tensor(self.cfg.pallet_cfg.init_state.pos[:2], device=self.device)
         pallet_disp_xy = torch.norm(pallet_pos[:, :2] - pallet_init_pos_xy, dim=-1)
         push_free = pallet_disp_xy < self.cfg.push_free_disp_thresh_m
-        inserted_push_free_reward = (insert_depth >= self._insert_thresh) & push_free
+        inserted_push_free_reward = hold_state.hold_entry & push_free  # O2b: was (insert_depth >= self._insert_thresh)
 
         use_reference_trajectory = bool(getattr(self.cfg, "use_reference_trajectory", True))
         if use_reference_trajectory:
