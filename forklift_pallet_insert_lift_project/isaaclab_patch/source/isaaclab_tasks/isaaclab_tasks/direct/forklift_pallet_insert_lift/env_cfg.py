@@ -472,6 +472,10 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     tip_align_entry_m: float = 0.12        # tip_y_err <= this to enter hold (near-field)
     tip_align_exit_m: float = 0.16         # Schmitt exit: tip_y_err > this breaks hold
     tip_align_near_dist: float = 2.2       # tip constraint only active below this dist
+    # Exp9.0 diagnostic only: relaxed pre-hold reachable band for logging.
+    # This does not change hold/success logic; it only measures how often policy reaches
+    # the "0.12 < tip_y_err <= band" corridor while all other strict hold conditions are met.
+    prehold_reachable_tip_band_m: float = 0.17
 
     # ---- 实验 B: 去过度设计版论文原生 Reward ----
     # 正向奖励权重 (Positive Reward R+)
