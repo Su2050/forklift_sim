@@ -2066,7 +2066,7 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
             r_preinsert_align = torch.zeros_like(insert_norm)
             r_preinsert_retreat = torch.zeros_like(insert_norm)
 
-        # O2: post-insert lateral/tip dense shaping
+        # O2/O3: post-insert lateral/tip/yaw dense shaping
         if self.cfg.postinsert_align_enable:
             postinsert_active = (insert_depth >= self._insert_thresh).float()
             center_y_shaping = torch.exp(
@@ -2079,9 +2079,13 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
                 ),
                 torch.ones_like(tip_y_err),
             )
+            yaw_shaping = torch.exp(
+                -(yaw_err_deg / max(self.cfg.postinsert_yaw_sigma_deg, 1e-6)) ** 2
+            )
             r_postinsert_align = postinsert_active * self.cfg.postinsert_align_weight * (
                 self.cfg.postinsert_center_weight * center_y_shaping
                 + self.cfg.postinsert_tip_weight * tip_y_shaping
+                + self.cfg.postinsert_yaw_weight * yaw_shaping
             )
         else:
             r_postinsert_align = torch.zeros_like(insert_norm)

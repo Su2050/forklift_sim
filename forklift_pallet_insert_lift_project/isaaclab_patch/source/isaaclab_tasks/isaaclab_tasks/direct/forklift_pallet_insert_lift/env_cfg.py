@@ -214,13 +214,15 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     preinsert_delta_clip_yaw_deg: float = 1.5
     preinsert_delta_clip_dist_m: float = 0.05
 
-    # ---- O2: post-insert lateral/tip dense shaping ----
+    # ---- O2/O3: post-insert lateral/tip/yaw dense shaping ----
     postinsert_align_enable: bool = False
     postinsert_align_weight: float = 3.0
     postinsert_center_sigma_m: float = 0.20
     postinsert_tip_sigma_m: float = 0.15
     postinsert_center_weight: float = 1.0
     postinsert_tip_weight: float = 1.0
+    postinsert_yaw_sigma_deg: float = 10.0
+    postinsert_yaw_weight: float = 0.5
 
     # ---- 防作弊与终局优化 ----
     max_insert_z_err: float = 0.4       # 最大允许的货叉与托盘高度差（防止隔空飞越作弊）
