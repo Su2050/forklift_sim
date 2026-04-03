@@ -8,7 +8,7 @@ fi
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd "${SCRIPT_DIR}/../.." && pwd)
-ISAACLAB_ROOT="${REPO_ROOT}/IsaacLab"
+ISAACLAB_ROOT="${ISAACLAB_DIR:-/home/uniubi/projects/forklift_sim/IsaacLab}"
 LOG_DIR="${REPO_ROOT}/outputs/validation/manual_runs"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 YAW_ANGLES="0.5,2.0,5.0"
@@ -178,7 +178,7 @@ run_case() {
     local script_rel="$3"
     shift 3
     local log_path="${LOG_DIR}/${TIMESTAMP}_${name}.log"
-    local -a cmd=(./isaaclab.sh -p "../scripts/validation/${script_rel}" --headless)
+    local -a cmd=(./isaaclab.sh -p "${REPO_ROOT}/scripts/validation/${script_rel}" --headless)
 
     if [[ "${needs_cameras}" == "1" ]]; then
         cmd+=(--enable_cameras)

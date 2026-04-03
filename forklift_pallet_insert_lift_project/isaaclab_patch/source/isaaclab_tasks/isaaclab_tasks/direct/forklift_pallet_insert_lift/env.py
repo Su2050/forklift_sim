@@ -2199,14 +2199,26 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         inserted_push_free = is_inserted & push_free
         clean_insert_ready = is_inserted & is_center_aligned_cfg & is_tip_constraint_ok & push_free
         dirty_insert = is_inserted & ~push_free
-        prehold_reachable_band = (
+        prehold_reachable_common = (
             is_inserted
             & is_center_aligned_cfg
             & hold_state.lift_entry
             & valid_insert_z
             & hold_state.tip_gate_active
+        )
+        prehold_reachable_strict_ref = (
+            prehold_reachable_common
+            & (tip_y_err <= self.cfg.prehold_reachable_strict_tip_ref_m)
+        )
+        prehold_reachable_band = (
+            prehold_reachable_common
             & (tip_y_err <= self.cfg.prehold_reachable_tip_band_m)
-            & (~hold_state.hold_entry)
+            & (~prehold_reachable_strict_ref)
+        )
+        prehold_reachable_band_companion = (
+            prehold_reachable_common
+            & (tip_y_err <= self.cfg.prehold_reachable_tip_band_companion_m)
+            & (~prehold_reachable_strict_ref)
         )
         inserted_center_lateral_mean = _masked_mean(center_y_err, is_inserted)
         inserted_tip_lateral_mean = _masked_mean(tip_y_err, is_inserted)
@@ -2216,6 +2228,9 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         clean_align_gate_inserted_mean = _masked_mean(clean_align_gate, is_inserted)
         clean_push_gate_inserted_mean = _masked_mean(clean_push_gate, is_inserted)
         prehold_reachable_band_frac_of_inserted = _masked_mean(prehold_reachable_band.float(), is_inserted)
+        prehold_reachable_band_companion_frac_of_inserted = _masked_mean(
+            prehold_reachable_band_companion.float(), is_inserted
+        )
 
         if "log" not in self.extras:
             self.extras["log"] = {}
@@ -2286,8 +2301,15 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self.extras["log"]["diag/clean_insert_gate_inserted_mean"] = clean_insert_gate_inserted_mean
         self.extras["log"]["diag/clean_align_gate_inserted_mean"] = clean_align_gate_inserted_mean
         self.extras["log"]["diag/clean_push_gate_inserted_mean"] = clean_push_gate_inserted_mean
+        self.extras["log"]["diag/prehold_reachable_strict_tip_ref_m"] = float(self.cfg.prehold_reachable_strict_tip_ref_m)
         self.extras["log"]["diag/prehold_reachable_tip_band_m"] = float(self.cfg.prehold_reachable_tip_band_m)
+        self.extras["log"]["diag/prehold_reachable_tip_band_companion_m"] = float(
+            self.cfg.prehold_reachable_tip_band_companion_m
+        )
         self.extras["log"]["diag/prehold_reachable_band_frac_of_inserted"] = prehold_reachable_band_frac_of_inserted
+        self.extras["log"]["diag/prehold_reachable_band_companion_frac_of_inserted"] = (
+            prehold_reachable_band_companion_frac_of_inserted
+        )
         self.extras["log"]["diag/preinsert_active_frac"] = preinsert_active.mean()
         self.extras["log"]["diag/preinsert_y_delta_mean"] = y_delta.mean()
         self.extras["log"]["diag/preinsert_yaw_delta_mean"] = yaw_delta.mean()
@@ -2305,6 +2327,9 @@ class ForkliftPalletInsertLiftEnv(DirectRLEnv):
         self.extras["log"]["phase/frac_tip_aligned_near"] = is_tip_aligned_near.float().mean()
         self.extras["log"]["phase/frac_tip_constraint_ok"] = is_tip_constraint_ok.float().mean()
         self.extras["log"]["phase/frac_prehold_reachable_band"] = prehold_reachable_band.float().mean()
+        self.extras["log"]["phase/frac_prehold_reachable_band_companion"] = (
+            prehold_reachable_band_companion.float().mean()
+        )
         self.extras["log"]["phase/frac_clean_insert_ready"] = clean_insert_ready.float().mean()
         self.extras["log"]["phase/frac_hold_entry"] = hold_state.hold_entry.float().mean()
         self.extras["log"]["phase/grace_zone_frac"] = hold_state.grace_zone.float().mean()
