@@ -93,8 +93,8 @@ class ForkliftPalletInsertLiftEnvCfg(DirectRLEnvCfg):
     # - x ∈ [-2.5, -1.0]
     # - y ∈ [-0.6, 0.6]
     # - yaw ∈ [-0.25, 0.25] rad ≈ ±14.3239 deg
-    stage1_init_x_min_m: float = -2.5
-    stage1_init_x_max_m: float = -1.0
+    stage1_init_x_min_m: float = -4.0
+    stage1_init_x_max_m: float = -3.0
     stage1_init_y_min_m: float = -0.6
     stage1_init_y_max_m: float = 0.6
     stage1_init_yaw_deg_min: float = -14.32394487827058
